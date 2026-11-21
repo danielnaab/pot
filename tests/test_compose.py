@@ -1,6 +1,6 @@
-"""Unit tests for pot's composition (pot/core/compose.py): identity, normalisation, digests,
+"""Unit tests for pot's composition (core/compose.py): identity, normalisation, digests,
 grants, merge rules, contexts, and policy.json v1's shape. Run from `nix flake check` (pot-unit), or
-here: cd pot/core && python3 -m unittest discover -s ../tests -t ."""
+here: cd core && python3 -m unittest discover -s ../tests -t ."""
 import copy
 import json
 import unittest
@@ -14,7 +14,7 @@ def root(**kw):
     r = {"version": 1, "name": "t", "grantsFile": "/state/grants.json", "stateDir": "/state/pot", "kits": {},
          "contexts": {}, "hidden": [], "standard": ["/nix/store/aaa-bash"], "tools": [], "rootRepos": [],
          "repoKits": {}, "bindings": {}, "defaultContext": "work",
-         # root.nix's floor (pot/nix/root.nix): agents' folders and credential stores
+         # root.nix's floor (nix/root.nix): agents' folders and credential stores
          "baseHidden": ["~/.claude", "~/.claude.json", "~/.pi/agent/auth.json", "~/.codex/auth.json",
                         "~/.local/share/opencode/auth.json"],
          "baseProtect": ["**/.claude", "**/.pi", "**/.codex"], "agentMarkers": ["CODEX_SANDBOX"],
@@ -702,7 +702,7 @@ class Kit11(unittest.TestCase):
             C.validate_kit({"version": 1.1}, "k", HOME)
 
     def test_marker_floor(self):
-        # the floor is the root's (pot/nix data), whatever kits it has
+        # the floor is the root's (nix/ data), whatever kits it has
         self.assertEqual(C.agent_markers({"baseAgentMarkers": ["CODEX_SANDBOX", "CLAUDECODE"], "kits": {}}),
                          ["CODEX_SANDBOX", "CLAUDECODE", "POT"])
 

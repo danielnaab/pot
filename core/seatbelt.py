@@ -63,7 +63,7 @@ Stop = B.Stop
 # (sandbox-defaults.sb), OpenAI codex's seatbelt_base_policy.sbpl and Anthropic's sandbox-runtime, after
 # Chromium's mac/common.sb.
 BASE = r'''(version 1)
-; pot's Seatbelt profile (pot/core/seatbelt.py), written at start from the run's policy.json
+; pot's Seatbelt profile (core/seatbelt.py), written at start from the run's policy.json
 (deny default)
 
 ; processes: its own; no process-info and no signal toward a process outside the sandbox

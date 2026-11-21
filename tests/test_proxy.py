@@ -1,4 +1,4 @@
-"""pot's proxy (pot/core/proxy.py): the host's loopback is never reached (F1, v2.19.0). A name is resolved once, every
+"""pot's proxy (core/proxy.py): the host's loopback is never reached (F1, v2.19.0). A name is resolved once, every
 address it has is checked, and the connection goes to a checked address, so a name that resolves to loopback (the
 host's own name, localhost., a rebinding name) is refused like a loopback literal."""
 import asyncio

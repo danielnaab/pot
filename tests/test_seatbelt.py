@@ -1,4 +1,4 @@
-"""The Seatbelt backend's pure parts (pot/core/seatbelt.py): its links never go through a planted link (P3),
+"""The Seatbelt backend's pure parts (core/seatbelt.py): its links never go through a planted link (P3),
 where a ~/ entry lands, the run's folder in the command's arguments, and the profile's parameters. Runs on any
 system: sandbox-exec itself is tested by tests/run.sh on macOS (pot_seatbelt)."""
 import os

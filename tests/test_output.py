@@ -3,7 +3,7 @@ shaped like a real one (three claude-code instances, a standing kit `daniel`, a 
 texts in output/. A change of wording or layout shows here as a diff; never rewrite a golden file to
 make the test pass without reading what changed (POT_GOLDEN_WRITE=1 writes them, for a reviewed change).
 
-Run from `nix flake check` (pot-unit), or: cd pot/core && python3 -m unittest discover -s ../tests -t ../tests"""
+Run from `nix flake check` (pot-unit), or: cd core && python3 -m unittest discover -s ../tests -t ../tests"""
 import io
 import contextlib
 import os
