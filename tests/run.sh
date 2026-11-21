@@ -2094,6 +2094,8 @@ EOF
   local c=$work/nc && mkdir -p "$c" && git_ -C "$c" init -q && cd "$c"
   cat > flake.nix <<EOF
 {
+  # the submodule's kit.nix is in the flake's source (a git flake leaves submodules out without it; pot builds path:)
+  inputs.self.submodules = true;
   inputs.pot.url = "path:$pot";
   outputs = { pot, ... }: let
     pkgs = pot.inputs.nixpkgs.legacyPackages.$sys;
