@@ -37,8 +37,10 @@ The rest of a run's environment is described in pot's reference
 
 ### policy.json, version 1
 
-The shape is frozen. Its top-level fields never change. Within version 1, a release adds values, and may add an
-optional key to an item, never remove or rename one.
+Its own contract is [policy.json/1](policy-1.md): every field, which ones a backend enforces, a JSON Schema and
+fixtures. This section is what a program in a run needs from it. The shape is frozen. Its top-level fields never
+change. Within version 1, a release adds values; a new field, an item's key included, is a new version (until
+policy.json/1, this section let a release add an optional key to an item).
 
 ```json
 {
@@ -133,8 +135,8 @@ fetch.
 
 ## Compatibility
 
-- **Readers ignore what they do not know:** a new guarantee, item kind, source or capability name, and an item
-  key that a later release adds. They may rely on the top-level fields, which never change in version 1.
+- **Readers ignore what they do not know:** a new guarantee, item kind, source or capability name. (A backend
+  refuses instead: [policy.json/1](policy-1.md#for-backend-authors).) They may rely on the top-level fields, which never change in version 1.
 - **Variables are added, never renamed,** within version 1. v2.14.0's `GRAFT_SANDBOX*` names are not set, and no
   kit may set them.
 - A program that wants to know whether it is in a run tests `POT`. One that wants to know whether something is
@@ -145,4 +147,5 @@ fetch.
 - [core/pot.py](../core/pot.py): the run's environment, `why_json`, `reach_of`
 - [core/compose.py](../core/compose.py): the policy and its sources
 - [graft's lib/common.sh at v2.21.0](https://github.com/danielnaab/graft/blob/v2.21.0/lib/common.sh): `pot_reaches`, a reader's question
+- [policy.json/1](policy-1.md): the policy's own contract
 - [pot's reference: policy.json](../docs/reference/pot.md#policyjson)

@@ -928,8 +928,8 @@ a hook command, its two git variables, with its standard input, output and error
 
 At start, `pot` composes the run's policy from manifests, grants, flags and host facts, and writes it as
 `policy.json`, version 1. Inside the run it is `/run/pot/policy.json`, read-only, and
-`POT_POLICY` names it. It is part of the contract [run-env/1](../../contracts/run-env-1.md), which lists every
-value of an item's `sources`. pot's own defaults are `{ "root": "default" }` (v2.15.0 wrote `{ "root": "graft" }`).
+`POT_POLICY` names it. Its contract is [policy.json/1](../../contracts/policy-1.md) (every field, what a backend
+enforces, a schema and fixtures); [run-env/1](../../contracts/run-env-1.md) is what a program in the run sees. pot's own defaults are `{ "root": "default" }` (v2.15.0 wrote `{ "root": "graft" }`).
 To ask whether a run reaches a host or URL, use `pot why TARGET --json` rather than reading the items.
 
 ```json
@@ -961,7 +961,7 @@ To ask whether a run reaches a host or URL, use `pot why TARGET --json` rather t
 | `children` | The run's [children table](#siblings-and-the-children-table): for each command it may start, `how` (`exec` or `sibling`; `nest` until v2.19.2) and the row's policy digest, or `refused` with what it needs. |
 | `grants` | Each kit's grant, and whether its digest matched. |
 
-The shape is frozen: a later version adds values, not fields.
+The shape is frozen: a release adds values, not fields; a new field is policy.json/2.
 
 ## Guarantees
 

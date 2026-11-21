@@ -1,0 +1,1517 @@
+{
+ "version": 1,
+ "run": "1bea",
+ "context": "work",
+ "mode": "in-place",
+ "access": "write",
+ "backend": {
+  "name": "bubblewrap",
+  "requires": [],
+  "proved": [
+   "closure-store",
+   "own-netns",
+   "own-pidns",
+   "no-tiocsti",
+   "protected-as-mounts",
+   "local-listen",
+   "in-place",
+   "same-path-clone",
+   "private-proxy",
+   "root-files",
+   "resource-limits"
+  ]
+ },
+ "workspace": [
+  {
+   "id": "repo:test-host:/tmp/pot-test/sbc/.git",
+   "path": "/tmp/pot-test/sbc",
+   "common": "/tmp/pot-test/sbc/.git",
+   "protected": [
+    "**/flake.nix",
+    "**/flake.lock",
+    "**/.gitmodules",
+    "**/.envrc",
+    "**/justfile",
+    "**/.pre-commit-config.yaml",
+    ".githooks",
+    "**/.mcp.json",
+    "**/.vscode",
+    "**/.claude",
+    "**/.pi",
+    "**/.codex",
+    "AGENTS.md",
+    "sbk.yaml",
+    "**/kit-owner.nix",
+    "scions"
+   ],
+   "sealed": [
+    "**/.pi"
+   ],
+   "proposal": [],
+   "clone": "/tmp/clone"
+  }
+ ],
+ "items": [
+  {
+   "kind": "package",
+   "value": "/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/c9jzm47zb8j7jbpw4a7zdm35qmhdf6ws-findutils-4.10.0",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/90r466lzg0jw11v60cki60s0qfhs93vp-gnugrep-3.11",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/m0i5hf36sv62vgm2ppjkynv03ihdlxvv-gnused-4.9",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/qvgw9scl3jjy1zsjipm3ngpcq472wj7w-gawk-5.3.2",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/z059fc40f58cp2yflhbpfdg539x66b0g-diffutils-3.12",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/p8fdrwah2spzb8i0f666bn7lpm1ccqj7-less-668",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/mv32qvnnwxw2h1i1kk9mwkr751z2b4jl-git-minimal-2.50.1",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/drw1cs158zf139vqknbhn161k3qifvn3-which-2.23",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/yrgnr4naqdjwdhn1q142f8c5yb8jsz37-file-5.45",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/p1id16rw9871ckj0wx8i0x150pr16n2y-tree-2.2.1",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/vmp6hi5xhn5awg76jk3zk0012hig1ds8-ripgrep-14.1.1",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/1nk17g4if2gbhh5rz18wcyjj92pxycq8-fd-10.2.0",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/r49zci44xq7i6wl61ayhq82wn6v7w9lm-jq-1.7.1-bin",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/59xfzn1951irjyrhvnqbkm9jr0af7zfz-curl-8.14.1-bin",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/76df6j9sq1ar58id3y3v4rkijany1wxp-gnutar-1.35",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/44c243x0jpv587hmxrzl31pripa0f0j8-gzip-1.14",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/2rigkcn6544b2hvq13nvqsjwwjdlf6mh-unzip-6.0",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/b7g83isqdl778kmcpv6v68z76x4x5riv-xz-5.8.1-bin",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/jangxddrzycnc2rl1wc1sqhqp26yrx4k-patch-2.7.6",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/msn52zfrkwb8mxj9jwzvvqzfjv9i9144-just-1.40.0",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/cpailfv1a1r934baq44a8n95f2hh0ak2-gh-2.72.0",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "file",
+   "value": "~/.st/conf.json",
+   "class": "see",
+   "sources": [
+    {
+     "kit": "root:relay",
+     "file": "the root (programs.pot.kits.relay)",
+     "as": "see"
+    }
+   ],
+   "effective": true,
+   "source": "/nix/store/xmwy7sibp5467x50xnj7d198sg0lb4qc-conf.json",
+   "mode": "reassert",
+   "keys": [
+    "a",
+    "projects.*.t"
+   ]
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/na5dnb0l6rjkzrbld3xn4188dd8nknhh-hello-2.12.1",
+   "class": "see",
+   "sources": [
+    {
+     "kit": "repo:test-host:/tmp/pot-test/sbc/.git",
+     "file": "flake.nix (fixture)",
+     "as": "see"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "package",
+   "value": "/nix/store/82dv6fj32xwwl5rdxgxbsd5qs4q013vk-pot-kits",
+   "class": "see",
+   "sources": [
+    {
+     "kit": "repo:test-host:/tmp/pot-test/sbc/.git",
+     "file": "flake.nix (fixture)",
+     "as": "tools"
+    }
+   ],
+   "effective": true,
+   "tools": true
+  },
+  {
+   "kind": "env.set",
+   "value": "TZ=America/Chicago",
+   "class": "see",
+   "sources": [
+    {
+     "root": "base"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "access",
+   "value": "write",
+   "class": "limits",
+   "sources": [
+    {
+     "context": "work"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.ssh",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.ssh"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.gnupg",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.gnupg"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.aws",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.aws"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.azure",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.azure"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/gcloud",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/gcloud"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.kube",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.kube"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.docker/config.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.docker/config.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.netrc",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.netrc"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.git-credentials",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.git-credentials"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/gh",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/gh"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/sops",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/sops"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.local/share/keyrings",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.local/share/keyrings"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.mozilla",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.mozilla"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/google-chrome",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/google-chrome"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/chromium",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/chromium"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/BraveSoftware",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/BraveSoftware"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/vivaldi",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/vivaldi"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/snap/firefox",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/snap/firefox"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/etc/ssh/*_key",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/etc/ssh/ssh_host_ed25519_key",
+    "/etc/ssh/ssh_host_rsa_key"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.claude",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.claude"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.claude.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.claude.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.pi/agent/auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.pi/agent/auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.pi/agent/mcp-auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.pi/agent/mcp-auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.codex/auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.codex/auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.local/share/opencode/auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.local/share/opencode/auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/tmp/pot-test/sbhidden",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "hidden"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/tmp/pot-test/sbhidden"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/tmp/pot-test/sbgrants/grants.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "pot"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/tmp/pot-test/sbgrants/grants.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/tmp/pot-test/sbstate",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "pot"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/tmp/pot-test/sbstate"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/tmp/pot-test/sbtok",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "binding"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/tmp/pot-test/sbtok"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/tmp/pot-test/sbmcp.env",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "binding"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/tmp/pot-test/sbmcp.env"
+   ]
+  },
+  {
+   "kind": "protect",
+   "value": "**/flake.nix",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/flake.lock",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.gitmodules",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.envrc",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/justfile",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.pre-commit-config.yaml",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": ".githooks",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.mcp.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.vscode",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.claude",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.pi",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.codex",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "AGENTS.md",
+   "class": "limits",
+   "sources": [
+    {
+     "kit": "repo:test-host:/tmp/pot-test/sbc/.git",
+     "file": "flake.nix (fixture)",
+     "as": "limit"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "sbk.yaml",
+   "class": "limits",
+   "sources": [
+    {
+     "kit": "git:file:///tmp/pot-test/sbk.git",
+     "file": "kits/sbk.nix",
+     "as": "limit"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/kit-owner.nix",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "bundle",
+     "why": "the repository's pot-kits"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "scions",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "bundle",
+     "why": "the repository's pot-kits"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "include",
+   "value": "daniel",
+   "class": "reach",
+   "sources": [
+    {
+     "context": "work"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "state",
+   "value": "st",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:relay",
+     "file": "the root (programs.pot.kits.relay)",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-FwOs6S25gb2JfBs+gBwLxpj2/+9NGKBvUoxE59NZsFs="
+    }
+   ],
+   "effective": true,
+   "request": "state st",
+   "requestClass": "ordinary",
+   "at": "~/.st",
+   "shared": false
+  },
+  {
+   "kind": "capability",
+   "value": "status.relay",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:relay",
+     "file": "the root (programs.pot.kits.relay)",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-FwOs6S25gb2JfBs+gBwLxpj2/+9NGKBvUoxE59NZsFs="
+    }
+   ],
+   "effective": true,
+   "request": "capability status.relay",
+   "requestClass": "ordinary",
+   "data": {
+    "name": "status.relay"
+   },
+   "binding": "*"
+  },
+  {
+   "kind": "capability",
+   "value": "credential",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:relay",
+     "file": "the root (programs.pot.kits.relay)",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-FwOs6S25gb2JfBs+gBwLxpj2/+9NGKBvUoxE59NZsFs="
+    }
+   ],
+   "effective": true,
+   "request": "capability credential api.example env=TESTTOK",
+   "requestClass": "powerful",
+   "data": {
+    "env": "TESTTOK",
+    "host": "api.example",
+    "name": "credential"
+   },
+   "binding": "api.example"
+  },
+  {
+   "kind": "capability",
+   "value": "mcp",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:relay",
+     "file": "the root (programs.pot.kits.relay)",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-FwOs6S25gb2JfBs+gBwLxpj2/+9NGKBvUoxE59NZsFs="
+    }
+   ],
+   "effective": true,
+   "request": "capability mcp s",
+   "requestClass": "powerful",
+   "data": {
+    "name": "mcp",
+    "server": "s"
+   },
+   "binding": "s"
+  },
+  {
+   "kind": "network",
+   "value": "nothing.invalid:1",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:daniel",
+     "file": "the root (programs.pot.kits.daniel)",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-grcLiixcHG/tobm7eEqUoH1pHcCOE2u3WBnbslSn+dg="
+    }
+   ],
+   "effective": true,
+   "request": "network nothing.invalid:1",
+   "requestClass": "ordinary"
+  },
+  {
+   "kind": "network",
+   "value": "api.anthropic.com:443",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:claude-code@t",
+     "file": "the root (programs.pot.kits.claude-code@t)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "network api.anthropic.com:443",
+   "requestClass": "ordinary",
+   "why": "not in this run"
+  },
+  {
+   "kind": "network",
+   "value": "claude.ai:443",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:claude-code@t",
+     "file": "the root (programs.pot.kits.claude-code@t)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "network claude.ai:443",
+   "requestClass": "ordinary",
+   "why": "not in this run"
+  },
+  {
+   "kind": "state",
+   "value": "claude",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:claude-code@t",
+     "file": "the root (programs.pot.kits.claude-code@t)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "state claude",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "at": "~/.claude",
+   "shared": false
+  },
+  {
+   "kind": "capability",
+   "value": "status.relay",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:claude-code@t",
+     "file": "the root (programs.pot.kits.claude-code@t)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "capability status.relay",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "data": {
+    "name": "status.relay"
+   }
+  },
+  {
+   "kind": "capability",
+   "value": "credential",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:claude-code@t",
+     "file": "the root (programs.pot.kits.claude-code@t)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "capability credential api.anthropic.com env=CLAUDE_CODE_OAUTH_TOKEN",
+   "requestClass": "powerful",
+   "why": "not in this run",
+   "data": {
+    "env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "host": "api.anthropic.com",
+    "name": "credential"
+   }
+  },
+  {
+   "kind": "capability",
+   "value": "git.fetch",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:fetcher",
+     "file": "the root (programs.pot.kits.fetcher)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "capability git.fetch ssh://git@fake.example/*",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "data": {
+    "name": "git.fetch",
+    "remote": "ssh://git@fake.example/*"
+   }
+  },
+  {
+   "kind": "state",
+   "value": "claude",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:fixed",
+     "file": "the root (programs.pot.kits.fixed)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "state claude",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "at": "~/.claude",
+   "shared": false
+  },
+  {
+   "kind": "capability",
+   "value": "nix",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:nixer",
+     "file": "the root (programs.pot.kits.nixer)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "capability nix",
+   "requestClass": "powerful",
+   "why": "not in this run",
+   "data": {
+    "name": "nix"
+   }
+  },
+  {
+   "kind": "read",
+   "value": "/tmp",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:pair@a",
+     "file": "the root (programs.pot.kits.pair@a)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "read /tmp",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "path": "/tmp"
+  },
+  {
+   "kind": "read",
+   "value": "/var",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:pair@b",
+     "file": "the root (programs.pot.kits.pair@b)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "read /var",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "path": "/var"
+  },
+  {
+   "kind": "write",
+   "value": "/tmp/pot-test/sbrootrepo",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:rootwriter",
+     "file": "the root (programs.pot.kits.rootwriter)",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "write /tmp/pot-test/sbrootrepo",
+   "requestClass": "powerful",
+   "why": "not in this run",
+   "path": "/tmp/pot-test/sbrootrepo"
+  },
+  {
+   "kind": "network",
+   "value": "api.sbk.example:443",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "git:file:///tmp/pot-test/sbk.git",
+     "file": "kits/sbk.nix",
+     "as": "request"
+    }
+   ],
+   "effective": false,
+   "request": "network api.sbk.example:443",
+   "requestClass": "ordinary",
+   "why": "not in this run"
+  },
+  {
+   "kind": "network",
+   "value": "mcp.example:443",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:relay",
+     "file": "the root",
+     "as": "request"
+    },
+    {
+     "binding": "mcp.s"
+    }
+   ],
+   "effective": true,
+   "via": "mcp"
+  }
+ ],
+ "mounts": {
+  "state": [
+   {
+    "name": "st",
+    "at": "~/.st",
+    "key": [
+     "root:relay",
+     "repo:test-host:/tmp/pot-test/sbc/.git",
+     "work"
+    ],
+    "dir": "/tmp/pot-test/sbstate/state/692d8637835092d2c68f/st"
+   }
+  ],
+  "run": "/run/pot",
+  "launcher": "/run/pot/launcher"
+ },
+ "bindings": [
+  {
+   "capability": "status.relay",
+   "selector": "*",
+   "kit": "root:relay",
+   "request": "capability status.relay",
+   "socket": "/run/pot/relay.sock",
+   "see": [
+    "workmux shim"
+   ],
+   "allow": [
+    "set-window-status",
+    "register-agent"
+   ]
+  },
+  {
+   "capability": "credential",
+   "selector": "api.example",
+   "kit": "root:relay",
+   "request": "capability credential api.example env=TESTTOK",
+   "via": "file",
+   "env": [
+    "TESTTOK"
+   ],
+   "from": {
+    "file": "/tmp/pot-test/sbtok"
+   },
+   "holds": "the run holds it"
+  },
+  {
+   "capability": "mcp",
+   "selector": "s",
+   "kit": "root:relay",
+   "request": "capability mcp s",
+   "via": "env",
+   "env": [
+    "MCPKEY"
+   ],
+   "from": {
+    "file": "/tmp/pot-test/sbmcp.env"
+   },
+   "holds": "the run holds it",
+   "server": "s",
+   "url": "https://mcp.example/mcp",
+   "header": "Authorization",
+   "scheme": "Bearer",
+   "config": "/run/pot/mcp.json"
+  }
+ ],
+ "children": {
+  "root:relay:relaytest": {
+   "slot": "root",
+   "command": "relaytest",
+   "kit": "root:relay",
+   "kitName": "relay",
+   "context": "work",
+   "mode": "in-place",
+   "file": "the root (programs.pot.kits.relay)",
+   "how": "exec",
+   "policy": "sha256-5b6117afe75c121817d9686001a1a11cc9269a6bd0b52560233d2415fc765cb6",
+   "argv": [
+    "/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash"
+   ],
+   "env": {
+    "TZ": "America/Chicago"
+   }
+  },
+  "git:file:///tmp/pot-test/sbk.git:sbk-tool": {
+   "slot": "scions.sbk",
+   "command": "sbk-tool",
+   "kit": "git:file:///tmp/pot-test/sbk.git",
+   "kitName": "sbk",
+   "context": "work",
+   "mode": "in-place",
+   "file": "kits/sbk.nix",
+   "refused": "not granted: pot grant sbk (on the host)",
+   "grant": true
+  }
+ },
+ "grants": [
+  {
+   "id": "root:claude-code@t",
+   "digest": "sha256-h/y+NM9xdK+4Z19Wd6QgfMOUcCj3ynOdXz1QgxZ7ugc=",
+   "match": false
+  },
+  {
+   "id": "root:daniel",
+   "digest": "sha256-grcLiixcHG/tobm7eEqUoH1pHcCOE2u3WBnbslSn+dg=",
+   "match": true
+  },
+  {
+   "id": "root:fetcher",
+   "digest": "sha256-w9IupgNDmE6ODLWITwa67sQvUaEUmnCo9GMhoUw8U5E=",
+   "match": false
+  },
+  {
+   "id": "root:fixed",
+   "digest": "sha256-kqHVNv0/h1iHdc2oFtYDMkewIK+6Arc7XZ92+e6fTQQ=",
+   "match": false
+  },
+  {
+   "id": "root:nixer",
+   "digest": "sha256-u22p3EjvTUbTiPIf0lfMVx3YLF+He2kKzOyj6MpupY4=",
+   "match": false
+  },
+  {
+   "id": "root:pair@a",
+   "digest": "sha256-n1KY01jj32gPR+1H27CPmT8tMPHLq2+F/ilJanmXwAQ=",
+   "match": false
+  },
+  {
+   "id": "root:pair@b",
+   "digest": "sha256-YLySPRzpC8ArF+UpgiESiQmWyNXm0YocHD2+2ZwamFs=",
+   "match": false
+  },
+  {
+   "id": "root:relay",
+   "digest": "sha256-FwOs6S25gb2JfBs+gBwLxpj2/+9NGKBvUoxE59NZsFs=",
+   "match": true
+  },
+  {
+   "id": "root:rootwriter",
+   "digest": "sha256-7MayUPf4IdQvC73TfXHDjeQD2vHAK3JJ7mDCnPihic0=",
+   "match": false
+  },
+  {
+   "id": "root:sel@a",
+   "digest": null,
+   "match": true
+  },
+  {
+   "id": "root:sel@b",
+   "digest": null,
+   "match": true
+  },
+  {
+   "id": "root:sel@bw",
+   "digest": null,
+   "match": true
+  },
+  {
+   "id": "root:sel@c",
+   "digest": null,
+   "match": true
+  },
+  {
+   "id": "repo:test-host:/tmp/pot-test/sbc/.git",
+   "digest": null,
+   "match": true
+  },
+  {
+   "id": "git:file:///tmp/pot-test/sbk.git",
+   "digest": "sha256-4qeyRjhsxbWvhITthEZxZmlTN6c/yfhx64Gf9HJhiOI=",
+   "match": false
+  }
+ ]
+}

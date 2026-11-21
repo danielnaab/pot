@@ -5,6 +5,21 @@ and a patch never does. Until 0.1.0 pot shipped inside graft; its history up to 
 [graft's CHANGELOG](https://github.com/danielnaab/graft/blob/v2/CHANGELOG.md) (the entries that name pot, from
 v2.14.0's `sandbox` on).
 
+## Unreleased
+
+### Added
+
+- **policy.json/1, a contract** ([contracts/policy-1.md](contracts/policy-1.md)): a run's `policy.json` as prose, a
+  JSON Schema (2020-12) and fixtures, for a backend built apart from pot. It says which fields a backend must
+  enforce and which are for explanations, the backend's verbs, and what a backend must refuse rather than run
+  weaker. pot writes exactly what 0.1.0 wrote: `tests/run.sh` validates every `policy.json` its runs write, and
+  `pot explain --json`. `launch.json` stays internal.
+
+### Changed
+
+- **run-env/1 no longer lets a release add a key to a policy item** within version 1: a new field, an item's key
+  included, is a new version (policy.json/1). pot 0.1.0 added none.
+
 ## v0.1.0 - 2026-11-21
 
 pot in its own repository, extracted from graft v2.22.0 with its history. It reads and writes exactly what graft

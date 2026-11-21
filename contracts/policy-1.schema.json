@@ -1,0 +1,1348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danielnaab/pot/contracts/policy-1.schema.json",
+  "title": "policy.json/1: a run's policy, for its backend",
+  "description": "The policy pot composes for one run and writes as <run dir>/policy.json (inside the run, /run/pot/policy.json); pot explain --json prints the same document. The prose is contracts/policy-1.md. This schema is what this release emits: every object pot builds is closed (additionalProperties: false), and the value sets (item kinds, sources, guarantees, capabilities, backends) are this release's. A later release of version 1 may add values; a new field, or a changed meaning, is policy.json/2.",
+  "type": "object",
+  "required": [
+    "version",
+    "run",
+    "context",
+    "mode",
+    "access",
+    "backend",
+    "workspace",
+    "items",
+    "mounts",
+    "bindings",
+    "children",
+    "grants"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "run": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{4}|explain)$"
+    },
+    "context": {
+      "$ref": "#/$defs/name"
+    },
+    "mode": {
+      "enum": [
+        "in-place",
+        "clone"
+      ]
+    },
+    "access": {
+      "enum": [
+        "write",
+        "read",
+        "none"
+      ]
+    },
+    "backend": {
+      "type": "object",
+      "required": [
+        "name",
+        "requires",
+        "proved"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "bubblewrap",
+            "seatbelt"
+          ]
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/guarantee"
+          },
+          "uniqueItems": true
+        },
+        "proved": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/guarantee"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "workspace": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/workspace"
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      }
+    },
+    "mounts": {
+      "type": "object",
+      "required": [
+        "state",
+        "run",
+        "launcher"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stateMount"
+          }
+        },
+        "run": {
+          "const": "/run/pot"
+        },
+        "launcher": {
+          "const": "/run/pot/launcher"
+        }
+      }
+    },
+    "bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/binding"
+      }
+    },
+    "children": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^\\S+:[^\\s:]+$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/child"
+      }
+    },
+    "grants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "digest",
+          "match"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "digest": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "match": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "in-place"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "workspace": {
+            "items": {
+              "properties": {
+                "clone": {
+                  "type": "null"
+                },
+                "proposal": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "clone"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "workspace": {
+            "items": {
+              "properties": {
+                "clone": {
+                  "type": "string"
+                },
+                "sealed": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "none"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "workspace": {
+            "items": {
+              "properties": {
+                "protected": {
+                  "maxItems": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "abs": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "home": {
+      "type": "string",
+      "pattern": "^~/"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256-"
+    },
+    "guarantee": {
+      "enum": [
+        "closure-store",
+        "own-netns",
+        "own-pidns",
+        "no-tiocsti",
+        "protected-as-mounts",
+        "local-listen",
+        "resource-limits",
+        "separate-kernel",
+        "in-place",
+        "same-path-clone",
+        "nest",
+        "private-proxy",
+        "root-files"
+      ]
+    },
+    "capability": {
+      "enum": [
+        "status.relay",
+        "git.fetch",
+        "credential",
+        "mcp",
+        "nix",
+        "git.push",
+        "git.sign",
+        "ops.read",
+        "delegate"
+      ]
+    },
+    "workspace": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "common",
+        "protected",
+        "sealed",
+        "proposal",
+        "clone"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^repo:"
+        },
+        "path": {
+          "$ref": "#/$defs/abs"
+        },
+        "common": {
+          "$ref": "#/$defs/abs"
+        },
+        "protected": {
+          "$ref": "#/$defs/strings"
+        },
+        "sealed": {
+          "$ref": "#/$defs/strings"
+        },
+        "proposal": {
+          "$ref": "#/$defs/strings"
+        },
+        "clone": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/abs"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kit",
+            "file",
+            "as"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kit": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "as": {
+              "enum": [
+                "see",
+                "limit",
+                "request",
+                "tools"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "grant",
+            "digest"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "grant": {
+              "type": "string"
+            },
+            "digest": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "flag"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "flag": {
+              "enum": [
+                "--net",
+                "--read",
+                "--write",
+                "--env",
+                "--package"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "context"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/name"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "binding"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "binding": {
+              "type": "string",
+              "pattern": "^mcp\\."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "root"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "root": {
+              "enum": [
+                "default",
+                "bundle",
+                "standard",
+                "tools",
+                "inspect",
+                "base",
+                "caBundle",
+                "hidden",
+                "pot",
+                "binding"
+              ]
+            },
+            "why": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "item": {
+      "type": "object",
+      "required": [
+        "kind",
+        "value",
+        "class",
+        "sources",
+        "effective"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "package",
+            "env.set",
+            "file",
+            "dir",
+            "access",
+            "hidden",
+            "protect",
+            "network",
+            "include",
+            "view",
+            "read",
+            "write",
+            "socket",
+            "env",
+            "state",
+            "capability",
+            "unsandboxed"
+          ]
+        },
+        "value": {
+          "type": "string"
+        },
+        "class": {
+          "enum": [
+            "see",
+            "limits",
+            "reach"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          },
+          "minItems": 1
+        },
+        "effective": {
+          "type": "boolean"
+        },
+        "why": {
+          "type": "string"
+        },
+        "request": {
+          "type": "string"
+        },
+        "requestClass": {
+          "enum": [
+            "ordinary",
+            "powerful"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/abs"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/abs"
+          }
+        },
+        "secret": {
+          "type": "boolean"
+        },
+        "at": {
+          "$ref": "#/$defs/home"
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/capability"
+            }
+          }
+        },
+        "binding": {
+          "type": "string"
+        },
+        "via": {
+          "const": "mcp"
+        },
+        "tools": {
+          "const": true
+        },
+        "attr": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/abs"
+        },
+        "mode": {
+          "enum": [
+            "fixed",
+            "seed",
+            "reassert"
+          ]
+        },
+        "keys": {
+          "$ref": "#/$defs/strings"
+        },
+        "memory": {
+          "const": true
+        },
+        "mirror": {
+          "type": "string"
+        },
+        "refresh": {
+          "const": true
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/abs"
+              },
+              {
+                "const": "bind"
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 3
+          }
+        },
+        "skipped": {
+          "$ref": "#/$defs/strings"
+        },
+        "home": {
+          "$ref": "#/$defs/strings"
+        },
+        "homeManager": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "class": {
+                "enum": [
+                  "see",
+                  "limits"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effective": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "effective": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "why"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "package",
+                  "env.set",
+                  "file",
+                  "dir"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "class": {
+                "const": "see"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "access",
+                  "hidden",
+                  "protect"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "class": {
+                "const": "limits"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "include",
+                  "view",
+                  "read",
+                  "write",
+                  "socket",
+                  "env",
+                  "state",
+                  "capability",
+                  "unsandboxed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "class": {
+                "const": "reach"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "network"
+              },
+              "class": {
+                "const": "limits"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "const": "none"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "network"
+              },
+              "class": {
+                "const": "reach"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "pattern": "^[A-Za-z0-9*?_][A-Za-z0-9*?._-]*:[0-9]{1,5}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "package"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "pattern": "^/nix/store/"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "env.set"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*="
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "access"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "enum": [
+                  "write",
+                  "read",
+                  "none"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "hidden"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "paths"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "file"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "source",
+              "mode"
+            ],
+            "properties": {
+              "value": {
+                "pattern": "^(/|~/)"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "dir"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "links",
+              "mode"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/home"
+              },
+              "mode": {
+                "const": "fixed"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "read",
+                  "write",
+                  "socket"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "state"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "at",
+              "shared"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "capability"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ],
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/capability"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "capability"
+              },
+              "effective": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "binding"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "env"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "view"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "home",
+              "homeManager"
+            ],
+            "properties": {
+              "value": {
+                "const": "inspect"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "unsandboxed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effective": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "stateMount": {
+      "type": "object",
+      "required": [
+        "name",
+        "at",
+        "key",
+        "dir"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "at": {
+          "$ref": "#/$defs/home"
+        },
+        "key": {
+          "$ref": "#/$defs/strings"
+        },
+        "dir": {
+          "$ref": "#/$defs/abs"
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "required": [
+        "capability",
+        "selector",
+        "kit",
+        "request"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "enum": [
+            "status.relay",
+            "git.fetch",
+            "credential",
+            "mcp",
+            "nix"
+          ]
+        },
+        "selector": {
+          "type": "string"
+        },
+        "kit": {
+          "type": "string"
+        },
+        "request": {
+          "type": "string",
+          "pattern": "^capability "
+        },
+        "socket": {
+          "enum": [
+            "/run/pot/relay.sock",
+            "/run/pot/git.sock",
+            "/run/pot/nix.sock"
+          ]
+        },
+        "see": {
+          "$ref": "#/$defs/strings"
+        },
+        "allow": {
+          "$ref": "#/$defs/strings"
+        },
+        "remotes": {
+          "$ref": "#/$defs/strings"
+        },
+        "key": {
+          "type": "object",
+          "description": "The root's binding key, as the root wrote it: { agent: true } or { file: \"~/…\" }.",
+          "properties": {
+            "agent": {
+              "type": "boolean"
+            },
+            "file": {
+              "type": "string"
+            }
+          }
+        },
+        "via": {
+          "type": "string"
+        },
+        "notes": {
+          "$ref": "#/$defs/strings"
+        },
+        "env": {
+          "$ref": "#/$defs/strings"
+        },
+        "from": {
+          "type": "object",
+          "description": "The root's binding source, as the root wrote it: a reference, never a value.",
+          "properties": {
+            "env": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            },
+            "envFile": {
+              "type": "string"
+            }
+          }
+        },
+        "holds": {
+          "const": "the run holds it"
+        },
+        "refresh": {
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "header": {
+          "type": "string"
+        },
+        "scheme": {
+          "type": "string"
+        },
+        "config": {
+          "const": "/run/pot/mcp.json"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "capability": {
+                "const": "status.relay"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "socket",
+              "see",
+              "allow"
+            ],
+            "properties": {
+              "socket": {
+                "const": "/run/pot/relay.sock"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {
+                "const": "git.fetch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "socket",
+              "see",
+              "remotes",
+              "key"
+            ],
+            "properties": {
+              "socket": {
+                "const": "/run/pot/git.sock"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {
+                "const": "nix"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "socket",
+              "see",
+              "via",
+              "notes"
+            ],
+            "properties": {
+              "socket": {
+                "const": "/run/pot/nix.sock"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {
+                "enum": [
+                  "credential",
+                  "mcp"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "via",
+              "env",
+              "from",
+              "holds"
+            ],
+            "not": {
+              "required": [
+                "socket"
+              ]
+            },
+            "properties": {
+              "via": {
+                "enum": [
+                  "env",
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {
+                "const": "mcp"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "server",
+              "url",
+              "header",
+              "scheme",
+              "config"
+            ]
+          }
+        }
+      ]
+    },
+    "child": {
+      "type": "object",
+      "required": [
+        "slot",
+        "command",
+        "kit",
+        "kitName",
+        "context",
+        "mode",
+        "file"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "slot": {
+          "type": "string",
+          "pattern": "^(root|self|scions\\..+)$"
+        },
+        "command": {
+          "type": "string"
+        },
+        "kit": {
+          "type": "string"
+        },
+        "kitName": {
+          "type": "string"
+        },
+        "context": {
+          "$ref": "#/$defs/name"
+        },
+        "mode": {
+          "enum": [
+            "in-place",
+            "clone"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "hook": {
+          "type": "string"
+        },
+        "how": {
+          "enum": [
+            "exec",
+            "sibling"
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/digest"
+        },
+        "argv": {
+          "$ref": "#/$defs/strings"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "refused": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "grant": {
+          "const": true
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "how",
+            "policy",
+            "argv",
+            "env"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "refused"
+                ]
+              },
+              {
+                "required": [
+                  "text"
+                ]
+              },
+              {
+                "required": [
+                  "grant"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "refused"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "how"
+                ]
+              },
+              {
+                "required": [
+                  "policy"
+                ]
+              },
+              {
+                "required": [
+                  "argv"
+                ]
+              },
+              {
+                "required": [
+                  "env"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

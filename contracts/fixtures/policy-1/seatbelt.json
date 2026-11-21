@@ -1,0 +1,739 @@
+{
+ "version": 1,
+ "run": "abcd",
+ "context": "dispatch",
+ "mode": "clone",
+ "access": "write",
+ "backend": {
+  "name": "seatbelt",
+  "requires": [],
+  "proved": [
+   "closure-store",
+   "no-tiocsti",
+   "in-place",
+   "private-proxy"
+  ]
+ },
+ "workspace": [
+  {
+   "id": "repo:example.com/o/r",
+   "path": "/home/u/src/r",
+   "common": "/home/u/src/r/.git",
+   "protected": [
+    "**/flake.nix",
+    "**/flake.lock",
+    "**/.gitmodules",
+    "**/.envrc",
+    "**/justfile",
+    "**/.pre-commit-config.yaml",
+    ".githooks"
+   ],
+   "sealed": [],
+   "proposal": [
+    "**/.claude",
+    "**/.mcp.json",
+    "**/.pi",
+    "**/.codex",
+    "**/.vscode"
+   ],
+   "clone": "/state/pot/runs/abcd/clone"
+  }
+ ],
+ "items": [
+  {
+   "kind": "package",
+   "value": "/nix/store/aaa-bash",
+   "class": "see",
+   "sources": [
+    {
+     "root": "standard"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "env.set",
+   "value": "TZ=UTC",
+   "class": "see",
+   "sources": [
+    {
+     "root": "base"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "access",
+   "value": "write",
+   "class": "limits",
+   "sources": [
+    {
+     "context": "dispatch"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.ssh",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.ssh"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.gnupg",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.gnupg"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.aws",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.aws"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.azure",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.azure"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/gcloud",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/gcloud"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.kube",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.kube"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.docker/config.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.docker/config.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.netrc",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.netrc"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.git-credentials",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.git-credentials"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/gh",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/gh"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/sops",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/sops"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.local/share/keyrings",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.local/share/keyrings"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.mozilla",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.mozilla"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/google-chrome",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/google-chrome"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/chromium",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/chromium"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/BraveSoftware",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/BraveSoftware"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.config/vivaldi",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/vivaldi"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/snap/firefox",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/snap/firefox"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/etc/ssh/*_key",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": []
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.claude",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.claude"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.claude.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.claude.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.pi/agent/auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.pi/agent/auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.codex/auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.codex/auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "~/.local/share/opencode/auth.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.local/share/opencode/auth.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/state/grants.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "pot"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/state/grants.json"
+   ]
+  },
+  {
+   "kind": "hidden",
+   "value": "/state/pot",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "pot"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/state/pot"
+   ]
+  },
+  {
+   "kind": "protect",
+   "value": "**/flake.nix",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/flake.lock",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.gitmodules",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.envrc",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/justfile",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.pre-commit-config.yaml",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": ".githooks",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.mcp.json",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.vscode",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.claude",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.pi",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "protect",
+   "value": "**/.codex",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true
+  },
+  {
+   "kind": "network",
+   "value": "api.x:443",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:agent",
+     "file": "the root",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-CVVvBaxNc1QqT8UvxWIpBC+0YvLkT23benRPgsdruxA="
+    }
+   ],
+   "effective": true,
+   "request": "network api.x:443",
+   "requestClass": "ordinary"
+  },
+  {
+   "kind": "env",
+   "value": "TOK",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "root:agent",
+     "file": "the root",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-CVVvBaxNc1QqT8UvxWIpBC+0YvLkT23benRPgsdruxA="
+    }
+   ],
+   "effective": true,
+   "request": "env TOK",
+   "requestClass": "ordinary",
+   "secret": false
+  },
+  {
+   "kind": "network",
+   "value": "wm.example:443",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "git:example.com/o/nk",
+     "file": "s/nk/graft.nix",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-yCA+wIJMWmBkiq9WGfGQj1zmg8ln5g5bPxlA+kagxGI="
+    }
+   ],
+   "effective": false,
+   "request": "network wm.example:443",
+   "requestClass": "ordinary",
+   "why": "not in this run"
+  },
+  {
+   "kind": "env",
+   "value": "WM_TOKEN",
+   "class": "reach",
+   "sources": [
+    {
+     "kit": "git:example.com/o/nk",
+     "file": "s/nk/graft.nix",
+     "as": "request"
+    },
+    {
+     "grant": "grants.json",
+     "digest": "sha256-yCA+wIJMWmBkiq9WGfGQj1zmg8ln5g5bPxlA+kagxGI="
+    }
+   ],
+   "effective": false,
+   "request": "env WM_TOKEN",
+   "requestClass": "ordinary",
+   "why": "not in this run",
+   "secret": false
+  }
+ ],
+ "mounts": {
+  "state": [],
+  "run": "/run/pot",
+  "launcher": "/run/pot/launcher"
+ },
+ "bindings": [],
+ "children": {
+  "root:agent:ag": {
+   "slot": "root",
+   "command": "ag",
+   "kit": "root:agent",
+   "kitName": "agent",
+   "context": "dispatch",
+   "mode": "clone",
+   "file": "the root",
+   "how": "exec",
+   "policy": "sha256-21ea0aafaeb7f5a2b4af101aeb944915ee933a0fd19116840617a9ed27bcd957",
+   "argv": [
+    "/nix/store/x-ag/bin/ag"
+   ],
+   "env": {
+    "TZ": "UTC"
+   }
+  },
+  "git:example.com/o/nk:chk": {
+   "slot": "scions.nk",
+   "command": "chk",
+   "kit": "git:example.com/o/nk",
+   "kitName": "nk",
+   "context": "dispatch",
+   "mode": "clone",
+   "file": "s/nk/graft.nix",
+   "how": "sibling",
+   "policy": "sha256-bad65356e7d0b1862b6dd7cf47bf5df1db5732b0990768d33e6d745357af6f08",
+   "argv": [
+    "/nix/store/y-chk/bin/chk"
+   ],
+   "env": {
+    "TZ": "UTC"
+   }
+  },
+  "git:example.com/o/nk:pc": {
+   "slot": "scions.nk",
+   "command": "pc",
+   "kit": "git:example.com/o/nk",
+   "kitName": "nk",
+   "context": "dispatch",
+   "mode": "clone",
+   "file": "s/nk/graft.nix",
+   "hook": "pre-commit",
+   "how": "sibling",
+   "policy": "sha256-bad65356e7d0b1862b6dd7cf47bf5df1db5732b0990768d33e6d745357af6f08",
+   "argv": [
+    "/nix/store/y-pc/bin/pc"
+   ],
+   "env": {
+    "TZ": "UTC"
+   }
+  },
+  "git:example.com/o/nk:wm": {
+   "slot": "scions.nk",
+   "command": "wm",
+   "kit": "git:example.com/o/nk",
+   "kitName": "nk",
+   "context": "dispatch",
+   "mode": "clone",
+   "file": "s/nk/graft.nix",
+   "refused": "needs wm.example, WM_TOKEN",
+   "text": "pot (dispatch): wm needs wm.example, WM_TOKEN, which this run (ag) lacks: run it on the host (just meet)"
+  }
+ },
+ "grants": [
+  {
+   "id": "root:agent",
+   "digest": "sha256-CVVvBaxNc1QqT8UvxWIpBC+0YvLkT23benRPgsdruxA=",
+   "match": true
+  },
+  {
+   "id": "repo:example.com/o/r",
+   "digest": null,
+   "match": true
+  },
+  {
+   "id": "git:example.com/o/nk",
+   "digest": "sha256-yCA+wIJMWmBkiq9WGfGQj1zmg8ln5g5bPxlA+kagxGI=",
+   "match": true
+  }
+ ]
+}
