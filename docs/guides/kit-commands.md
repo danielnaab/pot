@@ -3,17 +3,24 @@ status: working
 ---
 # Declare kit commands, recipes and hook commands
 
-A provider's kit declares the programs it ships as `commands`. From graft v2.18.0, each consumer's tools hold a
-**wrapper** of the same name, so `pot` runs your command under its own policy: on the host, from `just`, from a git
-hook, and beside an agent's run, as a sibling the host starts (v2.20.0). The wrapped command gets only what it
-requests and the repo kit's reach, never the agent's token or MCP, nor the context's standing reach. This page is for a provider; the consumer's side is [Move to v2.18.0](move-to-v2-18.md).
+A kit declares the programs it ships as `commands`. The bundle that pot's library builds from it
+([pot-kits/1](../../contracts/pot-kits-1.md)) holds a **wrapper** of each command's name, so `pot` runs your
+command under its own policy: on the host, from `just`, from a git hook, and beside an agent's run, as a sibling the
+host starts. The wrapped command gets only what it requests and the repo kit's reach, never the agent's token or MCP,
+nor the context's standing reach. Its `recipes` become just recipes in the bundle's `kits.just`.
+
+This page is about the kit. How a kit reaches the bundle is the producer's: with tuteur, a provider returns `kit`
+from its `tuteur.nix`, the consumer's flake declares `inputs.pot` so that tuteur's mkFlake calls
+`pot.lib.pot.kitsFor`, and the consumer's `justfile` imports the `kits.just` that tuteur writes beside its
+submodules. See [tuteur](https://github.com/danielnaab/tuteur). A flake of your own can call `kitsFor` directly
+([pot-lib/1](../../contracts/pot-lib-1.md)).
 
 ## Before you begin
 
-- Your provider has a `graft.nix` with `tools` ([Write a provider's graft.nix](write-graft-nix.md)).
-- `recipes` in the attrs form and `hook` are kit 1.2. pot reads 1.2 from v2.17.0, so write it once your consumers'
-  roots are on v2.17.0 or later. Wrappers appear once a consumer takes graft v2.18.0; under an older root they run
-  the program unwrapped, with one line on stderr ([Wrapped commands](../reference/pot.md#wrapped-commands)).
+- A kit, in a file that your producer hands to `kitsFor` (the bundle names that file in pot's messages).
+- `recipes` in the attrs form and `hook` are kit 1.2. pot reads 1.2 from graft v2.17.0 on, and every pot release
+  since 0.1.0. Under a root whose pot predates wrapped commands (before graft v2.18.0), a wrapper runs the program
+  unwrapped, with one line on stderr ([Wrapped commands](../reference/pot.md#wrapped-commands)).
 
 ## Steps
 
@@ -21,7 +28,7 @@ requests and the repo kit's reach, never the agent's token or MCP, nor the conte
    something outside the workspace and the store. A kit with no requests needs no grant: it runs with no prompt.
 
    ```nix
-   # graft.nix (notebook-kit's, trimmed)
+   # notebook-kit's kit, trimmed
    kit = {
      version = "1.2";
      commands = {
@@ -45,28 +52,30 @@ requests and the repo kit's reach, never the agent's token or MCP, nor the conte
 2. Make a hook command call other programs by store path, not through `just` or another wrapper, so one commit
    is one sandbox start: put them in the hook script's `runtimeInputs`.
 
-3. Try it in a consumer: `graft try` in the consumer, then `nix run .#graft sync` there. Check:
-   - `head -3 "$(nix build --no-link --print-out-paths .#tools)/bin/check-kb"` is a wrapper (a comment names pot-kits/1);
-   - `just --list` shows the generated recipes, from `<scions>/kits.just`;
+3. Try it in a repository whose bundle holds the kit. Check:
+   - `head -3 "$(nix build --no-link --print-out-paths .#pot-kits)/wrappers/bin/check-kb"` is a wrapper (its
+     comment says `pot (pot-kits/1)`);
+   - the bundle's `kits.just` starts with pot's header, `# Generated from the kits' recipes (pot-kits/1) by the
+     bundle's producer, which writes and compares it:`, and has one recipe per entry of `recipes`;
+   - `just --list` shows the recipes, once the producer has written `kits.just` where the `justfile` imports it;
    - `pot explain claude` lists your commands on its `children` row as `sibling`.
 
-4. Release a minor version: a new field, nothing removed.
+4. Release a minor version of the kit's repository: a new field, nothing removed.
 
-## Keep older consumers working
+## Keep older repositories working
 
-- Keep your hand-written `.just` file and hook script while consumers on older graft use them. A consumer on
-  v2.18.0 imports it first and `kits.just` after; with `set allow-duplicate-recipes`, just keeps the first of two recipes with one name, so your
-  hand-written one runs. Make it call the tool from the consumer's `tools`, so it runs the same wrapper.
-- Another provider's Nix uses your unwrapped tools, `scions.<name>.tools.<tool>`, as before. Never call a
-  wrapper from a Nix build or a check.
+- Keep a hand-written `.just` file and hook script while repositories whose producer writes no `kits.just` use
+  them. With `set allow-duplicate-recipes`, just keeps the first of two recipes with one name, so a hand-written
+  one imported first runs. Make it call the tool from the repository's tools, so it runs the same wrapper.
+- Other Nix code uses your unwrapped tools, as before. Never call a wrapper from a Nix build or a check.
 
 ## Check it worked
 
-- On the host, `check-kb` in the consumer runs quietly; `pot runs --all` lists it (plain `pot runs` hides wrapped
-  runs that exited 0).
+- On the host, `check-kb` in the repository runs quietly; `pot runs --all` lists it (plain `pot runs` hides
+  wrapped runs that exited 0).
 - Inside `pot claude`, the same command is a sibling: it cannot reach the agent's hosts, and the agent waits for it
   and gets its exit code.
-- `git commit` in the consumer runs your hook command.
+- `git commit` in the repository runs your hook command.
 - On macOS, the command runs under Seatbelt, on the host and as a sibling alike. A row that needs reach the run
   lacks is refused, naming your recipe (`run it on the host (just check-kb)`), so keep the recipe's name meaningful.
 - A sibling's standard input and output are the caller's terminal or pipes; a file redirected into it arrives
@@ -79,17 +88,18 @@ requests and the repo kit's reach, never the agent's token or MCP, nor the conte
 - **`pot: FILE: recipes.N: literal words only (letters, digits and . _ / = : , @ + % -, one space apart)`.** A recipe passes the caller's
   arguments itself (`"$@"`); write only fixed words.
 - **`pot: FILE: recipes.N: a recipe's name is letters, digits, _ and - (starting with a letter)`.** Rename it.
-- **`graft: scions/kits.just's recipe X has the name of the justfile's own X: …`** (in a consumer). A kit's recipe
-  never replaces the consumer's own; one of the two is renamed.
 - **`… needs X, which this run (claude) lacks: run it on the host (just RECIPE)`.** Your command requests reach
   the agent's run lacks. Drop the request if it is not needed; otherwise that command runs on the host only.
 - **`pot: kitsFor: two recipes are named X (FILE and FILE)`,** or `two kits ship a command named X (self and
-  scions.a): a wrapper has one name`. Two kits in the consumer use one name. Rename yours.
+  scions.a): a wrapper has one name`. Two kits in one bundle use one name. Rename yours.
 - **`pot: kitsFor: a command name is letters, digits, . _ and - (X)`.** Rename the command.
+- **`pot: X runs without pot (your root's pot predates wrapped commands: take pot 0.1.0 or later in your root
+  (home-manager switch))`.** The root's pot is too old to run wrappers; update the root.
 
 ## Sources
 
-- [kit/1](../../pot/contracts/kit-1.md): `commands`, `recipes`, `hook`
-- [pot-kits/1](../../pot/contracts/pot-kits-1.md): the wrapper, `kits.just`, the manifests
-- [pot/lib/kits-for.nix](../../pot/lib/kits-for.nix): what kitsFor builds
+- [kit/1](../../contracts/kit-1.md): `commands`, `recipes`, `hook`
+- [pot-kits/1](../../contracts/pot-kits-1.md): the wrapper, `kits.just`, the manifests
+- [pot-lib/1](../../contracts/pot-lib-1.md): `kitsFor`, which a producer calls
+- [lib/kits-for.nix](../../lib/kits-for.nix): what kitsFor builds
 - [pot's reference: Wrapped commands](../reference/pot.md#wrapped-commands)

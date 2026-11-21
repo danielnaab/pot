@@ -32,10 +32,10 @@ root repository such as `~/.workstation`. The terms are in [pot](../reference/po
    pot: dispatch · flexion-assistant · from main (716424f) · pot explain
    ```
 
-   Only the first level of submodules is cloned; `pot runs ID` and `pot review ID` note each scion whose own
+   Only the first level of submodules is cloned; `pot runs ID` and `pot review ID` note each submodule whose own
    submodules are left out.
 
-   When it ends, the exit line counts its commits on each branch it moved, and in each scion:
+   When it ends, the exit line counts its commits on each branch it moved, and in each submodule:
    `pot: run 1ac1 · 1 commit on main: pot review 1ac1, then pot review 1ac1 --fetch`.
 
    To start from another commit or branch, add `--from REF`. To leave it running in the background, add `--detach`
@@ -90,7 +90,7 @@ root repository such as `~/.workstation`. The terms are in [pot](../reference/po
    commits and signs them (`git switch -c pot-1ac1 pot-1ac1/main && git rebase --exec 'git commit --amend --no-edit
    -S' 716424f`), and `take it:` merges that branch, `git merge pot-1ac1`.
 
-   If the run committed in a scion, a line names that scion: its commits are in the scion's own
+   If the run committed in a submodule, a line names that submodule: its commits are in the submodule's own
    `refs/remotes/pot-1ac1/*`, and a fix there goes to its provider.
 
 5. Read the commits as you would a stranger's pull request, then merge what you want:
@@ -145,7 +145,7 @@ one you already made: including it asks for nothing new.
 
 ## Dispatch from inside a run
 
-Not since v2.20.0: `pot dispatch`, `pot --clone` and `--detach` inside a run are refused, on both backends
+Not since graft v2.20.0: `pot dispatch`, `pot --clone` and `--detach` inside a run are refused, on both backends
 (`pot (work): pot dispatch is the host's: a run starts no clone inside it; run it on the host`). An agent that wants
 to hand off a task asks you to run `pot dispatch` on the host. Agents starting agents come back with `pot serve`,
 which will ask you first.
@@ -169,8 +169,8 @@ A path that a repo kit protects (`AGENTS.md` in flexion-assistant, say) stays re
 
 ## What the clone has, and what it doesn't
 
-- Your commit (the base) and its branch, and no other branch of yours; its scions (the first level of submodules) at their gitlinks. The
-  scions folder is read-only, as in place; a commit made in a scion's git directory comes back into that scion's
+- Your commit (the base) and its branch, and no other branch of yours; its submodules (the first level) at their gitlinks. The
+  submodules folder is read-only when the bundle protects it, as in place; a commit made in a submodule's git directory comes back into that submodule's
   `refs/remotes/pot-<id>/*`, and one on its detached `HEAD` as `pot-<id>/detached`.
 - Your `user.name`, `user.email`, the origin URL, and a relative `core.hooksPath` that names a tracked folder
   (`.githooks`), so the run's commits there run your hook commands, as siblings. None of your other git config. Your
@@ -179,8 +179,8 @@ A path that a repo kit protects (`AGENTS.md` in flexion-assistant, say) stays re
 - Your repository's kits, as committed at the base. A kit change that you have not committed does not apply.
 - One repository: `--repo` is refused in clone mode.
 - Writable agent configuration (v2.19.1): `**/.claude`, `**/.mcp.json`, `**/.pi`, `**/.codex` and `**/.vscode`,
-  unless a repo or scion kit protects them too ([above](#change-agent-configuration-from-a-run)). The clone's git
-  config, hooks and `info/`, the repo kit's `protect` and the scions folder stay read-only.
+  unless a repo or submodule kit protects them too ([above](#change-agent-configuration-from-a-run)). The clone's git
+  config, hooks and `info/`, the repo kit's `protect` and the bundle's protected paths (such as the submodules folder) stay read-only.
 
 ## Keeping clones
 
@@ -207,10 +207,10 @@ pot clones your repository into its state, with no hard links, and mounts the cl
 inside the run. When the run ends, the host reads the clone's branches through a sandboxed `git upload-pack` with
 fsck into staging repositories it owns, and computes what to flag from there; it never opens the clone with host
 git. `--fetch` copies from staging. See [pot: dispatch](../reference/pot.md#dispatch) and
-[runs/1](../../pot/contracts/runs-1.md).
+[runs/1](../../contracts/runs-1.md).
 
 ## Sources
 
 - [pot's reference: dispatch](../reference/pot.md#dispatch), [pot review](../reference/pot.md#pot-review),
   [pot runs](../reference/pot.md#pot-runs)
-- [pot/core/pot.py](../../pot/core/pot.py): dispatch, review and the run log
+- [core/pot.py](../../core/pot.py): dispatch, review and the run log

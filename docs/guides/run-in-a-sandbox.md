@@ -3,8 +3,8 @@ status: working
 ---
 # Run commands in pot
 
-Run Claude Code, or any command, with pot, graft's sandbox, so that it can change your repository but cannot read your keys,
-reach hosts that you did not grant, or change what decides the sandbox. `pot` is experimental in v2.22.0. The terms
+Run Claude Code, or any command, with pot, so that it can change your repository but cannot read your keys,
+reach hosts that you did not grant, or change what decides the sandbox. `pot` is experimental in 0.1.0. The terms
 are in [pot](../reference/pot.md#the-model).
 
 ## Before you begin
@@ -51,7 +51,7 @@ are in [pot](../reference/pot.md#the-model).
    ```
 
    Type `y` for each set that you accept. Each powerful item, such as the login `credential`, asks on its own:
-   `grant? [y/N]`. The repo kit and any scion kits that need a grant come next, in the same prompt. The prompt
+   `grant? [y/N]`. The repo kit and any submodule kits that need a grant come next, in the same prompt. The prompt
    appears only at a terminal; elsewhere the run stops with exit 125 and `pot grant KIT`.
 
 4. Claude starts. The startup line names what differs from the usual shape, and `pot explain`:
@@ -193,58 +193,69 @@ pot (work): ~/.workstation is a root: pot dispatch CMD (its commits come back fo
 
 A repository's own needs are its repo kit: the packages its work needs, paths to protect, and requests.
 
-1. In a graft consumer, add `kit` to mkFlake's `perSystem`:
+1. Give the repository a `pot-kits` bundle: its flake's `packages.<system>.pot-kits`, from pot's library
+   `pot.lib.pot.kitsFor` ([pot-lib/1](../../contracts/pot-lib-1.md)). A producer such as tuteur's mkFlake (graft
+   before 0.1.0) writes it for you from `perSystem.kit` when the repository's flake declares `inputs.pot`
+   ([tuteur](https://github.com/danielnaab/tuteur)). By hand:
 
    ```nix
-   outputs = inputs: inputs.graft.lib.mkFlake {
-     inherit inputs;
-     perSystem = { pkgs, ... }: {
-       kit = {
-         tools = [ pkgs.nodejs_22 ];
-         protect = [ "AGENTS.md" ];
-         requests.network = [ "registry.npmjs.org" ];
-         requests.capabilities = [ { name = "nix"; } ];   # graft check evaluates graft.nix
+   {
+     inputs.pot.url = "github:danielnaab/pot/v0.1.0";
+     outputs = { pot, ... }: let pkgs = pot.inputs.nixpkgs.legacyPackages.x86_64-linux; in {
+       packages.x86_64-linux.pot-kits = pot.lib.pot.kitsFor {
+         inherit pkgs;
+         self = {
+           file = "flake.nix";
+           kit = {
+             tools = [ pkgs.nodejs_22 ];
+             protect = [ "AGENTS.md" ];
+             requests.network = [ "registry.npmjs.org" ];
+             requests.capabilities = [ { name = "nix"; } ];   # for a tool that evaluates Nix in the run
+           };
+         };
        };
      };
-   };
+   }
    ```
 
-   A repository that runs `graft check` inside a run needs the `nix` capability: `graft check` evaluates each
-   scion's `graft.nix`. The capability needs your root to bind it (`nix."*" = { via = "daemon-untrusted"; };`),
-   which graft's default root and `pot init`'s root do.
+   A repository whose tools evaluate Nix inside a run (`tuteur check` evaluates each submodule's provider file)
+   needs the `nix` capability. The capability needs your root to bind it (`nix."*" = { via = "daemon-untrusted"; };`),
+   which pot's default root and `pot init`'s root do.
 
-   pot finds this flake from `.gitmodules`: the nearest `flake.nix` at or above the folder that holds the scions.
-   A repository with no submodules has no repo kit from its flake, and pot never evaluates it: give it one with
-   the root's `repoKits` (below), or graft a scion first.
+   pot finds this flake from `.gitmodules`: the nearest `flake.nix` at or above the folder that holds the
+   submodules. A repository with no submodules has no repo kit from its flake, and pot never evaluates it: give it
+   one with the root's `repoKits` (below). A repository with submodules and a flake but no `pot-kits` runs
+   without its own kits and protections, and pot says so once at start:
+   `pot (work): DIR's flake has no pot-kits; its own kits and protections are not applied`.
 
 2. Read what a run would get: `pot explain claude`. The repo kit's items are labelled `(repo)`, and so are the
-   paths that the bundle protects (each `graft.nix` and the scions folder).
+   paths that the bundle protects (the producer's own files, such as each `tuteur.nix` and the submodules folder).
 3. Run `pot grant`, and accept the repo kit's requests. Commit the grants file in your root.
 
 A powerful grant of a repo kit is fixed to its flake directory as committed and staged. When a commit or a staged
 change under it moves that tree, the next run stops with exit 125, lists the changed paths, and `pot grant` asks
 again for each powerful item.
 
-For a repository that is not a graft consumer, the root declares its repo kit, keyed by its normalised origin:
+For a repository with no `pot-kits` bundle, the root declares its repo kit, keyed by its normalised origin:
 
 ```nix
 programs.pot.repoKits."github.com/example/site".requests.network = [ "registry.npmjs.org" ];
 ```
 
 If the repository's `ensure.sh` or `justfile` builds tools with `nix`, make it use the tools that `pot` built
-([Move from v2.14.0's sandbox](move-from-the-v2-14-sandbox.md#run-the-repositorys-tools-inside)).
+([Move from v2.14.0's sandbox](https://github.com/danielnaab/graft/blob/v2/docs/guides/move-from-the-v2-14-sandbox.md#run-the-repositorys-tools-inside)).
 
 ## Set up a root
 
 | Root | Use it when | Start it with |
 |---|---|---|
 | A home-manager root | You manage your home with home-manager. | `programs.pot` (below) |
-| graft's default root | You have no root and want to try `pot`. | `nix run github:danielnaab/graft/v2.22.0#pot -- claude` |
+| pot's default root | You have no root and want to try `pot`. | `nix run github:danielnaab/pot/v0.1.0 -- claude` |
 | A minimal root of your own | You want a root without home-manager. | `pot init ~/src/pot-root`, then the steps that it prints |
 
-graft's default root and the root that `pot init` writes work without home-manager. Each has a
+pot's default root and the root that `pot init` writes work without home-manager. Each has a
 `claude-code@personal` instance (the `claude` on your `PATH`), its token binding at
-`~/.config/pot/claude-token-personal` (step 1), and the `nix` relay. graft's default root keeps its grants in
+`~/.config/pot/claude-token-personal` (step 1), and the `nix` relay. pot's default root keeps its grants in
 `~/.config/pot/grants.json`. `pot init DIR` writes `DIR/flake.nix`, with its grants file beside
 it: track `DIR` in git. A home-manager root keeps its grants file in its own repository, where you review and
 commit it.
@@ -254,14 +265,14 @@ A home-manager root:
 ```nix
 { inputs, pkgs, ... }:
 {
-  imports = [ inputs.graft.homeManagerModules.pot ];
+  imports = [ inputs.pot.homeManagerModules.pot ];
   programs.pot = {
     enable = true;
     grantsFile = "~/.workstation/pot/grants.json";
     rootRepos = [ "~/.workstation" ];
-    kits."claude-code@personal" = inputs.graft.kits.claude-code { inherit pkgs; };
+    kits."claude-code@personal" = inputs.pot.kits.claude-code { inherit pkgs; };
     kits.standing.requests.network = [ "pypi.org" "registry.npmjs.org" ];
-    tools = [ inputs.graft.packages.${pkgs.stdenv.hostPlatform.system}.default ];   # graft in runs of any repository
+    tools = [ pkgs.gh ];                    # more commands on every run's PATH
     contexts.work.include = [ "standing" ];
     bindings = {
       "status.relay"."*" = { workmux = true; };
@@ -276,9 +287,9 @@ A home-manager root:
 For a second Claude account, or Bedrock, add an instance. Each instance is granted on its own:
 
 ```nix
-kits."claude-code@work" = inputs.graft.kits.claude-code {
+kits."claude-code@work" = inputs.pot.kits.claude-code {
   inherit pkgs; configDir = ".claude-accounts/work";
-  api = inputs.graft.apis.bedrock { region = "us-east-1"; };
+  api = inputs.pot.apis.bedrock { region = "us-east-1"; };
 };
 defaultInstance.claude-code = "personal";
 ```
@@ -292,9 +303,9 @@ For an Anthropic-compatible gateway that takes a key as a bearer token (v2.17.1)
 file to the credential:
 
 ```nix
-kits."claude-code@gateway" = inputs.graft.kits.claude-code {
+kits."claude-code@gateway" = inputs.pot.kits.claude-code {
   inherit pkgs; configDir = ".claude-accounts/work";
-  api = inputs.graft.apis.gateway { url = "https://llm.example.org"; };
+  api = inputs.pot.apis.gateway { url = "https://llm.example.org"; };
 };
 bindings.credential."llm.example.org kit=claude-code@gateway" = {
   via = "file"; from.file = "~/.config/llm-gateway/key"; };   # the key alone, mode 600
@@ -318,7 +329,7 @@ only when it is signed in to claude.ai, and a run signs in with a token. Install
 skill folders: a link into a checkout under `skillSources`, or a real folder that `skillDirs` names.
 
 ```nix
-kits."claude-code@personal" = inputs.graft.kits.claude-code {
+kits."claude-code@personal" = inputs.pot.kits.claude-code {
   inherit pkgs;
   skillSources = [ "~/src/agent-skills" ];   # your checked-out skills
   skillDirs = [ ];                           # no synced or hand-placed real folders
@@ -331,7 +342,7 @@ For the pi coding agent (v2.19.0), add the `pi` kit. When home-manager writes pi
 them. Here `config.pi.generated` stands for your own module's computed values (a read-only option it sets):
 
 ```nix
-kits.pi = inputs.graft.kits.pi {
+kits.pi = inputs.pot.kits.pi {
   inherit pkgs;
   files = config.home.file;                         # AGENTS.md and the other files under ~/.pi/agent
   inherit (config.pi.generated) settings endpoints; # settings.json; the APIs your extensions reach
@@ -349,8 +360,8 @@ checks), sees your extensions, skills and themes read-only, and keeps its sessio
 logins (`/login`) stay on the host, so give each provider a key, and a `/model` choice lasts one session: set
 `defaultModel` in the root ([pi](../reference/pot.md#pi)).
 
-graft's command is not in a run's standard tools. A run in a graft consumer has that repository's own `graft`
-(from its `pot-kits` bundle); `tools` gives every other run one too.
+A producer's own command (such as `tuteur`) is not in a run's standard tools. A run in a repository whose bundle
+carries it (its `pot-kits` bundle's `bin/`) has it; `tools` gives every other run one too.
 
 Run `home-manager switch`. `pot` is then on `PATH`, and `~/.config/pot/launcher` points at it. The options are
 in [Home-manager options](../reference/pot.md#home-manager-options).
@@ -372,14 +383,14 @@ in [Home-manager options](../reference/pot.md#home-manager-options).
   link whose target the run does not see: without the `nix` capability, a run sees only its closure in the store.
   Make the test use the `PATH` it was given.
 - **The startup line says `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant
-  does not apply`.** That scion is not at a release tag, so the run goes on without its reach. Move it to a release
-  (`graft upgrade NAME`), or try it on the host with `pot host CMD`.
+  does not apply`.** That submodule is not at a release tag, so the run goes on without its reach. Move it to a release
+  (with your producer's upgrade, such as `tuteur upgrade NAME`), or try it on the host with `pot host CMD`.
 - **A claude.ai skill is missing inside a run.** Synced claude.ai skills do not load in a run (above). Install the
   skill as an ordinary skill folder.
-- **`pot: this root has no backend for darwin`.** Your root was built by a graft before Seatbelt's return: update
-  graft and rebuild the root.
+- **`pot: this root has no backend for darwin`.** Your root was built before Seatbelt's return (before graft
+  v2.18.0): update pot and rebuild the root.
 - **`pot: check-kb runs without pot (…)`.** A wrapped command found no root's pot to run it (no
-  `~/.config/pot/launcher`, as on a Mac with pot off, or a root older than v2.18.0), and ran it unwrapped. The
+  `~/.config/pot/launcher`, as on a Mac with pot off, or a root older than graft v2.18.0), and ran it unwrapped. The
   parenthesis names the fix.
 - **`… not in this run's children table …`** (exit 126). A wrapper from another workspace's tools: run it in its
   own repository, or on the host.
@@ -389,7 +400,7 @@ in [Home-manager options](../reference/pot.md#home-manager-options).
 
 ## How it works
 
-At start, `pot` finds the kits of the run: the command's, the repository's, its scions', and the root kits its
+At start, `pot` finds the kits of the run: the command's, the repository's, its submodules', and the root kits its
 context includes. It reads your grants file, and composes the run's policy: what the run sees, its limits, and
 the reach that you granted. Then bubblewrap starts the command with only that. Network goes through a proxy on
 the host that allows only granted hosts. Nothing that the run writes can widen a later run: the grants file and
@@ -400,11 +411,11 @@ tree, and its commits come back only when you fetch them ([Work in a clone](disp
 ## Sources
 
 - [pot](../reference/pot.md): contexts, kits, requests, grants, flags, messages
-- [Move from v2.14.0's sandbox](move-from-the-v2-14-sandbox.md)
-- [lib/mk-flake.nix](../../lib/mk-flake.nix): `kit` in `perSystem`
-- [pot-kits/1](../../pot/contracts/pot-kits-1.md): how pot finds a repository's flake
-- [pot/core/pot.py](../../pot/core/pot.py): the grant prompt, the startup and exit lines
-- [pot/kits/claude-code.nix](../../pot/kits/claude-code.nix): the claude-code kit
-- [pot/kits/pi.nix](../../pot/kits/pi.nix): the pi kit
-- [pot/nix/hm.nix](../../pot/nix/hm.nix): `programs.pot`
+- [Move from v2.14.0's sandbox](https://github.com/danielnaab/graft/blob/v2/docs/guides/move-from-the-v2-14-sandbox.md)
+- [pot-lib/1](../../contracts/pot-lib-1.md): `kitsFor`, which a repository's flake calls
+- [pot-kits/1](../../contracts/pot-kits-1.md): how pot finds a repository's flake
+- [core/pot.py](../../core/pot.py): the grant prompt, the startup and exit lines
+- [kits/claude-code.nix](../../kits/claude-code.nix): the claude-code kit
+- [kits/pi.nix](../../kits/pi.nix): the pi kit
+- [nix/hm.nix](../../nix/hm.nix): `programs.pot`
 - [tests/run.sh](../../tests/run.sh): the `pot` section

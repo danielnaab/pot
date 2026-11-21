@@ -1,7 +1,7 @@
 ---
 status: working
 ---
-# pot: siblings, not nesting (the v2.20.0 design)
+# pot: siblings, not nesting (the design of graft v2.20.0, pot before 0.1.0)
 
 The design behind [Siblings and the children table](pot.md#siblings-and-the-children-table) (design §10, revised
 in v2.20.0). It replaces nesting on both backends: a narrower child is never started inside its caller; the host
@@ -191,6 +191,6 @@ policy alone, so each dimension below needs its own reason, and a test.
   code; `^C` at a pty forwarded; the child stopped when the client was killed, when the caller's sandbox was killed
   and when the server ended; a directory fd's escape (`/proc/self/fd/0/…`). Recorded in the flexion-assistant
   session record `2026-11-19-pot-v2-20-siblings`.
-- [pot/core/siblings.py](../../pot/core/siblings.py), [pot/core/pot.py](../../pot/core/pot.py) (`inner_run`,
-  `sibling_client`, `sibling_entry`), [pot/core/compose.py](../../pot/core/compose.py) (`children_table`,
+- [core/siblings.py](../../core/siblings.py), [core/pot.py](../../core/pot.py) (`inner_run`,
+  `sibling_client`, `sibling_entry`), [core/compose.py](../../core/compose.py) (`children_table`,
   `narrower`, `admit`).

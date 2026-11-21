@@ -3,14 +3,17 @@ status: working
 ---
 # pot
 
-pot, graft's sandbox: its model, contexts, kits, requests, grants, command line, messages and limits. For the
+pot: its model, contexts, kits, requests, grants, command line, messages and limits. For the
 steps, see [Run commands in pot](../guides/run-in-a-sandbox.md). For a move from v2.14.0's
-`sandbox` launcher, see [Move from v2.14.0's sandbox](../guides/move-from-the-v2-14-sandbox.md). For why, see
+`sandbox` launcher, see [Move from v2.14.0's sandbox](https://github.com/danielnaab/graft/blob/v2/docs/guides/move-from-the-v2-14-sandbox.md). For why, see
 [Decisions](../decisions.md#roots-grant-reach-kits-only-ask). The formats that pot shares with other programs and
-with graft are [pot's contracts](../../pot/contracts/README.md): [kit](../../pot/contracts/kit-1.md),
-[pot-lib](../../pot/contracts/pot-lib-1.md), [pot-kits](../../pot/contracts/pot-kits-1.md),
-[grants](../../pot/contracts/grants-1.md), [run-env](../../pot/contracts/run-env-1.md) and
-[runs](../../pot/contracts/runs-1.md).
+with producers of kits are [pot's contracts](../../contracts/README.md): [kit](../../contracts/kit-1.md),
+[pot-lib](../../contracts/pot-lib-1.md), [pot-kits](../../contracts/pot-kits-1.md),
+[grants](../../contracts/grants-1.md), [run-env](../../contracts/run-env-1.md) and
+[runs](../../contracts/runs-1.md), and the `Pot-Run:` [trailer](../../contracts/trailer-1.md).
+
+Before 0.1.0, pot shipped inside graft, so a version such as v2.17.0 on this page is graft's release that changed
+pot; [CHANGELOG.md](../../CHANGELOG.md) starts at 0.1.0 and points at graft's for the earlier history.
 
 `pot` is experimental. It runs on Linux, with bubblewrap, and on macOS, with Seatbelt (`/usr/bin/sandbox-exec`),
 which is weaker: no process or network isolation, and a dispatch clone at its own path
@@ -54,12 +57,14 @@ Terms built from these:
 | **access** | `write`, `read` or `none`: what the run may do to its workspace. |
 | **state** | A reach request for a private persistent directory. |
 | **command** | A program that a kit ships. |
-| **command kit**, **repo kit**, **scion kit**, **root kit**, **agent kit** | A kit by its place: the kit whose command runs; a repository's own needs; a grafted provider's kit; a kit the root defines; a kit that describes an agent, such as Claude Code. |
-| **allowance** | The bounds on a `delegate` grant (not in v2.22.0). |
+| **command kit**, **repo kit**, **submodule kit**, **root kit**, **agent kit** | A kit by its place: the kit whose command runs; a repository's own needs; the kit of a git submodule at a release tag; a kit the root defines; a kit that describes an agent, such as Claude Code. |
+| **allowance** | The bounds on a `delegate` grant (not in 0.1.0). |
 | **digest**, **source** | What a grant is fixed to: a hash of the kit's request set, and for powerful items the code it came from. |
 
-graft's other terms keep their meaning. A provider ships a kit in `graft.nix`. A consumer's own kit is its repo
-kit. A scion is how a provider's kit enters a workspace. A pin is still only the gitlink.
+A producer's terms keep their meaning. With tuteur (graft before 0.1.0), a provider ships a kit in its provider
+file (`tuteur.nix`, or graft's `graft.nix`), and a consumer's own kit is its repo kit. A submodule at a release tag
+is how a provider's kit enters a workspace; the gitlink is the pin. Field names from graft's vocabulary stay in the
+v1 contracts: the bundle's `scions`, runs/1's `scionCommits`.
 
 **Reach follows the command.** `pot claude` gets Claude's grant, the repo kit's, and the standing reach of the
 root kits that its context includes. **Output is untrusted**: after an in-place run, read the tree as you would
@@ -71,11 +76,11 @@ A root is where the person's authority lives. A run never writes a root in place
 
 | Root | Where | For |
 |---|---|---|
-| A home-manager root | `programs.pot` in your home-manager configuration, from `inputs.graft.homeManagerModules.pot` | Your own machine. Its source repository is a [root repository](#root-repositories). |
-| graft's default root | `nix run github:danielnaab/graft/v2.22.0#pot -- CMD` (`packages.<system>.pot`, `apps.<system>.pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
-| A minimal root of your own | `pot init DIR` writes `DIR/flake.nix`, built with `graft.lib.mkRoot` | A start for a root that you then edit and commit. |
+| A home-manager root | `programs.pot` in your home-manager configuration, from `inputs.pot.homeManagerModules.pot` | Your own machine. Its source repository is a [root repository](#root-repositories). |
+| pot's default root | `nix run github:danielnaab/pot/v0.1.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
+| A minimal root of your own | `pot init DIR` writes `DIR/flake.nix`, built with `pot.lib.mkRoot` | A start for a root that you then edit and commit. |
 
-graft's default root and the root that `pot init` writes have graft's contexts, hidden list and standard tools,
+pot's default root and the root that `pot init` writes have pot's default contexts, hidden list and standard tools,
 and:
 
 - a `claude-code@personal` instance with `binary = "host"` (the `claude` on the host's `PATH`, resolved at each
@@ -84,10 +89,10 @@ and:
   `claude setup-token`;
 - `status.relay."*"`, and `nix."*"` bound to the relay.
 
-`graft.lib.mkRoot` builds a root's `pot`:
+`pot.lib.mkRoot` builds a root's `pot`:
 
 ```nix
-graft.lib.mkRoot {
+pot.lib.mkRoot {
   pkgs;
   name ? "default";
   grantsFile ? "~/.config/pot/grants.json";
@@ -122,7 +127,7 @@ and no default root baked into a wrapper.
 | `grantsFile` | The [grants file](#the-grants-file). Default `"~/.config/pot/grants.json"`; a home-manager root keeps it in its repository, such as `"~/.workstation/pot/grants.json"`. Hidden from every run. |
 | `stateDir` | `pot`'s state: agent homes, caches, run directories ([State](#state)). Default `"~/.local/state/pot"`. Hidden from every run, and refused inside a workspace. |
 | `defaultContext` | The context when none is typed. Default `"work"`. |
-| `defaultInstance` | Per kit, the instance (`KIT@NAME`) used with no `CMD@NAME`, `--instance` or matching caller variables: `{ claude-code = "personal"; }`. Checked when the root evaluates: `graft.lib.mkRoot: defaultInstance.KIT = "X": the root declares KIT@a, KIT@b`, or `graft.lib.mkRoot: defaultInstance.KIT: the root has no kit KIT@NAME (kits: …)`; from the module, `programs.pot.defaultInstance.KIT = "X": programs.pot.kits declares KIT@a, …` and `programs.pot.defaultInstance.KIT: programs.pot.kits has no KIT@NAME`. Its old form, `defaultAccount`, was removed in v2.17.0 ([Move to v2.17.0](../guides/move-to-v2-17.md)). |
+| `defaultInstance` | Per kit, the instance (`KIT@NAME`) used with no `CMD@NAME`, `--instance` or matching caller variables: `{ claude-code = "personal"; }`. Checked when the root evaluates: `pot.lib.mkRoot: defaultInstance.KIT = "X": the root declares KIT@a, KIT@b`, or `pot.lib.mkRoot: defaultInstance.KIT: the root has no kit KIT@NAME (kits: …)`; from the module, `programs.pot.defaultInstance.KIT = "X": programs.pot.kits declares KIT@a, …` and `programs.pot.defaultInstance.KIT: programs.pot.kits has no KIT@NAME`. Its old form, `defaultAccount`, was removed in v2.17.0 ([Move to v2.17.0](https://github.com/danielnaab/graft/blob/v2/docs/guides/move-to-v2-17.md)). |
 | `agentMarkers` | Variables that mean an agent is the caller, beyond the floor (`CODEX_SANDBOX`, `CLAUDECODE` and `POT`, whatever kits the root has) and each root kit's `agent.markers`. Default `[ ]`. |
 | `rootRepos` | The root's source repositories: checkout paths (`~/…`, `/…`) or origin patterns. mkRoot's default is `[ ]`; the home-manager module's is `[ "~/.workstation" ]`. See [Root repositories](#root-repositories). |
 | `hidden` | Paths hidden from every run, added to [pot's default list](#hidden-paths), which a root cannot shorten. |
@@ -132,10 +137,10 @@ and no default root baked into a wrapper.
 | `tools` | Packages on every run's `PATH`, after the standard set. |
 | `caBundle` | A CA bundle for every run, such as a corporate proxy's. |
 | `kits.<name>` | Root kits: agent kits and standing reach ([Kits](#kits)). A name is `NAME`, or `NAME@INSTANCE` for an instance of an agent kit (`claude-code@personal`). |
-| `repoKits."<pattern>"` | A repo kit for a repository that is not a graft consumer. The pattern is a [normalised origin](#identity), with `*` and `?` (`"platform-vm:2222/daniel/graft"`), or a URL, which is normalised. |
+| `repoKits."<pattern>"` | A repo kit for a repository with no `pot-kits` bundle of its own. The pattern is a [normalised origin](#identity), with `*` and `?` (`"platform-vm:2222/daniel/graft"`), or a URL, which is normalised. |
 | `contexts.<name>` | Changes to the contexts, and new ones ([Contexts](#contexts)). |
 | `bindings.<capability>."<selector>"` | How each capability is carried out ([Bindings](#bindings)). |
-| `limits.memoryMax`, `limits.tasksMax` | The [resource scope](#resource-limits)'s limits, in systemd's units (`"8G"`, `"50%"`, `"infinity"`). Default `"50%"` and `2048`. Another key: `graft.lib.mkRoot: limits is { memoryMax; tasksMax; } and clones { keepDays; maxSize; } (not X)`. |
+| `limits.memoryMax`, `limits.tasksMax` | The [resource scope](#resource-limits)'s limits, in systemd's units (`"8G"`, `"50%"`, `"infinity"`). Default `"50%"` and `2048`. Another key: `pot.lib.mkRoot: limits is { memoryMax; tasksMax; } and clones { keepDays; maxSize; } (not X)`. |
 | `clones.keepDays`, `clones.maxSize` | How long a [dispatch](#dispatch) clone that needs no review is kept, and the clones' total size. Default `14` and `"20G"`. Neither removes unfetched commits. |
 
 The other options are mkRoot's arguments. While `programs.pot.enable` is on, the module asserts that workmux's
@@ -166,7 +171,7 @@ programs.pot.contexts.readonly = { extends = "work"; access = "read"; };
 | `access` | `write`, `read`, `none` | What the run may do to its workspace. |
 | `backend` | a backend name, default `auto` | The backend that enforces the run. |
 | `requires` | guarantee names | A run for which the backend cannot prove these is refused ([Guarantees](#guarantees)). |
-| `trust` | `workspace`, `root` | Whether workspace kits are evaluated. `root` is not in v2.22.0. |
+| `trust` | `workspace`, `root` | Whether workspace kits are evaluated. `root` is not in 0.1.0. |
 | `include` | root kit names | Root kits in every run of the context: their reach is standing reach. |
 | `commands` | root kit names | Root kits whose commands are rows of a run's [children table](#siblings-and-the-children-table), without their reach. |
 | `network` | `granted`, `none` | `none` drops every network item. |
@@ -200,7 +205,7 @@ pot: host run 7f3a · 2 commits on HEAD
   9f8e7d6c5 N -  wip
 ```
 
-and logs them as the run's `after` event ([runs/1](../../pot/contracts/runs-1.md): a `pot host` run's record has
+and logs them as the run's `after` event ([runs/1](../../contracts/runs-1.md): a `pot host` run's record has
 `commits`). A commit elsewhere (another branch left off `HEAD`, another worktree) is not looked at. The look reads
 git only: it is a record of what happened, not a gate.
 
@@ -223,11 +228,12 @@ fails). On the host, wire it in your global git config the same way:
 ```
 
 The trailer is a claim the command could forge (it sets its own environment), never evidence: the run's `after`
-event, which the host writes, is what ties a commit to a run.
+event, which the host writes, is what ties a commit to a run. Its form, for readers such as tuteur's `ci signers`,
+is [trailer/1](../../contracts/trailer-1.md).
 
 When `CMD` is not on the host's `PATH`, `pot host` runs the workspace bundle's command of that name: a kit
-command's store `program`, else `pot-kits`' `bin/CMD`. So `pot host meeting-kit` works in a graft consumer, as the
-unverified-scion refusal suggests.
+command's store `program`, else `pot-kits`' `bin/CMD`. So `pot host meeting-kit` works in a repository whose bundle carries it, as
+the unverified submodule kit's refusal suggests.
 
 #### Resume on the host
 
@@ -295,18 +301,18 @@ pot [CONTEXT] --clone [--from REF] [--detach] CMD …      # --clone is --mode c
 - **The base** is `--from REF`, default `HEAD`, resolved in your repository: `pot (dispatch): --from X: not a commit
   in DIR` otherwise. The clone's branch is the base's branch (`--from main`, `--from origin/x` gives `x`, `HEAD` on a
   branch gives that branch); a tag, a commit or a detached `HEAD` gives a branch `pot-<id>`. The clone keeps only
-  that branch (its other local branches are deleted after the checkout), and each scion's clone only its gitlink,
+  that branch (its other local branches are deleted after the checkout), and each submodule's clone only its gitlink,
   on a detached `HEAD`, so only the refs a run moves come back.
 - **What the clone carries:** your `user.name` and `user.email`, the origin URL, and `core.hooksPath` when it is a
   relative path naming a tracked folder (`.githooks`); nothing else of your config. So commits the run makes in the
   clone run the repository's [hook commands](#hook-commands), as siblings, as in place. The host's git runs every command
   in a clone with no global or system config and hooks disabled, so no hook or filter of the clone's runs on the
   host, and filters such as git-lfs's never run: LFS files stay pointer files.
-- **Scions:** the first level of submodules is cloned, from your repository's module folders, at their gitlinks;
-  deeper submodules are not. For each scion that has its own, `pot runs ID`, `pot review ID` and the run's
-  `explain.txt` have a note: `note       nix/agent-tools/.scions/notebook-kit: its own submodules are not cloned`. The scions folder stays read-only, as in place, so a run commits in a scion only
-  through its git directory. Those commits come back too, into that scion's `refs/remotes/pot-<id>/*`, and a commit
-  on a scion's detached `HEAD` as `pot-<id>/detached`.
+- **Submodules:** the first level of submodules is cloned, from your repository's module folders, at their gitlinks;
+  deeper submodules are not. For each submodule that has its own, `pot runs ID`, `pot review ID` and the run's
+  `explain.txt` have a note: `note       nix/agent-tools/.scions/notebook-kit: its own submodules are not cloned`. The submodules folder stays read-only, as in place, so a run commits in a submodule only
+  through its git directory. Those commits come back too, into that submodule's `refs/remotes/pot-<id>/*`, and a commit
+  on a submodule's detached `HEAD` as `pot-<id>/detached`.
 - **Uncommitted changes stay behind.** The clone starts at a commit. With a dirty tree, pot says so before the
   startup line: `pot (dispatch): the clone starts at main (716424f); your 1 uncommitted change stays here, outside
   it` (`N uncommitted changes stay`). The startup line names the base:
@@ -314,7 +320,7 @@ pot [CONTEXT] --clone [--from REF] [--detach] CMD …      # --clone is --mode c
 - **In the run,** the clone is at your repository's own path, your working tree is not in the run, and
   `POT_CLONE=1`. The clone's git config, hooks and `info/`, and its modules' config and hooks, are protected, and
   the [protected paths](#protected-paths) apply as in place.
-- **Kits from the base.** The kit identities and the state scope are your repository's. The scion kits are read from
+- **Kits from the base.** The kit identities and the state scope are your repository's. The submodule kits are read from
   `.gitmodules` at the base commit, and the repo kit is built from the clone's flake directory at the base, never
   from your working tree: a kit change you have not committed does not apply.
 - **`--repo`** is refused in clone mode: `pot (dispatch): --repo comes to clone mode in a later release; a dispatch
@@ -332,7 +338,7 @@ pot [CONTEXT] --clone [--from REF] [--detach] CMD …      # --clone is --mode c
   fsck, into host-owned staging repositories in the run's folder. It lists the clone's refs, then fetches each
   branch alone, so one bad object does not hide the good branches. A ref that fails is an ATTENTION item quoting
   git's first `error:` line (else its first line), such as `fetch failed: refs/heads/bad: error: bogus commit object
-  b40ae24…`, a scion's prefixed with its path, or `fetch failed: listing its refs: …`; git's output goes to stderr
+  b40ae24…`, a submodule's prefixed with its path, or `fetch failed: listing its refs: …`; git's output goes to stderr
   as `pot: staging top: error: …`, one line per line. Such a run stays in `review`, and `keepDays` and `maxSize`
   never remove it. If the host's look itself fails, the run is recorded the same way, with `fetch failed: the
   host's look failed (TYPE: MESSAGE)`, and its exit line says `pot: run ID · fetch failed: …: pot review ID`: the
@@ -415,10 +421,10 @@ A kit is a bundle with an identity that the host establishes:
 | Kit | Declared in | Identity |
 |---|---|---|
 | Root kit | the root's `programs.pot.kits.<name>` | `root:<name>[@<instance>]` |
-| Scion kit | a provider's `graft.nix`: `kit = { … };` | `git:<url>`, verified: the gitlink is a release tag at that URL |
-| Repo kit | a consumer's mkFlake `perSystem`: `kit = { … };`; or the root's `repoKits."<origin>"` | `repo:<normalised origin>` |
+| Submodule kit | a git submodule's kit, as the bundle's producer hands it over (tuteur: a provider's `tuteur.nix`, `kit = { … };`) | `git:<url>`, verified: the gitlink is a release tag at that URL |
+| Repo kit | the bundle's `self` (tuteur: a consumer's mkFlake `perSystem`, `kit = { … };`); or the root's `repoKits."<origin>"` | `repo:<normalised origin>` |
 
-graft ships agent kits as functions that a root calls, such as `graft.kits.claude-code`
+pot ships agent kits as functions that a root calls, such as `pot.kits.claude-code`
 ([Claude Code](#claude-code)). The root names each instance: `root:claude-code@personal`,
 `root:claude-code@flexion`.
 
@@ -443,7 +449,7 @@ kit = {
   };
   # commands: programs the kit ships
   commands.meeting-kit = { program = "${pkg}/bin/meeting-kit"; access = "write"; requests = { }; };
-  # recipes: data from which graft generates just recipes
+  # recipes: data from which pot generates just recipes (kits.just)
   recipes.meeting-run = "meeting-kit run";
   # 1.1, a root's kit only: how pot recognises this agent and its instances
   agent = { markers = [ "CLAUDECODE" ]; select.env.CLAUDE_CONFIG_DIR = "~/.claude-accounts/flexion"; };
@@ -453,18 +459,18 @@ kit = {
 | Field | Kind | Meaning |
 |---|---|---|
 | `version` | | `"1.0"` (when missing), `"1.1"` or `"1.2"`. A newer minor is refused: `pot: FILE: kit version 1.3 is newer than this pot reads (1.0, 1.1, 1.2): take a newer pot`. |
-| `tools` | see | On `PATH`. A repo kit's tools reach every run in its workspace; a scion kit's do not. Its old name, `packages`, is refused when a kit is built: `pot: FILE: packages is tools' old name, gone in v2.17.0: give tools`; pot still reads it in a bundle that graft v2.16.x built. |
+| `tools` | see | On `PATH`. A repo kit's tools reach every run in its workspace; a submodule kit's do not. Its old name, `packages`, is refused when a kit is built: `pot: FILE: packages is tools' old name, gone in v2.17.0: give tools`; pot still reads it in a bundle that graft v2.16.x built. |
 | `agent` | | Kit 1.1, a root's kit only (elsewhere: `agent: only a root's kit may declare it`): `markers` (variables that mean the caller is this agent), `select.env` (the caller's variables that choose this instance), `resume` (`transcripts`, a `~/…/**/*.SUFFIX` glob in the run; `args`, with `{id}`; `render`, a program that prints a transcript's text) and `hooks` (explain's rows). |
 | `env.set` | see | Fixed values, for the kit's own commands. Names that `pot` owns are refused: `BASH_ENV`, `PATH`, `HOME`, `POT*` and v2.14.0's `GRAFT_SANDBOX*`, the proxy variables, `NIX_REMOTE`, `SSL_CERT_FILE`, `TZ`. |
 | `files."<path>"` | see | A file in the run. A key starts with `~/` (in the run's `HOME`) or `/` (needs the `root-files` guarantee). `mode`: `fixed`, bound read-only; `seed`, copied in once, into state on first use, then the run's own; `reassert`, the listed `keys` copied in from `source` at each start. |
 | `protect` | limits | Workspace paths, read-only inside. A path relative to the repository's top, or `**/NAME`. |
 | `requests.*` | reach | Requests, inert until [granted](#grants). |
 | `commands.<name>` | | A program the kit ships: `program` (a store path, or `{ host = "~/…"; }`), `args` (strings or store paths), `access`, `requests`, and in kit 1.1 `dirs`: `{ "~/run/path" = { from; mode; real; copy; label; }; }`. Mode `links` (the default): a read-only folder of the host folder's links (one level deep), plus the real entries `real` names (`true`: all). Mode `mirror`: the host folder's files read-only, `copy` ones writable copies, what the run adds copied out at exit to `<label>-out/`; `{workspace}` is each workspace as a key. Kit 1.0's `fixedDirs`, `realDirs`, `skillDirs` and `memory` are read as `dirs`. In kit 1.2, `hook`: the git hook the command serves (`pre-commit`, `commit-msg`, `prepare-commit-msg`, `pre-push`, `post-checkout`, `post-merge`): see [Hook commands](#hook-commands). |
-| `recipes.<name>` | | A just recipe: `"<command> <args>"`, or in kit 1.2 `{ run = "<command> <args>"; description = "…"; }`. The name is letters, digits, `_` and `-`, starting with a letter; the first word is a command of the same kit, and the rest are literal words (letters, digits and `. _ / = : , @ + % -`, one space apart). graft generates [`kits.just`](files.md#kitsjust) from them. |
+| `recipes.<name>` | | A just recipe: `"<command> <args>"`, or in kit 1.2 `{ run = "<command> <args>"; description = "…"; }`. The name is letters, digits, `_` and `-`, starting with a letter; the first word is a command of the same kit, and the rest are literal words (letters, digits and `. _ / = : , @ + % -`, one space apart). pot generates the bundle's `kits.just` from them ([pot-kits/1](../../contracts/pot-kits-1.md)), which the producer writes beside the submodules. |
 
 - **Requests are literal.** A kit may compute them from its consumer's Nix arguments, never from a workspace
-  file at run time. They are part of the digest. A provider's `graft.nix` function that names `kitArgs` receives
-  the consumer's `perSystem.kitArgs.<scion>` (default `{ }`).
+  file at run time. They are part of the digest. With tuteur, a provider's `tuteur.nix` function that names
+  `kitArgs` receives the consumer's `perSystem.kitArgs.<name>` (default `{ }`).
 - **Unknown fields are errors:** `pot: <file>: <field> is not a kit field (…)`, listing the fields of the kit's
   version: `commands, env, files, protect, recipes, requests, tools, version`, and `agent` from 1.1. `env` takes only `set`. A command's fields are `program`, `access` (`read` or
   `write`), `requests`, `args`, `settings`, `description`, `dirs` (1.1) and `hook` (1.2), or `fixedDirs`, `realDirs`, `skillDirs`,
@@ -473,10 +479,11 @@ kit = {
 - A `program` written `{ host = "~/.local/bin/claude"; }` is resolved on the host at each start. Its target must
   be in the store or fall under a granted `read` request.
 - `pot NAME` finds a command's kit and applies its `access` and requests. Each declared command of a workspace
-  kit is also [wrapped](#wrapped-commands) in the consumer's tools, and its `recipes` become
-  [`kits.just`](files.md#kitsjust). Undeclared tools (`just`, `markdownlint`) stay plain see items.
-- A repository presents its kits as `packages.<system>.pot-kits`, which pot's library `graft.lib.pot.kitsFor`
-  writes (mkFlake calls it): `kit.json` (`{ version = 1; self; scions.<name>; protect; }`, each kit with its `file`),
+  kit is also [wrapped](#wrapped-commands) in the producer's tools, and its `recipes` become
+  the bundle's `kits.just`. Undeclared tools (`just`, `markdownlint`) stay plain see items.
+- A repository presents its kits as `packages.<system>.pot-kits`, which pot's library `pot.lib.pot.kitsFor`
+  writes ([pot-lib/1](../../contracts/pot-lib-1.md): any flake may call it; tuteur's mkFlake does when the
+  repository's flake declares `inputs.pot`): `kit.json` (`{ version = 1; self; scions.<name>; protect; }`, each kit with its `file`),
   `bin/` (the workspace's tools, and the repo kit's `tools`, with each declared command's wrapper in place of its
   program), `closure` (their store paths), `wrappers/bin/`, `commands/` (each wrapper's manifest, which only
   `pot run` reads) and `kits.just`. `pot` builds it with `path:`, never
@@ -487,13 +494,15 @@ kit = {
 - **The flake pot evaluates** comes from git facts alone: for each submodule path in `.gitmodules` at `HEAD`, the
   nearest folder holding `flake.nix` at or above its parent (the deepest, when they differ). A repository with no
   submodules has no flake repo kit, and its flake is never evaluated; the root's `repoKits` still apply. A flake
-  with neither output has no repo kit, cached by tree.
+  with neither output has no repo kit, cached by tree, and from 0.1.0 pot says so once at each start (never
+  silenced by `POT_QUIET`): `pot (work): DIR's flake has no pot-kits; its own kits and protections are not
+  applied`. Such a repository's producer gave pot nothing to apply: with tuteur, the flake lacks `inputs.pot`.
 
 ### Which kits a run is in
 
 1. its **command kit**: the kit whose command runs, if any;
 2. the **repo kit** of each repository in its workspace;
-3. the **scion kits** of those repositories;
+3. the **submodule kits** of those repositories;
 4. the root kits that its context **includes**.
 
 What configures a program follows that program's command. What describes the workspace follows the workspace:
@@ -502,7 +511,7 @@ What configures a program follows that program's command. What describes the wor
 |---|---|---|---|
 | Command kit | all of it | `protect` | its requests, and its command's |
 | Repo kit | `tools` to every run; `env.set` and `files` only to its own commands | `protect` | its requests, to every run in the workspace |
-| Scion kit | none | `protect` | only when one of its commands runs |
+| submodule kit | none | `protect` | only when one of its commands runs |
 | Included root kit | all of it | `protect` | its requests, to every run in the context |
 | Root and context | the standard tools, `TZ`, the CA bundle | hidden paths, `access`, `network` | none, except `inspect`'s view |
 | Flags, one run | `--package` | `--access read` | `--read`, `--write`, `--net`, `--env` |
@@ -538,7 +547,7 @@ repository, the caller's environment or a wrapper's arguments says about these i
 | Question | Established by |
 |---|---|
 | A root kit's identity | `root:<name>[@<instance>]`, from the root's store manifest. A workspace manifest that claims a root name is an error. |
-| A scion kit's identity | `git:<url>`, from `.gitmodules` at the workspace's `HEAD`, verified: the gitlink commit is a release tag at that URL. The check is cached per URL and commit. An unverified kit is listed, and its grant does not apply. |
+| A submodule kit's identity | `git:<url>`, from `.gitmodules` at the workspace's `HEAD`, verified: the gitlink commit is a release tag at that URL. The check is cached per URL and commit. An unverified kit is listed, and its grant does not apply. |
 | A repo kit's identity | `repo:<normalised origin>`, from `git remote get-url origin`. With no remote, `repo:<machine>:<git common dir>`. |
 | Whether the caller is inside a run | `/run/pot/policy.json` on a read-only mount. Inside a run, pot answers only what [Inside a run](#inside-a-run) lists. |
 | The context | The first word typed, or the root's default. Never the environment. |
@@ -562,11 +571,11 @@ they share an identity.
 
 ### Wrapped commands
 
-Every declared command of a workspace kit (the repo kit's and each scion kit's, any kit minor) gets a wrapper:
+Every declared command of a workspace kit (the repo kit's and each submodule kit's, any kit minor) gets a wrapper:
 kitsFor writes `wrappers/bin/<command>` and a manifest `commands/<command>.json` into the bundle, and mkFlake
 puts the wrappers into `packages.<system>.tools` and `devShells.default` over the programs of the same name.
 `packages.<system>.tools.passthru.unwrapped` is the same tools without wrappers, for what must not run pot
-([Move to v2.18.0](../guides/move-to-v2-18.md)); `apps` and `scions.<name>.tools` stay unwrapped. A root kit's
+([Move to v2.18.0](https://github.com/danielnaab/graft/blob/v2/docs/guides/move-to-v2-18.md)); `apps` and `scions.<name>.tools` stay unwrapped. A root kit's
 commands are not wrapped: `pot NAME` runs them.
 
 A wrapper runs `"$launcher" run --command NAME --manifest M -- ARGS`, where the launcher is
@@ -606,7 +615,7 @@ its state (`cache/closures/`, `cache/scope-*`).
 ### Hook commands
 
 A command with `hook = "pre-commit"` (kit 1.2) serves that git hook. The consumer's `.githooks/pre-commit` execs
-its wrapper ([Move to v2.18.0](../guides/move-to-v2-18.md)), with `core.hooksPath` set to `.githooks`. `git commit`
+its wrapper ([Move to v2.18.0](https://github.com/danielnaab/graft/blob/v2/docs/guides/move-to-v2-18.md)), with `core.hooksPath` set to `.githooks`. `git commit`
 on the host then runs the command under its own policy, and `git commit` inside `pot claude` runs it as a
 [sibling](#siblings-and-the-children-table), on both backends: a failing hook aborts the commit with its own exit code.
 `.githooks/` is protected in every run, so a run cannot change what the hook runs.
@@ -642,9 +651,9 @@ item on its own.
 ### Capabilities
 
 A capability is a request named by its effect, and a root [binding](#bindings) carries it out. Every name is
-reserved now. v2.22.0 binds the first five; the others come in a later release.
+reserved now. 0.1.0 binds the first five; the others come in a later release.
 
-| Capability | Binding in v2.22.0 | Class |
+| Capability | Binding in 0.1.0 | Class |
 |---|---|---|
 | `status.relay` | a relay and a `workmux` shim | ordinary |
 | `git.fetch { remote }` | an ssh shim and a host broker that allows only `git-upload-pack` | ordinary |
@@ -789,18 +798,18 @@ is `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines
   Bedrock and an Anthropic claude-code instance on two machines. A repository with no remote always goes in its
   machine's section. A set smaller than its grant needs no write: asking for less needs no approval.
 - **`source`:** none for a root kit, whose code the root's own lock pins. The verified release commit and tag for
-  a scion kit's powerful grants (`{ commit; tag; }`). For a repo kit's powerful grants, the git tree of its flake
+  a submodule kit's powerful grants (`{ commit; tag; }`). For a repo kit's powerful grants, the git tree of its flake
   directory as committed and staged (`{ tree = "<git tree id>"; }`: `git write-tree --prefix=<flake dir>/` from a
-  copy of the index), never the working tree or the scions' status. Ordinary items carry no source: the digest
+  copy of the index), never the working tree or the submodules' status. Ordinary items carry no source: the digest
   fixes them.
 - **When a repo kit's source has changed.** The grant holds when its tree is the flake directory's tree now, or
   when the two trees differ only outside `flake.nix` and `flake.lock` and the repo kit as built (its requests,
   protect list, tools and commands, with their store paths) is the one this machine recorded, in pot's state, for
-  the old tree. So a scion bump or a changed test file asks nothing; a new `flake.lock`, or any change to what the
+  the old tree. So a submodule bump or a changed test file asks nothing; a new `flake.lock`, or any change to what the
   kit builds, asks once, with exit 125 until you grant again. With no record on this machine, only an equal tree
   holds. pot records the kit as built at each run whose tree equals its grant's, so a machine whose repository
   moved past the granted tree before its first v2.17.0 run asks once more, then not again for such changes. A pot from before v2.17.0 asks on any change to the tree; the file's shape is the same for both
-  ([grants/1](../../pot/contracts/grants-1.md#compatibility)).
+  ([grants/1](../../contracts/grants-1.md#compatibility)).
 - **Hidden, not secret.** No run can see or write the grants file: it is unmounted and unwritable. It is not
   confidential: its committed contents are readable through the root's git history wherever the root's `.git` is
   readable, `inspect` included. Grants hold no secrets.
@@ -812,7 +821,7 @@ is `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines
 | Nothing new | The run proceeds. |
 | A stale kit (not granted, asks for more, changed source), at a terminal with no agent marker | The grant prompt appears inline, with the difference, and the run continues after it. The agent markers are the floor `CODEX_SANDBOX`, `CLAUDECODE` and `POT`, the root kits' `agent.markers`, and the root's `agentMarkers`. A workmux pane is not one. |
 | A stale kit, otherwise | Exit 125, with every kit's difference and `pot grant KIT`. The run's log records it as `stopped` ([pot runs](#pot-runs)). When a kit that applies to the run (its command's kit, a workspace kit or an included one; not a root kit the command does not use) requests `status.relay`, the root binds it with `workmux = true`, the caller is in tmux and `workmux` is on its `PATH`, pot also sets the launching pane's workmux status to `waiting`. No other message. |
-| An unverified scion kit with requests (its gitlink is not a release tag at its URL, or the URL did not answer) | The run proceeds without that kit's reach, with one startup note: `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply`, or `meeting-kit: its URL did not answer, so its kit is unverified and its grant does not apply`. Its command runs with its see items. |
+| An unverified submodule kit with requests (its gitlink is not a release tag at its URL, or the URL did not answer) | The run proceeds without that kit's reach, with one startup note: `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply`, or `meeting-kit: its URL did not answer, so its kit is unverified and its grant does not apply`. Its command runs with its see items. |
 | A repo kit that is stale, in `inspect` | The run proceeds: a repo kit's reach does not apply in `inspect`. The startup line notes `NAME not granted (its reach does not apply in inspect)`. |
 | The file changed since this machine last read it | One line, `pot: the grants file changed since this machine last read it: pot grant --diff`, at each start until `pot grant --diff` or a grant acknowledges it. Nothing stops. A pull and a local edit read the same. |
 | The file does not parse, has another version, an unknown field, or an entry whose digest does not match its requests | Every run stops, with a message that says `every run stops until it is fixed`. A parse error names the file and suggests a merge conflict: `~/…/grants.json: the grants file does not parse (…): every run stops until it is fixed (a merge conflict? git diff on it shows the markers; resolve them, keep both machines' entries)`. A digest mismatch names its repair: `~/…/grants.json: the grants file's entry ID: its digest does not match its requests (an edit by hand?): every run stops until it is fixed: pot grant --revoke SHORT, then pot grant SHORT (a merge conflict? …)`. |
@@ -838,7 +847,7 @@ list and its residuals, see [siblings, not nesting](pot-siblings.md).
 When a run starts, the host composes a policy for every command the run may start, and writes the table into the
 run's `policy.json` (`children`). The in-run pot only looks up; it never computes a policy.
 
-**Rows:** every command of the workspace's kits (the repo kit's and each scion kit's), and the commands of the
+**Rows:** every command of the workspace's kits (the repo kit's and each submodule kit's), and the commands of the
 root kits that ship the run's own command or that the context's `commands` lists, in the run's context, mode and
 workspace. A workspace kit's row is composed as `pot <context> KIT:CMD` would start there, with the kit's own
 grant and the repo kit's reach, and **never the context's included kits** (their standing reach, such as a
@@ -906,7 +915,7 @@ a hook command, its two git variables, with its standard input, output and error
   binding, on the host), state folders and closure. Its caller gets none of them, and it gets none of its
   caller's.
 - **Its denials** go to its own `denials`, and `permanent:` names its kit: `requests.network in nkp
-  (scions/nkp/graft.nix)`.
+  (scions/nkp/kit.nix)`.
 - **In a dispatch clone,** a sibling runs in the run's clone, at the original path under bubblewrap (at the clone's
   under Seatbelt); its commits are the dispatch's, staged when the dispatch ends.
 - **Seatbelt** starts siblings as bubblewrap does. So `git commit` inside `pot claude` runs a wrapped pre-commit
@@ -919,7 +928,7 @@ a hook command, its two git variables, with its standard input, output and error
 
 At start, `pot` composes the run's policy from manifests, grants, flags and host facts, and writes it as
 `policy.json`, version 1. Inside the run it is `/run/pot/policy.json`, read-only, and
-`POT_POLICY` names it. It is part of the contract [run-env/1](../../pot/contracts/run-env-1.md), which lists every
+`POT_POLICY` names it. It is part of the contract [run-env/1](../../contracts/run-env-1.md), which lists every
 value of an item's `sources`. pot's own defaults are `{ "root": "default" }` (v2.15.0 wrote `{ "root": "graft" }`).
 To ask whether a run reaches a host or URL, use `pot why TARGET --json` rather than reading the items.
 
@@ -1108,7 +1117,7 @@ For Daniel's flexion-assistant on v2.18.0, with `claude-code@flexion` granted (s
 run        claude -> root:claude-code@flexion
 context    work: in-place, access write, bubblewrap; includes root:daniel
 workspace  repo:platform-vm:2222/daniel/flexion-assistant (write) ~/src/flexion-assistant
-           scions: knowledge-base-kit, meeting-kit, notebook-kit
+       submodules: knowledge-base-kit, meeting-kit, notebook-kit
 next       ready
 argv       /nix/store/…-claude-code/bin/claude --settings
            /nix/store/…-pot-claude-overlay.json --mcp-config
@@ -1117,7 +1126,7 @@ hooks      PreToolUse, PostToolUse, PostToolUseFailure (Bash|WebFetch); SessionS
            (pot's --settings overlay; /hooks does not list them)
 
 see        standard tools (24) · uv-0.13.4 (root) · bun-1.4.2 (root) · nodejs-22.23.4 (root) ·
-           graft (root) · glibc-2.44-57 (claude-code@flexion) · pot-kits (repo)
+           tuteur (root) · glibc-2.44-57 (claude-code@flexion) · pot-kits (repo)
            claude-code@flexion:
              env.set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
              env.set CLAUDE_CONFIG_DIR=~/.claude
@@ -1221,7 +1230,7 @@ every repository, and leaves that part out when the context includes none.
 | A path a request reads | `~/src/agent-skills is readable: read ~/src/agent-skills (claude-code@personal)` |
 | A path not in the run | `pot (work): ~/src/other is not in this run.`, then `  one run:   pot --read ~/src/other …, or pot --repo ~/src/other for a repository` and the `permanent:` lines |
 | A hidden path | `pot (work): ~/.ssh is hidden by your root in every run (~/.ssh, …)` |
-| A protected path | `pot (work): justfile is protected (**/justfile, graft): edit it on the host` |
+| A protected path | `pot (work): justfile is protected (**/justfile, pot): edit it on the host` |
 
 `pot why TARGET --json` answers only whether the run reaches a host, `HOST:PORT`, git URL or path, as one JSON object:
 `{ "version": 1, "target", "kind", "reach", "reached", "context", "text" }`. It exits 0 when the target is reached,
@@ -1239,7 +1248,7 @@ usage error (exit 2):
 `pot why --json answers a host, HOST:PORT, a git URL or a path; X is none (pot why X explains it)`. The git.fetch answers
 in `text`: `KEY is a bound git.fetch remote: a fetch goes through the ssh broker`, and
 `pot (work): KEY is not a bound git.fetch remote, so a fetch from it is refused`. This is the contract
-[run-env/1](../../pot/contracts/run-env-1.md#pot-why-target---json); `graft check` asks it inside a run.
+[run-env/1](../../contracts/run-env-1.md#pot-why-target---json); `tuteur check` (graft's `graft check` before it) asks it inside a run.
 
 #### pot why answers
 
@@ -1288,7 +1297,7 @@ pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace P
   `pot grant: standing is granted`.
 - `KIT` and `--revoke KIT` take the short names that `pot` prints everywhere (startup line, grant list, `--diff`,
   `pot explain`, the 125 message), so the name a 125 line offers always works, also for a repository with a local
-  origin (its folder) and a scion named unlike its URL: `daniel`, `flexion-assistant`, or `claude-code` for every instance
+  origin (its folder) and a submodule named unlike its URL: `daniel`, `flexion-assistant`, or `claude-code` for every instance
   (`claude-code@*`). A repo kit's short name is the last path part of its normalised origin, else its checkout's
   folder. `pot grant claude-code` lists every instance, and prompts each stale one.
 - `--revoke KIT` that names several grants asks at the terminal:
@@ -1362,8 +1371,8 @@ pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace P
 - It escapes everything it prints.
 - It approves ordinary items together, and each powerful item on its own.
 - It notes a kit whose defining file has uncommitted changes.
-- It names the scope (every run that uses a root kit, every run in this repository, every workspace that grafts a
-  scion kit), and the status word.
+- It names the scope (every run that uses a root kit, every run in this repository, every workspace that pins a
+  submodule kit), and the status word.
 - For each capability, it shows `bound:` and the binding that this kit instance gets, in `pot explain`'s words, or
   `(no binding yet: nothing carries it out)`.
 - For a changed source, it shows `  source: tree A -> tree B`, and asks again for each powerful item, alone.
@@ -1391,7 +1400,8 @@ It is a speed bump, not a guarantee: an unrestricted agent on the host can edit 
 pot init DIR
 ```
 
-Writes `DIR/flake.nix`: a minimal root built with `graft.lib.mkRoot`, from `github:danielnaab/graft/v2.22.0`, with
+Writes `DIR/flake.nix`: a minimal root built with `pot.lib.mkRoot`, from `github:danielnaab/pot/v<VERSION>` (this pot's own release, `VERSION` in
+[core/pot.py](../../core/pot.py)), with
 its grants file at `DIR/grants.json`. It has the default root's [claude-code instance, token binding and
 nix](#roots). A root is a repository you edit and commit, so `pot init` refuses:
 
@@ -1409,7 +1419,9 @@ wrote ~/src/pot-root/flake.nix: a minimal root. Next:
 After an edit: nix profile upgrade --all (or build again). Track ~/src/pot-root in git: its grants.json is yours to commit.
 ```
 
-`GRAFT_SB_INIT_GRAFT` names another graft flake reference.
+The root takes pot as `inputs.pot` (`inputs.nixpkgs.follows = "pot/nixpkgs"`, `pot.lib.mkRoot`,
+`pot.kits.claude-code`). `POT_INIT_URL` names another pot flake reference, tag included (it replaced
+`POT_INIT_GRAFT` in 0.1.0).
 
 ### pot review
 
@@ -1436,7 +1448,7 @@ pot review [RUN] [--fetch|--discard] [--since T] [--until T] [--command NAME] [-
 - **Filters:** `--since T` and `--until T` (`2026-11-17`, `2026-11-17T14:00`, or `30m`, `2h`, `3d`; anything else is
   a usage error, `T: a time is 2026-11-17, 2026-11-17T14:00, or 30m, 2h, 3d`), and `--command NAME`. `--flags`
   adds the one-run flags each run used, with each one's permanent form. `--json` prints
-  `{ "version": 1, "runs": [ … ] }`, [runs/1](../../pot/contracts/runs-1.md) records.
+  `{ "version": 1, "runs": [ … ] }`, [runs/1](../../contracts/runs-1.md) records.
 - **`pot review RUN`** prints the run's record ([pot runs](#pot-runs)), then `commits` (up to 40, `<sha> <subject>`)
   and the diffstat, read from the host's staging. Its `next` is `pot review RUN --fetch`. The `command` row, here
   and in `pot runs`, is the command as you typed it (with `@INSTANCE` when its kit has instances), not the program
@@ -1460,7 +1472,7 @@ pot review [RUN] [--fetch|--discard] [--since T] [--until T] [--command NAME] [-
   `--fetch` prints the same line, indented, before `review:`.
 - **`pot review RUN --fetch`** brings a clone's commits into your repository: host git fetches the run's staging
   into `refs/remotes/pot-<id>/*` (and a commit on a detached `HEAD` as `pot-<id>/detached`), with fsck and no tags,
-  and each scion that has commits into that scion's module repository the same way. It never opens the clone. The
+  and each submodule that has commits into that submodule's module repository the same way. It never opens the clone. The
   run's state becomes `exited`, with `fetched`; its clone stays until `--discard` or `keepDays`. It prints:
 
   ```
@@ -1468,15 +1480,15 @@ pot review [RUN] [--fetch|--discard] [--since T] [--until T] [--command NAME] [-
     review:  git log --stat 716424f..pot-1ac1/main
     sign:    git switch -c pot-1ac1 pot-1ac1/main && git rebase --exec 'git commit --amend --no-edit -S' 716424f   (1 unsigned)
     take it: git merge pot-1ac1
-    scions/sbd: its commits are in that scion's refs/remotes/pot-1ac1/* (a fix there goes to its provider)
+    scions/sbd: its commits are in that submodule's refs/remotes/pot-1ac1/* (a fix there goes to its provider)
   ```
 
   `sign:` appears only when your git config signs: it makes a local branch `pot-ID` of the run's commits and
   signs them, and `take it:` then merges that branch (`git merge pot-1ac1`); without signing, `take it:` is
   `git merge pot-1ac1/main`. `--fetch` fetches only the refs the run moved, and names the base's branch first,
-  then the others by name, as the exit line counts them. A scion's line appears only for a scion
+  then the others by name, as the exit line counts them. A submodule's line appears only for a submodule
   with commits; a run whose
-  only commits are a scion's says `…: its scions' commits`. A second `--fetch` fetches the same refs again. With no
+  only commits are a submodule's says `…: its submodules' commits`. A second `--fetch` fetches the same refs again. With no
   commits: `pot: run 1ac1 has no commits to fetch` (exit 0). Refused (exit 1): `pot: run 1ac1 worked in place:
   there is nothing to fetch`; `pot: run 1ac1 is running`; `pot: run 1ac1's clone was discarded (2026-11-17); its
   log stays: pot runs 1ac1`; `pot: run 1ac1's repository DIR is gone`.
@@ -1499,9 +1511,9 @@ pot review [RUN] [--fetch|--discard] [--since T] [--until T] [--command NAME] [-
 pot runs [ID] [--json] [--follow] [--all]
 ```
 
-Every run in pot's state, as [runs/1](../../pot/contracts/runs-1.md) records, computed from each run's log. The
+Every run in pot's state, as [runs/1](../../contracts/runs-1.md) records, computed from each run's log. The
 states are `running`, `exited` (also a run whose pot ended without an exit: killed or crashed), `stopped` (exit
-125), `review` (a clone with commits, its own or a scion's, neither fetched nor discarded) and `pending`
+125), `review` (a clone with commits, its own or a submodule's, neither fetched nor discarded) and `pending`
 (reserved).
 
 - **With no `ID`:** every `running`, `stopped` and `review` run and the 20 latest others, all newest first
@@ -1521,7 +1533,7 @@ states are `running`, `exited` (also a run whose pot ended without an exit: kill
   with `next       start it again`; a stopped dispatch's next adds its clone: `next       pot grant flexion-assistant ·
   its clone is kept until 2026-12-02: pot review ID --discard`), `ended      DATE · exit S · DURATION`, or
   `ended      unknown: pot ended without an exit (killed or crashed)`; `clone` (the base, commits, unsigned, size,
-  `kept until` or `discarded`, `fetched: pot-ID/main`, uncommitted files), a `note` row for each scion whose own
+  `kept until` or `discarded`, `fetched: pot-ID/main`, uncommitted files), a `note` row for each submodule whose own
   submodules were not cloned, `attention`, and `next` (for review,
   `pot review ID · pot review ID --fetch`, or after a failed staging with nothing staged `pot review ID · pot review ID --discard (the staging fetch failed: nothing to fetch)`; for stopped, the fix):
 
@@ -1556,7 +1568,7 @@ On the host only. It checks what a run depends on, and reads no secret: binding 
 never their contents. It exits 1 when a line starts `!`, else 0. There is no `--json` yet.
 
 ```
-pot doctor · root home-manager · platform-vm · pot v2.22.0
+pot doctor · root home-manager · platform-vm · pot 0.1.0
 backend    bubblewrap: user namespaces work; proves closure-store own-netns own-pidns no-tiocsti protected-as-mounts local-listen in-place same-path-clone private-proxy root-files; resource-limits: for runs without a terminal; lacks separate-kernel nest
 resources  user systemd: runs without a terminal get MemoryMax=50% TasksMax=2048
 grants     ~/.workstation/pot/grants.json: parses, 4 kits, no entry for platform-vm in the grants file's machines
@@ -1597,7 +1609,7 @@ notebook-kit is `unverified` here because the bump branch pins it before its rel
 - `instances`: each agent kit's instances, and which one this shell's variables select; `none (no kit of this root
   has instances)`.
 - `workspace` appears only inside a repository (it builds the repo kit, cached): its name and identity, its repo
-  kit's folder or `no repo kit`, and its scion kits with their releases, or `no scion kits`.
+  kit's folder or `no repo kit`, and its submodule kits with their releases, or `no submodule kits`.
 - `state`: runs by state (`1 run`, `N runs`), and the clones' size against `clones.maxSize`; over the cap, `! … over clones.maxSize; the
   oldest still in review: pot review ID --discard`.
 - `launcher`: `~/.config/pot/launcher -> this pot`; `!` when it names another pot, with the step for the root's
@@ -1625,9 +1637,9 @@ The notes:
 - hooks that will not run: `team-kb has .githooks but core.hooksPath is unset: commits run no hook (git config core.hooksPath .githooks, on the host)`;
 - in clone mode, the base: `from main (716424f)`, first after the repositories; the dirty-tree line before it
   ([dispatch](#dispatch));
-- an unverified scion kit with requests: `meeting-kit: gitlink is not a release tag at its URL; its kit is
+- an unverified submodule kit with requests: `meeting-kit: gitlink is not a release tag at its URL; its kit is
   unverified and its grant does not apply` ([What pot checks at start](#what-pot-checks-at-start));
-- in clone mode, each scion with submodules of its own: `nix/agent-tools/.scions/notebook-kit: its own submodules
+- in clone mode, each submodule with submodules of its own: `nix/agent-tools/.scions/notebook-kit: its own submodules
   are not cloned`;
 - a run that would get the resource scope where user systemd is missing: `no resource limits (no user systemd: pot
   doctor)`. Over the clones' size cap, a line of its own names the oldest runs in review ([dispatch](#dispatch)).
@@ -1755,9 +1767,9 @@ alone, so `/run/current-system/sw/bin` is absent: a test that hard-codes that pa
 it was started with instead.
 
 The standard set: bash, coreutils, findutils, grep, sed, gawk, diffutils, less, git, which, file, tree, ripgrep,
-fd, jq, curl, gnutar, gzip, unzip, xz, patch, python3, just and gh. graft's command is not in it: in a workspace
-whose flake is a graft consumer, its `pot-kits` bundle's `bin/` carries the workspace's own `graft`; for any other
-repository, a root that wants graft adds it to `tools`.
+fd, jq, curl, gnutar, gzip, unzip, xz, patch, python3, just and gh. A producer's own command is not in it: in a workspace
+whose bundle carries one (tuteur's mkFlake puts the repository's `tuteur` in its `pot-kits` bundle's `bin/`), the
+run has it; for any other repository, a root that wants it adds it to `tools`.
 
 ## Protected paths
 
@@ -1770,10 +1782,11 @@ depth: the tree after a run is untrusted output.
   `core.hooksPath` folder.
 - Agent configuration: `**/.mcp.json`, `**/.vscode`, `**/.claude`, `**/.pi`, `**/.codex`. The last three are root
   data (the manifest's `baseProtect`), a floor that no root removes. `pot explain` lists the group in this order.
-- What the repository's bundle protects (its `protect`, labelled `(repo)`). A graft consumer's bundle protects
-  `**/graft.nix` and its scions directory, such as `scions` or `nix/agent-tools/.scions`.
+- What the repository's bundle protects (its `protect`, labelled `(repo)`). tuteur's bundle protects its
+  provider files (`**/tuteur.nix`, `**/graft.nix`) and its submodules folder, such as `.patterns` or
+  `nix/agent-tools/.scions`.
 - Each kit's `protect`.
-- In every git directory (the top `.git`, each scion's, each worktree's, a clone's and its modules'): `config`, `config.worktree`, `hooks/`,
+- In every git directory (the top `.git`, each submodule's, each worktree's, a clone's and its modules'): `config`, `config.worktree`, `hooks/`,
   `info/`, `commondir` and `gitdir`; and every `.git` file. When `commondir`, `config.worktree` or `gitdir` is
   absent at start, pot puts a neutral read-only placeholder there for the run (`commondir` holding `.`, the others
   empty), so a run cannot create one and point host git at a config it wrote; pot removes each placeholder after
@@ -1810,7 +1823,7 @@ left out; up to 20 entries, then how many more), and then removed:
 The after event records it as `sealed_left`. A sibling seals its own folders, and says what it left on its own exit. An entry the host adds during the run is not seen. A folder with more than 256 entries is not sealed: it
 stays plainly read-only, with one start note,
 `pot: ~/src/x/.pi has 2500 entries, more than a sealed folder takes (256): it is read-only in this run, so pi cannot take its settings lock there`.
-A sealed folder that is hidden, or under a hidden folder, stays hidden. Each workspace top is sealed on its own, scions included, in place,
+A sealed folder that is hidden, or under a hidden folder, stays hidden. Each workspace top is sealed on its own, submodules included, in place,
 with read access, in `inspect` and in a sibling (from the host's folder: what its caller left in its own seal is not there). A dispatch clone is not sealed: there
 agent configuration is a proposal (below). `pot explain`
 says so under `limits`: `sealed: **/.pi (pot): read-only entries; a new one lasts for the run`. **On macOS** Seatbelt
@@ -1819,16 +1832,16 @@ cannot seal (it has no mounts): a sealed folder stays plainly read-only, so pi i
 cannot: **/.pi stays read-only)`.
 
 **Agent configuration in a clone is a proposal** (v2.19.1). In a dispatch clone, the floor's agent configuration,
-`**/.claude`, `**/.mcp.json`, `**/.pi`, `**/.codex` and `**/.vscode`, is writable, unless a repo kit, a scion kit or
+`**/.claude`, `**/.mcp.json`, `**/.pi`, `**/.codex` and `**/.vscode`, is writable, unless a repo kit, a submodule kit or
 the bundle protects the same pattern. One that is a link, or under a link, stops the run as it does in place (`.claude
 is a symbolic link, so the sandbox can't make it read-only …`). Everything else stays as above: the clone's git config, hooks and `info/`,
-the repo kit's `protect`, `**/graft.nix` and the scions folder. policy.json lists the patterns as the workspace's
+the repo kit's `protect` and what the bundle protects (such as the producer's files and its submodules folder). policy.json lists the patterns as the workspace's
 `proposal`, and `pot explain dispatch` says
 `agent config: **/.claude **/.mcp.json **/.pi **/.codex **/.vscode (a clone's proposal)` under `limits`. What the
 run commits there is flagged by the host's own look at the staged commits, never by the run, with the paths that a link
 under agent configuration names in the tree (at the base or a tip: `.pi/ext -> ../tools/ext` flags a change to
-`tools/ext/b.ts`) and each scion's changes from its gitlink, under the scion's path (`kit/.claude/settings.json`;
-a scion's `.gitattributes` and the like are host-run too): `pot review` lists
+`tools/ext/b.ts`) and each submodule's changes from its gitlink, under the submodule's path (`kit/.claude/settings.json`;
+a submodule's `.gitattributes` and the like are host-run too): `pot review` lists
 `agent config: .pi/settings.json` under ATTENTION, `pot review RUN` and `--fetch` print
 `changes agent configuration: .pi/settings.json (loads in agent sessions once merged)`, the exit line says
 `pot: the run changes agent configuration: …`, and runs/1's `clone.agentConfig` lists the paths. In place, nothing changes: agent configuration stays protected (and `.pi` sealed).
@@ -1858,7 +1871,7 @@ pot's default list:
 - each file that a binding's `from` names.
 
 A root adds to it with `hidden`, and cannot remove from it. The agents' entries are root data in
-[pot/nix/root.nix](../../pot/nix/root.nix) (the manifest's `baseHidden`), not pot's core, but they are a floor:
+[nix/root.nix](../../nix/root.nix) (the manifest's `baseHidden`), not pot's core, but they are a floor:
 they apply whether or not the root has a kit for that agent. A run's agent gets its own home: the claude-code kit's `state` puts a private
 `~/.claude` in place of yours, and binds into it, read-only, only what the kit names: fixed files, skills,
 plugins and project memory ([Claude Code](#claude-code)). Your credentials there stay hidden.
@@ -1934,12 +1947,12 @@ The permanent fix depends on the root and the repository:
 
 | Where | Fix |
 |---|---|
-| A graft consumer | `requests.network in the repo kit (nix/agent-tools/flake.nix, perSystem)`; with no repo kit in the bundle, `requests.network in a repo kit for nix/agent-tools (the flake pot evaluated)` |
+| A repository with a bundle (tuteur's) | `requests.network in the repo kit (nix/agent-tools/flake.nix, perSystem)`; with no repo kit in the bundle, `requests.network in a repo kit for nix/agent-tools (the flake pot evaluated)` |
 | Another repository, home-manager root | `programs.pot.repoKits."<key>".requests.network (home-manager switch)` |
 | Another repository, mkRoot root | `repoKits."<key>".requests.network (rebuild the root)` |
 | The context includes a kit | then a line `or programs.pot.kits.standing.requests.network, for every repository (home-manager switch)` (no `programs.pot.` prefix and `(rebuild the root)` for an mkRoot root) |
-| The command is a scion kit's | `requests.network in meeting-kit's kit (nix/agent-tools/.scions/meeting-kit/graft.nix: a kit release)` |
-| The command is the pi kit's (v2.19.0) | first `a provider or endpoint in programs.pot.kits.pi (graft.kits.pi; home-manager switch)` (`kits."pi@NAME"` for an instance), then the repository's lines, each after `or` |
+| The command is a submodule kit's | `requests.network in meeting-kit's kit (nix/agent-tools/.scions/meeting-kit/graft.nix: a kit release)` |
+| The command is the pi kit's (v2.19.0) | first `a provider or endpoint in programs.pot.kits.pi (pot.kits.pi; home-manager switch)` (`kits."pi@NAME"` for an instance), then the repository's lines, each after `or` |
 | `--package` | `programs.pot.tools (home-manager switch)`, then a line `or tools in the repo kit (…)` |
 
 The other messages, after `pot (<context>): `:
@@ -1952,14 +1965,14 @@ The other messages, after `pot (<context>): `:
 | Hidden (`pot why`) | `~/.ssh is hidden by your root in every run (~/.ssh, …)` |
 | Hidden `--repo` | `--repo ~/.ssh/x: ~/.ssh/x is hidden by your root in every run` |
 | `--read` or `--write` of pot's state (1) | a folder that holds it: `--read ~/.local: which holds pot's own state (~/.local/state/pot)`; a path inside it: `… which is pot's own state` |
-| Protected (`pot why`) | `justfile is protected (**/justfile, graft): edit it on the host` |
+| Protected (`pot why`) | `justfile is protected (**/justfile, pot): edit it on the host` |
 | A root repository, agent command (1) | `~/.workstation is a root: pot dispatch CMD (its commits come back for review), or pot inspect CMD` |
 | A root repository, other command (1) | `~/.workstation is a root: pot dispatch CMD (its commits come back for review), or pot inspect CMD; pot host CMD runs it unsandboxed` |
 | Writing a root (1) | `WHAT PATH is the root ROOT: a run never writes a root (pot inspect reads it; pot host CMD runs unsandboxed)`, with `is inside` or `holds` in place of `is`; WHAT is `--write`, `--repo` (with write access) or `KIT's write` for a granted `requests.write` item: `--write ~/src/w holds the root ~/src/w/rootrepo: …` |
 | Not a repository (1) | `~/Downloads is not inside a git repository: pot inspect CMD, or pot host CMD` |
 | A `--repo` outside git (1) | `--repo PATH is not inside a git repository` |
 | Stale grant (125) | `meeting-kit (git:…) asks for more than its grant:`, then each new request as `  + network api.github.com:443`, then `  grant it: pot grant meeting-kit`. Also `… requests reach that is not granted:`; `… changed source since its grant:` with `  source: tree A -> tree B` and up to 12 lines of `git diff --stat` of the defining files when they changed (`nix/agent-tools/flake.lock | 1 +`), else of the tree, and the line `    the kit as built changed` when the build differs. The text is as before. The run is recorded as `stopped`, and the launching pane set to `waiting` when the run holds it ([What pot checks at start](#what-pot-checks-at-start)). |
-| An unverified scion kit (start note, no stop) | `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply`; offline, `meeting-kit: its URL did not answer, so its kit is unverified and its grant does not apply`. Its command runs without its reach. |
+| An unverified submodule kit (start note, no stop) | `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply`; offline, `meeting-kit: its URL did not answer, so its kit is unverified and its grant does not apply`. Its command runs without its reach. |
 | `--repo` in clone mode (1) | `--repo comes to clone mode in a later release; a dispatch clones this repository only` |
 | `pot dispatch`, `--clone` or `--detach` inside a run (1) | `pot dispatch is the host's: a run starts no clone inside it; run it on the host` |
 | `--from`, `--detach` without clone mode (2) | `--from is clone mode: pot dispatch --from REF CMD, or pot --clone --from REF CMD` |
@@ -1980,8 +1993,8 @@ The other messages, after `pot (<context>): `:
 | A missing lock | `pot (work): ~/…/nix/agent-tools/flake.lock is missing, and pot never writes one into a workspace: run nix flake lock there, on the host, and commit it` |
 | A binding file (1, v2.17.1) | `pot (work): ~/.config/pot/claude-token-flexion is missing (the credential binding api.anthropic.com kit=claude-code@flexion): claude setup-token, saved with mode 600, then start again`; `is unreadable` for one the user cannot read; before the grant prompts ([the binding check](#key-files)) |
 
-On macOS, a root built by a graft before Seatbelt's return: `pot: this root has no backend for darwin (a root built
-before Seatbelt's return): rebuild it with this graft`.
+On macOS, a root built before Seatbelt's return (graft v2.18.0): `pot: this root has no backend for darwin (a root
+built before Seatbelt's return): rebuild it with this pot`.
 On the startup line, a requested variable that the host lacks is `env NAME unset`, and a capability with no binding
 is `CAPABILITY: no binding`.
 
@@ -1989,7 +2002,7 @@ is `CAPABILITY: no binding`.
 
 - The command's exit status.
 - `125` when `pot` refuses to start the run because of a grant (never granted, asks for more, changed source) or a
-  missing guarantee. The run is recorded as `stopped`. An unverified scion kit is not a 125: the run goes on
+  missing guarantee. The run is recorded as `stopped`. An unverified submodule kit is not a 125: the run goes on
   without its reach.
 - `127` when the program is not in the run.
 - `2` for a usage error, such as an unknown context, an instance that the root does not declare, two kits that
@@ -2012,15 +2025,15 @@ The message says why. `pot` never runs the command with a weaker policy, a weake
 
 | Path | What |
 |---|---|
-| `runs/<id>/` | Each run's `policy.json`, `log.jsonl` (its record, [runs/1](../../pot/contracts/runs-1.md)), `README.md`, `denials` and its other files. `<id>` is four hex digits. A 125 leaves one too, with its `stop` event. |
-| `runs/<id>/clone/` | A [dispatch](#dispatch) run's clone, with its scions in `clone/.git/modules/`. Removed by `pot review ID --discard`, or by `keepDays` and `maxSize` once it needs no review. |
-| `runs/<id>/staging/<key>.git` | The host's bare copies of the clone's branches and its detached `HEAD` (`top.git`, or a scion's path with `/` as `-`), which `--fetch` reads. |
+| `runs/<id>/` | Each run's `policy.json`, `log.jsonl` (its record, [runs/1](../../contracts/runs-1.md)), `README.md`, `denials` and its other files. `<id>` is four hex digits. A 125 leaves one too, with its `stop` event. |
+| `runs/<id>/clone/` | A [dispatch](#dispatch) run's clone, with its submodules in `clone/.git/modules/`. Removed by `pot review ID --discard`, or by `keepDays` and `maxSize` once it needs no review. |
+| `runs/<id>/staging/<key>.git` | The host's bare copies of the clone's branches and its detached `HEAD` (`top.git`, or a submodule's path with `/` as `-`), which `--fetch` reads. |
 | `runs/<id>/output.log` | A `--detach` run's output. |
 | `trees/<id>/slot-N` | The siblings' slots of the tree whose top run is `<id>` (16 files, each held with `flock` by a sibling's broker while it runs); removed when that run ends. |
 | `state/<hash>/<name>` | A `state` request's directory, one per kit, workspace (or `none`) and context; or per kit for `shared`. |
 | `cache/kits/` | The built `pot-kits`, or that the flake has none, by the flake directory's tree hash. |
 | `cache/sources/` | For each repo kit, the hash of the kit as built for each granted tree: what lets a grant hold across a change outside the kit's defining files ([The grants file](#the-grants-file)). |
-| `cache/scions.json` | Verified scion releases, by URL and commit. |
+| `cache/scions.json` | Verified submodule releases, by URL and commit. |
 | `cache/probe-<hash>` | The backend's probed guarantees, per backend build. |
 | `grants-seen.json` | The grants file as this machine last read it, for the changed-file line. |
 
@@ -2028,10 +2041,10 @@ A state directory inside a workspace is refused.
 
 ## Claude Code
 
-`graft.kits.claude-code` returns a kit (data). The root names the instance:
+`pot.kits.claude-code` returns a kit (data). The root names the instance:
 
 ```nix
-programs.pot.kits."claude-code@personal" = inputs.graft.kits.claude-code {
+programs.pot.kits."claude-code@personal" = inputs.pot.kits.claude-code {
   inherit pkgs;
   binary = "native";                    # "native", "host" (the claude on the host's PATH), or a package
   files = config.home.file;             # home-manager's files
@@ -2039,25 +2052,25 @@ programs.pot.kits."claude-code@personal" = inputs.graft.kits.claude-code {
   skillDirs = [ "synced" ];             # the default: real directories in the skills folder to bind; [ ] opts out
   plugins = true;                       # the default: the plugins folder, read-only; false opts out
   skillSources = [ "~/src/agent-skills" ];   # checkouts that skill links point into
-  api = graft.apis.anthropic;           # or graft.apis.bedrock { region = "us-east-1"; },
-                                        # or graft.apis.gateway { url = "https://llm.example.org"; }
+  api = pot.apis.anthropic;           # or pot.apis.bedrock { region = "us-east-1"; },
+                                        # or pot.apis.gateway { url = "https://llm.example.org"; }
   mcp = [ "metamcp" ];
 };
 ```
 
 **The instance** is the root's `kits` key (`claude-code@personal`). The kit has no `account` argument: giving one
-fails, `graft.kits.claude-code: account is gone (v2.17.0): the instance is the root's kits key ("claude-code@NAME")`.
+fails, `pot.kits.claude-code: account is gone (v2.17.0): the instance is the root's kits key ("claude-code@NAME")`.
 
-**The API.** `api` is a value from graft's flake: `graft.apis.anthropic` (the default, `{ name = "anthropic"; }`)
-, `graft.apis.bedrock { region = "us-east-1"; }` (`{ name = "bedrock"; region; }`), or, from v2.17.1,
-`graft.apis.gateway { url = "https://llm.example.org"; }` (`{ name = "gateway"; url; host; }`): an
+**The API.** `api` is a value from pot's flake: `pot.apis.anthropic` (the default, `{ name = "anthropic"; }`)
+, `pot.apis.bedrock { region = "us-east-1"; }` (`{ name = "bedrock"; region; }`), or, from v2.17.1,
+`pot.apis.gateway { url = "https://llm.example.org"; }` (`{ name = "gateway"; url; host; }`): an
 Anthropic-compatible gateway, such as a Bifrost or LiteLLM proxy, that takes its key as a bearer token. It decides
 the kit's network requests, variables and credential ([below](#claude-code)). A gateway's `url` is
 `https://HOST[/PATH]`, reached on port 443; the value keeps it without a trailing slash or `:443`, and its host
 lowercased. Any other url fails evaluation:
-`graft.apis.gateway: url = "http://llm.example.org": give https://HOST[/PATH] (pot reaches HOST on port 443)`. v2.15.0's `provider` and `region` arguments fail:
-`graft.kits.claude-code: provider and region are gone (v2.17.0): api = graft.apis.bedrock { region = "…"; } (or
-graft.apis.anthropic)`.
+`pot.apis.gateway: url = "http://llm.example.org": give https://HOST[/PATH] (pot reaches HOST on port 443)`. v2.15.0's `provider` and `region` arguments fail:
+`pot.kits.claude-code: provider and region are gone (v2.17.0): api = pot.apis.bedrock { region = "…"; } (or
+pot.apis.anthropic)`.
 
 The run gets its own agent home, configured by the root:
 
@@ -2135,13 +2148,13 @@ attached as quoted data ([Resume on the host](#resume-on-the-host)).
 
 ## pi
 
-`graft.kits.pi` (v2.19.0) returns a kit (data) for the pi coding agent (pi.dev). A root with one pi configuration
+`pot.kits.pi` (v2.19.0) returns a kit (data) for the pi coding agent (pi.dev). A root with one pi configuration
 names it plain `pi`, with no instance: `pot pi` runs it, `pot grant pi` grants it, and its identity is `root:pi`. A
 root that wants several names each `pi@NAME`, granted on its own; pick one with `pot pi@NAME` or
 `defaultInstance.pi` (the kit has no `agent.select.env`, so the caller's variables pick none).
 
 ```nix
-programs.pot.kits.pi = inputs.graft.kits.pi {
+programs.pot.kits.pi = inputs.pot.kits.pi {
   inherit pkgs;
   binary = "managed";                   # the default: ~/.pi/agent/bin/pi, pi's managed install; or a package
   node = pkgs.nodejs_22;                # the default: on PATH, for the managed launcher's `env node`
@@ -2171,7 +2184,7 @@ for the provider's hosts with `env = "NAME"` (a list when a host has several). S
 https. Bind each by reference, `credential."HOST kit=pi"` (or `kit=pi@NAME`). A literal `apiKey`, such as a
 local server's placeholder, is no secret: it stays in `models.json` and asks for nothing.
 
-**Evaluation errors.** Each begins `graft.kits.pi: ` and names the provider (`provider P`) or the endpoint
+**Evaluation errors.** Each begins `pot.kits.pi: ` and names the provider (`provider P`) or the endpoint
 (`endpoints #N`, from 1):
 
 | Cause | Message |
@@ -2243,7 +2256,7 @@ affected: it reaches its provider's host.
 ## On macOS
 
 On macOS, `pot` runs each command under `/usr/bin/sandbox-exec` with a profile that denies by default, written at
-start from the run's `policy.json` ([pot/core/seatbelt.py](../../pot/core/seatbelt.py)): what a process needs from
+start from the run's `policy.json` ([core/seatbelt.py](../../core/seatbelt.py)): what a process needs from
 macOS, read-only (system libraries and frameworks, `/private/etc`, the standard devices, a few sysctls and Mach
 services; no keychain and no DNS); the closure's store paths; the run's reads and writes; then deny rules that
 nothing above reopens. Every host path is a profile parameter, never text in it. `pot explain --backend-command`
@@ -2312,8 +2325,8 @@ Seatbelt has no mounts, so links and path rules stand in for them:
 - No proxy credentials, `git.push`, `git.sign`, `ops.read`, `trust = "root"`, `delegate` (widening), or resource
   limits for an interactive run.
 
-A note on the name: nixpkgs has an unrelated package `pot` (a translation app whose program is also `pot`). graft's
-pot is `packages.<system>.pot` in graft's flake, so the two collide only on a `PATH` where both are installed. The
+A note on the name: nixpkgs has an unrelated package `pot` (a translation app whose program is also `pot`). This
+pot is `packages.<system>.default` (also `pot`) in pot's flake, so the two collide only on a `PATH` where both are installed. The
 first on `PATH` wins; `command -v pot` says which.
 
 ## Residual risks
@@ -2322,7 +2335,7 @@ first on `PATH` wins; `command -v pot` says which.
    no run keeps user namespaces (`--disable-userns` in every run), which closes the kernel surface they open.
 2. **Allowed hosts carry data out.** The proxy limits where, not what. The model API carries the workspace. A run
    can use its own account on an allowed host. `inspect` gives the model API what it reads.
-3. **Ordinary grants trust a kit's future code** within their reach. Powerful grants fix the source for scion and
+3. **Ordinary grants trust a kit's future code** within their reach. Powerful grants fix the source for submodule and
    repo kits. Root kits rely on the root's lock and its review.
 4. **The host still runs repository and kit content:** Nix evaluation, fixed-output derivations, direnv, your own
    recipes, a provider's hand-written `.just` recipes, and kit tools where a wrapper runs unwrapped.
@@ -2344,7 +2357,7 @@ first on `PATH` wins; `command -v pot` says which.
     `\uNNNN`, and bytes that are not UTF-8 as `\xNN`: in paths, in ref names (the exit line, `--fetch`, the
     `fetched:` row) and in the clone's base branch. A newline in a command is escaped in the `pot runs` and
     `pot review` tables.
-11. **Verifying a scion kit needs the network.** Offline, an uncached scion kit is unverified, and its grant does
+11. **Verifying a submodule kit needs the network.** Offline, an uncached submodule kit is unverified, and its grant does
     not apply.
 12. **The nix relay depends on experimental Nix features.** Review it at each Nix upgrade.
 13. **Grants are readable** through the root's git history wherever its `.git` is readable. Hidden means
@@ -2384,26 +2397,25 @@ first on `PATH` wins; `command -v pot` says which.
 
 ## Sources
 
-- [pot/core/pot.py](../../pot/core/pot.py): the command line, grants prompt, startup and exit lines, `pot why`, `pot init`
-- [pot/core/seatbelt.py](../../pot/core/seatbelt.py): the Seatbelt backend (macOS)
-- [pot/core/runs.py](../../pot/core/runs.py): runs/1 records from a run's log
-- [pot/core/clones.py](../../pot/core/clones.py): making, keeping and fetching dispatch clones
-- [pot/core/compose.py](../../pot/core/compose.py): composition, kit and request checks, grants, `pot explain`, policy.json
-- [pot/core/bwrap.py](../../pot/core/bwrap.py): the bubblewrap backend, guarantees, the run's environment
-- [pot/core/proxy.py](../../pot/core/proxy.py): the network proxy and the denials file
-- [pot/nix/root.nix](../../pot/nix/root.nix): `graft.lib.mkRoot`, the standard set
-- [pot/nix/hm.nix](../../pot/nix/hm.nix): `homeManagerModules.pot`
-- [pot/kits/claude-code.nix](../../pot/kits/claude-code.nix): the claude-code kit, its overlay and denial hook
-- [pot/kits/pi.nix](../../pot/kits/pi.nix): the pi kit, its computed reach and fixed configuration
-- [pot/core/broker.py](../../pot/core/broker.py) and [pot/core/shim.py](../../pot/core/shim.py): the `git.fetch` broker,
+- [core/pot.py](../../core/pot.py): the command line, grants prompt, startup and exit lines, `pot why`, `pot init`
+- [core/seatbelt.py](../../core/seatbelt.py): the Seatbelt backend (macOS)
+- [core/runs.py](../../core/runs.py): runs/1 records from a run's log
+- [core/clones.py](../../core/clones.py): making, keeping and fetching dispatch clones
+- [core/compose.py](../../core/compose.py): composition, kit and request checks, grants, `pot explain`, policy.json
+- [core/bwrap.py](../../core/bwrap.py): the bubblewrap backend, guarantees, the run's environment
+- [core/proxy.py](../../core/proxy.py): the network proxy and the denials file
+- [nix/root.nix](../../nix/root.nix): `pot.lib.mkRoot`, the standard set
+- [nix/hm.nix](../../nix/hm.nix): `homeManagerModules.pot`
+- [kits/claude-code.nix](../../kits/claude-code.nix): the claude-code kit, its overlay and denial hook
+- [kits/pi.nix](../../kits/pi.nix): the pi kit, its computed reach and fixed configuration
+- [core/broker.py](../../core/broker.py) and [core/shim.py](../../core/shim.py): the `git.fetch` broker,
   the `workmux` and ssh shims
-- [pot/lib/kits-for.nix](../../pot/lib/kits-for.nix): `graft.lib.pot.kitsFor`, `packages.<system>.pot-kits`, the
+- [lib/kits-for.nix](../../lib/kits-for.nix): `pot.lib.pot.kitsFor`, `packages.<system>.pot-kits`, the
   wrappers and `kits.just`
-- [pot/core/compose.py](../../pot/core/compose.py) `children_table`, `narrower`, `admit`, `children_lines`; pot.py
-  `wrapped_run`, `inner_run`, `sibling_client`, `sibling_entry`; [pot/core/siblings.py](../../pot/core/siblings.py),
+- [core/compose.py](../../core/compose.py) `children_table`, `narrower`, `admit`, `children_lines`; pot.py
+  `wrapped_run`, `inner_run`, `sibling_client`, `sibling_entry`; [core/siblings.py](../../core/siblings.py),
   the broker: the children table, siblings and `pot run`; [siblings, not nesting](pot-siblings.md);
-  [pot/tests/test_children.py](../../pot/tests/test_children.py); tests/run.sh's `sibling` section
-- [lib/mk-flake.nix](../../lib/mk-flake.nix): `kit` and `kitArgs` from each `graft.nix` and `perSystem`, and the call
-  to kitsFor
-- [tests/run.sh](../../tests/run.sh): the `pot` section; [pot/tests/test_compose.py](../../pot/tests/test_compose.py)
+  [tests/test_children.py](../../tests/test_children.py); tests/run.sh's `sibling` section
+- [tests/run.sh](../../tests/run.sh): the `kits`, `pot`, `dispatch`, `sibling` and `pi` sections
+- [tests/run.sh](../../tests/run.sh): the `pot` section; [tests/test_compose.py](../../tests/test_compose.py)
 
