@@ -59,7 +59,7 @@ Each record has one state:
 | `running` | a `start`, no `exit` or `stop`, and its process alive: `pid` exists with the start time `pidStart`, on the boot `boot`. For a run started with `--detach`, the pid is the background pot's. |
 | `exited` | an `exit`. Also a `start` whose process is gone with no `exit` (a crash, a reboot, `kill -9`): then `exit` is `null` and `lost` is `true`. A clone-mode run that was fetched or discarded is `exited` too, with `fetched` or `discarded` set. |
 | `stopped` | a `stop`: exit 125, for a grant or a missing guarantee. The command never started; `stop.fix` says what unblocks it. When every kit it waited for now has a grant of that digest and source on this machine, `stop.grantedSince` is `true`: start it again. A `stop` written before v2.17.0's fix round (no `digest`) is never granted since. |
-| `review` | clone mode, ended, with commits (its own or a scion's), neither fetched nor discarded; or ended with a failed staging fetch (`fetch_failed`), which `keepDays` and `maxSize` never remove. |
+| `review` | clone mode, ended, with commits (its own or a submodule's), neither fetched nor discarded; or ended with a failed staging fetch (`fetch_failed`), which `keepDays` and `maxSize` never remove. |
 | `pending` | reserved for a request waiting for approval (phase 3). Not written. |
 
 When pot finds a clone-mode run that ended without its `after` event (its pot was killed), the next `pot runs` or
@@ -138,7 +138,7 @@ Both read the logs again every half second.
   it from that log (`<id>.record.json`), the list of the four (`list.json`), and a record as `pot runs --json`
   prints it inside a run (`inside-run.record.json`). Readers test against these.
 - pot's tests hold pot to them: `tests/run.sh contracts` validates the fixtures and checks that each record is
-  what `pot/core/runs.py` computes from its log; the `pot`, `dispatch`, `sibling` and `pi` sections validate every
+  what `core/runs.py` computes from its log; the `pot`, `dispatch`, `sibling` and `pi` sections validate every
   log line their runs wrote, and `pot runs --json --all` and `pot runs ID --json`, against the schemas.
 - The schemas describe what this release emits. A reader takes a value that it does not know as one it does not
   act on, and never rejects a newer pot's output with them.
@@ -153,7 +153,7 @@ Both read the logs again every half second.
 
 ## Sources
 
-- [pot/core/runs.py](../core/runs.py): a record from a run's log, the states
-- [tests/run.sh](../../tests/run.sh): the `contracts` section, and `runs_valid`
-- [pot/core/pot.py](../core/pot.py): the run log, `pot runs`, `pot review`
-- [pot's reference: State](../../docs/reference/pot.md#state)
+- [core/runs.py](../core/runs.py): a record from a run's log, the states
+- [tests/run.sh](../tests/run.sh): the `contracts` section, and `runs_valid`
+- [core/pot.py](../core/pot.py): the run log, `pot runs`, `pot review`
+- [pot's reference: State](../docs/reference/pot.md#state)

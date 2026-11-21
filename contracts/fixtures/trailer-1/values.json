@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "messages": {
+    "message.txt": ["7f3a"],
+    "with-sign-off.txt": ["41c7"],
+    "none.txt": [],
+    "in-subject.txt": []
+  }
+}

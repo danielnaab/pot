@@ -7,7 +7,7 @@ status: working
 |---|---|
 | Version | 1: `policy.json`'s `version` |
 | Producer | pot's backends (bubblewrap), from the policy that pot composed |
-| Reader | graft (`graft check`), kit hooks (the claude-code kit's denial hook), and any program in a run |
+| Reader | a producer's check inside a run (tuteur's, graft's `graft check`), kit hooks (the claude-code kit's denial hook), and any program in a run |
 | Owner | pot |
 
 ## Shape
@@ -23,7 +23,7 @@ status: working
 | `POT_RUN` | The run's id, four hex digits (since v2.21.0). The run's `~/.gitconfig` runs `pot trailer`, which writes it into commit messages as `Pot-Run: <id>`. |
 
 The rest of a run's environment is described in pot's reference
-([Environment](../../docs/reference/pot.md#environment)); it is not part of this contract.
+([Environment](../docs/reference/pot.md#environment)); it is not part of this contract.
 
 ### Files
 
@@ -31,7 +31,7 @@ The rest of a run's environment is described in pot's reference
 |---|---|
 | `/run/pot/policy.json` | The run's policy ([below](#policyjson-version-1)), read-only. |
 | `/run/pot/launcher` | The root's in-run pot, read-only; a wrapper inside the run execs it (under Seatbelt, `launcher` beside `POT_POLICY`). `~/.config/pot/launcher` is a link to it, in a read-only folder. Since v2.18.0. |
-| `/run/pot/children.sock` | The run's broker for its [siblings](../../docs/reference/pot.md#siblings-and-the-children-table), in a run whose table has a `sibling` row (under Seatbelt, `children.sock` beside `POT_POLICY`). Only the run's own pot speaks to it; its requests are not part of this contract. Since v2.20.0. |
+| `/run/pot/children.sock` | The run's broker for its [siblings](../docs/reference/pot.md#siblings-and-the-children-table), in a run whose table has a `sibling` row (under Seatbelt, `children.sock` beside `POT_POLICY`). Only the run's own pot speaks to it; its requests are not part of this contract. Since v2.20.0. |
 | `/run/pot/table/<digest>/`, `/run/pot/children/` | v2.18.0 to v2.19.2 only: the nested children's table and folders. Not bound since v2.20.0 (only pot's own in-run pot read them). |
 | `/run/pot/denials` | One entry for each refused host and port, appended as it happens, read-only to the run: a line `pot (<context>): the run tried HOST:PORT (not in this run).`, then indented lines `  one run:   pot --net HOST …` and `  permanent: <fix>` (one more `             or <fix>` line for each other fix). Since v2.16.1; v2.16.0 wrote one line per entry. Read it as text: its layout is not part of this contract's shape. |
 
@@ -127,7 +127,7 @@ pot why TARGET --json      # TARGET: HOST, HOST:PORT, a git URL, or a path
 | 1 | not reached |
 | 2 | not a target this asks about (a command, a root kit's command even when a path has its name, a variable): `pot why --json answers a host, HOST:PORT, a git URL or a path; X is none (pot why X explains it)` |
 
-`graft check` asks this, inside a run, before it lists a scion's tags, so that a fetch the run cannot make leaves no
+tuteur's check (graft's `graft check` before it) asks this, inside a run, before it lists a submodule's tags, so that a fetch the run cannot make leaves no
 refusal behind. When the answer has no boolean `reached` (an older pot, or no `pot` on `PATH`), it tries the
 fetch.
 
@@ -142,7 +142,7 @@ fetch.
 
 ## Sources
 
-- [pot/core/pot.py](../core/pot.py): the run's environment, `why_json`, `reach_of`
-- [pot/core/compose.py](../core/compose.py): the policy and its sources
-- [lib/common.sh](../../lib/common.sh): `pot_reaches`, `graft check`'s question
-- [pot's reference: policy.json](../../docs/reference/pot.md#policyjson)
+- [core/pot.py](../core/pot.py): the run's environment, `why_json`, `reach_of`
+- [core/compose.py](../core/compose.py): the policy and its sources
+- [graft's lib/common.sh at v2.21.0](https://github.com/danielnaab/graft/blob/v2.21.0/lib/common.sh): `pot_reaches`, a reader's question
+- [pot's reference: policy.json](../docs/reference/pot.md#policyjson)

@@ -35,7 +35,7 @@ its repository and shares it across machines through git, so machines on differe
 | `machines."<machine>"."<identity>"` | object | a grant for one machine (its short host name), which overrides the shared entry there. A repository with no remote is always here. |
 | `…digest` | string | `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines, each ended by `\n` |
 | `…requests` | list of strings | the canonical requests the grant covers |
-| `…source` | object, optional | for powerful items only: a scion kit's `{ "commit": "…", "tag": "vX.Y.Z" }`; a repo kit's `{ "tree": "<git tree id>" }` (`git write-tree --prefix=<flake dir>/` from a copy of the index). None for a root kit. |
+| `…source` | object, optional | for powerful items only: a submodule kit's `{ "commit": "…", "tag": "vX.Y.Z" }`; a repo kit's `{ "tree": "<git tree id>" }` (`git write-tree --prefix=<flake dir>/` from a copy of the index). None for a root kit. |
 | `…granted` | string | `YYYY-MM-DD <machine>` |
 | `…delegate` | object, optional | reserved for delegation (later) |
 
@@ -73,14 +73,14 @@ machine-independent.
      rule 1 applies. pot records the kit as built at each run whose tree equals its grant's, so a machine whose
      repository moved past the granted tree before its first v2.17.0 run asks once more.
 
-  So a scion bump or a changed test file no longer asks again; a new `flake.lock` does, and so does any change to
+  So a submodule bump or a changed test file no longer asks again; a new `flake.lock` does, and so does any change to
   what the kit builds, even in a file that `flake.nix` imports. A pot from before v2.17.0 applies rule 1 alone: it
-  is stricter, never in conflict, and the grant it writes is one that a newer pot reads. Taking a new graft into a
+  is stricter, never in conflict, and the grant it writes is one that a newer pot reads. Taking a new producer (tuteur, or graft before it) into a
   consumer changes its `flake.lock`, so it asks for one `pot grant NAME` for that consumer's repo kit, and for no
   other kit.
 
 ## Sources
 
-- [pot/core/compose.py](../core/compose.py): `parse_grants`, `digest`, `write_grant`
-- [pot/tests/golden.json](../tests/golden.json): the golden canonical items and digests
-- [pot's reference: The grants file](../../docs/reference/pot.md#the-grants-file)
+- [core/compose.py](../core/compose.py): `parse_grants`, `digest`, `write_grant`
+- [tests/golden.json](../tests/golden.json): the golden canonical items and digests
+- [pot's reference: The grants file](../docs/reference/pot.md#the-grants-file)

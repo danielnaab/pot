@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danielnaab/pot/contracts/trailer-1.schema.json",
+  "title": "trailer/1: the value of a Pot-Run: trailer",
+  "description": "One value of the Pot-Run trailer, as git's trailer parser gives it (git log --format='%(trailers:key=Pot-Run,valueonly)'): a run's id, as runs/1 writes it.",
+  "type": "string",
+  "pattern": "^[0-9a-f]{4}$"
+}

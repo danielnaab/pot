@@ -1,0 +1,3 @@
+A commit made outside any run
+
+Signed-off-by: Ada <ada@example.org>

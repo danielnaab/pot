@@ -6,7 +6,7 @@ status: working
 | | |
 |---|---|
 | Version | 1.x: the field `version`, `"1.0"`, `"1.1"` or `"1.2"`. A missing `version` means `"1.0"`. |
-| Producer | a provider's `graft.nix` (`kit`), a consumer's mkFlake `perSystem.kit`, a root's `programs.pot.kits.<name>` and `repoKits."<origin>"` |
+| Producer | a provider (`kit` in tuteur's `tuteur.nix`, graft's `graft.nix`), a repository's own kit (tuteur's `perSystem.kit`), a root's `programs.pot.kits.<name>` and `repoKits."<origin>"` |
 | Reader | pot: [kitsFor](pot-lib-1.md) when it writes a bundle, mkRoot when it builds a root, and pot at run start |
 | Owner | pot |
 
@@ -42,7 +42,7 @@ kit = {
 | Field | Since | Type | Meaning |
 |---|---|---|---|
 | `version` | 1.0 (v2.16.0 readers) | string | the minor the kit is written against |
-| `tools` | 1.0 (v2.16.0 readers) | list of packages | On `PATH`. A repo kit's tools reach every run in its workspace; a scion kit's do not. |
+| `tools` | 1.0 (v2.16.0 readers) | list of packages | On `PATH`. A repo kit's tools reach every run in its workspace; a submodule kit's do not. |
 | `packages` | 1.0 | list of packages | `tools`' old name. Deprecated in v2.16.0. Since v2.17.0 kitsFor and mkRoot refuse it; pot still reads it in a bundle that an older graft built ([Compatibility](#compatibility)). |
 | `env.set` | 1.0 | attrs of strings | Fixed values, for the kit's own commands. Names that pot owns are refused. |
 | `files."<path>"` | 1.0 | `{ source; mode; keys; }` | A file in the run, at `~/…` or `/…`; `/…` needs the `root-files` guarantee. |
@@ -88,7 +88,7 @@ Each request has one canonical string, which the [grants file](grants-1.md#canon
 
 ### Recipes
 
-A recipe is data from which graft generates a just recipe; kits ship no hand-written `.just` files. The string form
+A recipe is data from which pot generates a just recipe; kits ship no hand-written `.just` files. The string form
 (1.0) is `"<command> <args>"`; the attrs form (1.2) is `{ run = "<command> <args>"; description = "…"; }`. The first
 word of `run` must be a command of the same kit, and the rest are literal words. pot checks this in every kit
 version, when kitsFor builds, at run start, and inside the generated text itself (so `nix eval` refuses too):
@@ -101,8 +101,9 @@ version, when kitsFor builds, at run start, and inside the generated text itself
   commands (A, B)`;
 - the attrs form in a 1.0 or 1.1 kit: `pot: FILE: recipes.N: { run; description; } (kit 1.2), or one line`.
 
-Kits 1.0 and 1.1 take the string form only. graft generates one file, `kits.just`, from every kit's recipes
-([pot-kits/1](pot-kits-1.md#shape)); before v2.18.0 it checked them and generated nothing.
+Kits 1.0 and 1.1 take the string form only. pot's kitsFor generates one file, `kits.just`, from every kit's recipes
+([pot-kits/1](pot-kits-1.md#shape)), which the producer writes into the repository; before v2.18.0 it checked them
+and generated nothing.
 
 ### Hook commands
 
@@ -188,8 +189,8 @@ A root names each instance of an agent kit: `kits."claude-code@flexion" = …`, 
    specific match wins:** the instance whose `select.env` names the most variables. A tie goes to the default
    when it is among the matches; otherwise pot stops and names them;
 4. the kit's default: the root's `defaultInstance.<kit>`, or the only instance. mkRoot checks each
-   `defaultInstance.<kit>` when it evaluates: `graft.lib.mkRoot: defaultInstance.KIT = "X": the root declares
-   KIT@a, KIT@b`, or `graft.lib.mkRoot: defaultInstance.KIT: the root has no kit KIT@NAME (kits: …)`. The home-manager
+   `defaultInstance.<kit>` when it evaluates: `pot.lib.mkRoot: defaultInstance.KIT = "X": the root declares
+   KIT@a, KIT@b`, or `pot.lib.mkRoot: defaultInstance.KIT: the root has no kit KIT@NAME (kits: …)`. The home-manager
    module names its own options: `programs.pot.defaultInstance.KIT = "X": programs.pot.kits declares KIT@a, …` and `programs.pot.defaultInstance.KIT: programs.pot.kits has no KIT@NAME`.
 
 Each instance is granted on its own.
@@ -202,7 +203,7 @@ a wrapper's arguments says is taken as fact. These forms are frozen:
 | Kit | Identity | Established by |
 |---|---|---|
 | Root kit | `root:<name>[@<instance>]` | the root's store manifest. A workspace kit that claims a `root:` name is an error. |
-| Scion kit | `git:<url>` | `.gitmodules` at the workspace's `HEAD`, verified: the gitlink commit is a release tag (`vX.Y.Z`) at that URL, cached per URL and commit. An unverified kit is listed, and its grant does not apply. |
+| Submodule kit (a git submodule at a release tag) | `git:<url>` | `.gitmodules` at the workspace's `HEAD`, verified: the gitlink commit is a release tag (`vX.Y.Z`) at that URL, cached per URL and commit. An unverified kit is listed, and its grant does not apply. |
 | Repo kit | `repo:<normalised origin>`; with no remote, `repo:<machine>:<git common dir>` | `git remote get-url origin`, so `insteadOf` applies |
 
 The origin normalisation is frozen:
@@ -223,8 +224,8 @@ identity.
 
 - **Reader first.** pot reads a minor before any producer writes it. v2.17.0 reads 1.2; a producer writes 1.2 from
   v2.18.0, once the roots that read its kits are on v2.17.0 or later. A kit that writes 1.1 needs roots on v2.16.0
-  or later. The claude-code kit writes 1.1. A kit's `commands` (any minor) are wrapped once its consumer takes
-  graft v2.18.0; under a root older than that, the wrappers run their programs unwrapped
+  or later. The claude-code kit writes 1.1. A kit's `commands` (any minor) are wrapped once its consumer's
+  producer calls a kitsFor from graft v2.18.0 or pot 0.1.0 on; under a root older than that, the wrappers run their programs unwrapped
   ([pot-kits/1](pot-kits-1.md#shape)).
 - **A newer minor gets one refusal, checked before any other field:**
   `pot: FILE: kit version 1.3 is newer than this pot reads (1.0, 1.1, 1.2): take a newer pot`. Another major, or a
@@ -238,9 +239,9 @@ identity.
   widened what a 1.0 reader accepts with `tools` and `version`.)
 - **`packages`, removed at the source.** Since v2.17.0, kitsFor and mkRoot refuse a kit that gives `packages`:
   `pot: FILE: packages is tools' old name, gone in v2.17.0: give tools` (FILE is the kit's file, such as
-  `scions/x/graft.nix` or `flake.nix (perSystem)`; for a root's kit, `pot: the root (programs.pot.kits.NAME): …`). pot
+  `.patterns/x/tuteur.nix` or `flake.nix (perSystem)`; for a root's kit, `pot: the root (programs.pot.kits.NAME): …`). pot
   still reads `packages` as `tools`, with no warning, in a bundle that graft v2.16.x built, so a consumer that has
-  not moved its graft keeps working under a newer root. Giving both is an error.
+  not moved its producer keeps working under a newer root. Giving both is an error.
 - **The last planned change.** 1.2 adds every field that v2.18.0's wrapped commands, generated recipes, hook
   commands and children table read. Nesting is in [runs/1](runs-1.md) and [run-env/1](run-env-1.md), and the
   `pi` kit is written in 1.1's fields, so neither changes kit/1. This is what lets v2.18.0 and v2.19.0 be the two
@@ -249,9 +250,9 @@ identity.
 
 ## Sources
 
-- [pot/core/compose.py](../core/compose.py): `kit_version`, `validate_kit`, `check_dirs`, `check_agent`,
+- [core/compose.py](../core/compose.py): `kit_version`, `validate_kit`, `check_dirs`, `check_agent`,
   `normalise_kit`, `normalise_origin`, `repo_identity`, `scion_identity`
-- [pot/core/pot.py](../core/pot.py): choosing the instance, mirrors, resume
-- [pot/kits/claude-code.nix](../kits/claude-code.nix): a 1.1 kit
-- [pot/kits/pi.nix](../kits/pi.nix): a 1.1 kit (v2.19.0)
-- [pot's reference: Kits](../../docs/reference/pot.md#kits)
+- [core/pot.py](../core/pot.py): choosing the instance, mirrors, resume
+- [kits/claude-code.nix](../kits/claude-code.nix): a 1.1 kit
+- [kits/pi.nix](../kits/pi.nix): a 1.1 kit (v2.19.0)
+- [pot's reference: Kits](../docs/reference/pot.md#kits)
