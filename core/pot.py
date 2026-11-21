@@ -513,6 +513,19 @@ def repo_kit(host, w, rel, ctxname="work"):
     return out, bundle
 
 
+NO_BUNDLE_WARNED = set()
+
+
+def no_bundle_warning(host, fdir, ctxname):
+    """0.1.0 (decision 6): a repository with submodules and a flake but no pot-kits gets none of its producer's kits
+    or protections (a producer that calls kitsFor only when the repository brings pot, as tuteur's mkFlake does,
+    writes none without it). Said once per start, never silenced by POT_QUIET: it is about what the run lacks."""
+    if fdir in NO_BUNDLE_WARNED:
+        return
+    NO_BUNDLE_WARNED.add(fdir)
+    err(f"pot ({ctxname}): {C.canon_path(fdir, host.home)}'s flake has no pot-kits; its own kits and protections are not applied")
+
+
 def read_bundle(host, out, bundle, fdir, ctxname):
     """kit.json, as pot-kits/1 (files of the bundle pot does not know are ignored)."""
     with open(os.path.join(out, "kit.json")) as f:
@@ -548,6 +561,8 @@ def workspace_facts(host, paths, ctx, cache, clones=None):
         if rel is not None:
             out, bundle = repo_kit(host, rc, rel, ctx["name"])
             r["tree"], r["source"] = rc.get("tree"), rc.get("source")
+            if out is None:
+                no_bundle_warning(host, os.path.join(r["top"], rel) if rel else r["top"], ctx["name"])
         if out is not None:
             fdir = os.path.join(rc["top"], rel) if rel else rc["top"]
             kitjson = read_bundle(host, out, bundle, fdir, ctx["name"])
