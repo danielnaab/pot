@@ -1,0 +1,43 @@
+apiVersion: kb/v1
+name: pot
+description: "pot: run commands and agents in a sandbox whose reach each repository's kits ask for and a root grants"
+
+entrypoints:
+  human: README.md
+  agent: AGENTS.md
+
+paths:
+  docs: docs
+
+sources:
+  canonical:
+    - path: core/**
+      note: "pot's behaviour is defined by its code and its tests"
+    - path: lib/**
+      note: "kitsFor (pot-lib/1) and the kit manifest"
+    - path: nix/**
+      note: "mkRoot and the home-manager module"
+    - path: kits/**
+      note: "The agent kits and the APIs"
+    - path: tests/**
+      note: "The unit tests, the golden grant test and tests/run.sh"
+  interpretation:
+    - path: README.md
+      note: "Orientation"
+    - path: docs/**
+      note: "Explains the code; reference pages cite it in a Sources section"
+    - path: contracts/**
+      note: "pot's contracts; each cites the code in a Sources section"
+
+rules:
+  lifecycle:
+    statuses: [draft, working, stable, deprecated]
+  checks:
+    links:
+      include: [README.md, AGENTS.md, CHANGELOG.md, docs/**, contracts/**]
+    lifecycle:
+      include: [docs/**, contracts/**]
+    provenance:
+      include: [docs/reference/**, contracts/**]
+  writes:
+    allow: ["docs/**", "core/**", "lib/**", "nix/**", "kits/**", "tests/**", "contracts/**", "dev/**"]

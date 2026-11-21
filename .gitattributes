@@ -1,0 +1,8 @@
+# What pot exports. Roots and producers take pot as a flake input (github:danielnaab/pot/vX.Y.Z, or git+https with
+# exportIgnore=1), whose tree is the tagged release minus the paths below: this repository's own upkeep.
+# No trailing slashes: the same rules hold for git+ inputs.
+/.gitignore          export-ignore
+/AGENTS.md           export-ignore
+/CLAUDE.md           export-ignore
+/knowledge-base.yaml export-ignore
+/dev                 export-ignore

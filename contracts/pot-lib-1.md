@@ -75,7 +75,7 @@ Any flake can give `packages.<system>.pot-kits`. This one has a repo kit, one su
       packages.${system}.pot-kits = pot.lib.pot.kitsFor {
         inherit pkgs;
         self = { file = "flake.nix"; kit = { protect = [ "AGENTS.md" ]; tools = [ pkgs.jq ]; }; };
-        scions.style = { file = "vendor/style/kit.nix"; kit = import ./vendor/style/kit.nix { inherit pkgs; }; };
+        scions.style = { file = "flake.nix (style)"; kit = { requests.network = [ "lint.example.org" ]; }; };
         tools = [ lint ];
         files = [ "vendor" ];
         recipes.lint = { run = "lint --all"; description = "Lint everything"; };
