@@ -1,7 +1,7 @@
-# graft.apis: the APIs an agent kit can be pointed at, as values (architecture §4, workflow 5):
+# pot.apis: the APIs an agent kit can be pointed at, as values (architecture §4, workflow 5):
 #
-#   graft.kits.claude-code { …; api = graft.apis.bedrock { region = "us-east-1"; }; }
-#   graft.kits.claude-code { …; api = graft.apis.gateway { url = "https://llm.example.org"; }; }
+#   pot.kits.claude-code { …; api = pot.apis.bedrock { region = "us-east-1"; }; }
+#   pot.kits.claude-code { …; api = pot.apis.gateway { url = "https://llm.example.org"; }; }
 #
 # A value is data the kit reads: { name; region?; url?; host?; }. A kit decides what each means (hosts,
 # credentials). A gateway (v2.17.1) is an Anthropic-compatible service at an https url, reached on port
@@ -17,7 +17,7 @@ let
       host = builtins.replaceStrings upper lower (builtins.head m);
     in
     if m == null
-    then throw "graft.apis.gateway: url = \"${url}\": give https://HOST[/PATH] (pot reaches HOST on port 443)"
+    then throw "pot.apis.gateway: url = \"${url}\": give https://HOST[/PATH] (pot reaches HOST on port 443)"
     else { name = "gateway"; inherit host; url = "https://${host}${trimmed}"; };
 in
 {

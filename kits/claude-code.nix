@@ -1,7 +1,7 @@
-# graft.kits.claude-code: Claude Code as an agent kit (design §6.3, §13.2). A root calls it once per
+# pot.kits.claude-code: Claude Code as an agent kit (design §6.3, §13.2). A root calls it once per
 # instance, as the root kit claude-code@<instance> (the instance's name is the root's kits key):
 #
-#   graft.kits.claude-code {
+#   pot.kits.claude-code {
 #     pkgs;                        # the root's nixpkgs
 #     binary ? "native";           # "native": ~/.local/bin/claude; "host": the claude on the host's PATH;
 #                                  # either resolved on the host at start; or a package
@@ -10,8 +10,8 @@
 #     skillDirs ? [ "synced" ];    # real directories in the skills folder that are bound (by name; [ ] opts out)
 #     plugins ? true;              # bind the account's plugins folder read-only (false opts out)
 #     skillSources ? [ ];          # checkouts the skill links point into (read requests)
-#     api ? graft.apis.anthropic;  # or graft.apis.bedrock { region = "us-east-1"; }, or
-#                                  # graft.apis.gateway { url = "https://…"; } (v2.17.1)
+#     api ? pot.apis.anthropic;  # or pot.apis.bedrock { region = "us-east-1"; }, or
+#                                  # pot.apis.gateway { url = "https://…"; } (v2.17.1)
 #     mcp ? [ ];                   # MCP server names, each a `mcp` request
 #   }
 #
@@ -32,8 +32,8 @@ let
   # v2.15.0's account, provider and region: deprecated in v2.16.0, gone in v2.17.0 (each error names its
   # replacement; the arguments stay only to say so)
   noAccount = x:
-    if account != null then throw "graft.kits.claude-code: account is gone (v2.17.0): the instance is the root's kits key (\"claude-code@NAME\")"
-    else if provider != null || region != null then throw "graft.kits.claude-code: provider and region are gone (v2.17.0): api = graft.apis.bedrock { region = \"…\"; } (or graft.apis.anthropic)"
+    if account != null then throw "pot.kits.claude-code: account is gone (v2.17.0): the instance is the root's kits key (\"claude-code@NAME\")"
+    else if provider != null || region != null then throw "pot.kits.claude-code: provider and region are gone (v2.17.0): api = pot.apis.bedrock { region = \"…\"; } (or pot.apis.anthropic)"
     else x;
   api' = if api != null then api else apis.anthropic;
   provider' = api'.name;

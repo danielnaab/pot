@@ -1,5 +1,5 @@
 # homeManagerModules.pot: a personal root in home-manager (design §13.1, D1). programs.pot's options are
-# graft.lib.mkRoot's arguments; the module builds the root's pot, puts it on PATH, and points
+# pot.lib.mkRoot's arguments; the module builds the root's pot, puts it on PATH, and points
 # ~/.config/pot/launcher at it (the pointer pot's wrappers read from 1b). It asserts that
 # workmux's Docker sandbox is off: pot replaces it for agent panes, never stacks with it.
 { mkRoot }:
@@ -39,7 +39,7 @@ in
     stateDir = opt t.str "~/.local/state/pot" "pot's runs, logs, caches and state (hidden from every run).";
     contexts = opt (t.attrsOf (t.attrsOf t.anything)) { } "Contexts added to, or changing, host inspect work dispatch.";
     defaultContext = opt t.str "work" "The context of `pot CMD`.";
-    kits = opt (t.attrsOf (t.attrsOf t.anything)) { } "Root kits, by name (NAME, or NAME@INSTANCE): graft.kits.claude-code { … }, or a kit's data.";
+    kits = opt (t.attrsOf (t.attrsOf t.anything)) { } "Root kits, by name (NAME, or NAME@INSTANCE): pot.kits.claude-code { … }, or a kit's data.";
     defaultInstance = opt (t.attrsOf t.str) { } "Per kit, the instance a command with several gets with no @NAME, --instance or matching caller variables: { claude-code = \"personal\"; }.";
     agentMarkers = opt (t.listOf t.str) [ ] "Variables that mean an agent is the caller (pot grant refuses; no inline prompt), beyond the floor (CODEX_SANDBOX, CLAUDECODE, POT) and each kit's agent.markers.";
     hidden = opt (t.listOf t.str) [ ] "Paths hidden from every run, beyond pot's defaults.";

@@ -50,7 +50,7 @@ OWNED_ENV = {"BASH_ENV", "PATH", "HOME", "NIX_REMOTE", "SSL_CERT_FILE", "TZ", "H
 
 def owned(name):
     """A variable name pot owns: refused from kits' env.set and --env. POT* is pot's; GRAFT_SANDBOX* was
-    v2.14.0's sandbox's, and is refused too, so that no kit can fake one."""
+    graft v2.14.0's sandbox's, and is refused too, so that no kit can fake one (until pot 0.2.0)."""
     return name in OWNED_ENV or name.startswith("POT") or name.startswith("GRAFT_SANDBOX")
 
 
@@ -64,7 +64,7 @@ DEFAULT_HIDDEN = [
 ]
 
 # §9: the base protect list, in the workspace (the flake directory is added when pot evaluates one, and
-# its pot-kits bundle adds the producer's own: graft's mkFlake, every graft.nix and its scions directory)
+# its pot-kits bundle adds the producer's own: a producer such as tuteur's mkFlake protects its own files)
 # (agents' own folders, credential stores and markers are the root's floor: root.nix's baseHidden,
 # baseProtect and agentMarkers, which reach pot in the root's manifest)
 BASE_PROTECT = ["**/flake.nix", "**/flake.lock", "**/.gitmodules", "**/.envrc", "**/justfile",
@@ -442,7 +442,7 @@ def validate_kit(kit, where, home, root=True):
         if isinstance(c, dict) and "hook" in c and c["hook"] not in HOOKS:
             raise KitError(f"{where}: commands.{name}.hook: one of {', '.join(HOOKS)}")
     for n, body in (kit.get("recipes") or {}).items():
-        # every version (F1, v2.18.0): graft writes kits.just from these, and just runs it on the host. A recipe's name
+        # every version (F1, v2.18.0): the producer writes kits.just from these, and just runs it on the host. A recipe's name
         # is a name; run is one of this kit's own commands, then literal words of a safe set (no shell syntax)
         if not RECIPE_NAME.fullmatch(str(n)):
             raise KitError(f"{where}: recipes.{n}: a recipe's name is letters, digits, _ and - (starting with a letter)")
@@ -1731,7 +1731,7 @@ def permanent_fix(flag, value, report, root):
     kit = cmd.get("kit") or ""
     if flag == "--net" and kit.startswith("root:") and kit[5:].split("@")[0] == "pi":
         name = kit[5:] if "@" not in kit else f'"{kit[5:]}"'
-        return (f"a provider or endpoint in {pre}kits.{name} (graft.kits.pi; {apply})\nor "
+        return (f"a provider or endpoint in {pre}kits.{name} (pot.kits.pi; {apply})\nor "
                 + repo_fix(report, root, kind) + alt)
     return repo_fix(report, root, kind) + alt
 
@@ -1955,7 +1955,7 @@ def explain_text(policy, report, root, width=100):
         out.append(f"workspace  {w['id']} ({policy['access']}) {w['path']}")
     scions = [k for k in report["kits"] if k["kind"] == "scion"]
     if scions:
-        out += wrap_words("           scions:", [f"{k['name']} {(k.get('source') or {}).get('tag', '')}".rstrip()
+        out += wrap_words("       submodules:", [f"{k['name']} {(k.get('source') or {}).get('tag', '')}".rstrip()
                                                  + (" (unverified)" if k["status"] == "unverified" else "") + ","
                                                  for k in scions], width, 19)
         out[-1] = out[-1].rstrip(",")

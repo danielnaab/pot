@@ -30,6 +30,10 @@ import compose as C  # noqa: E402
 import clones as CL  # noqa: E402
 import runs as R  # noqa: E402
 
+# pot's version, set here alone (CHANGELOG.md names it; pot doctor prints it; pot init pins it), and the flake
+# reference pot init's root takes pot from (POT_INIT_URL replaces the whole reference, tag included)
+VERSION = "0.1.0"
+URL = "github:danielnaab/pot"
 INSIDE_POLICY = "/run/pot/policy.json"
 FLAG_ARGS = {"--package", "--read", "--write", "--net", "--env", "--access", "--mode", "--repo", "--from",
              "--instance", "--account", "--backend", "--resume", "--manifest"}
@@ -55,7 +59,7 @@ USAGE = """usage: pot [VERB | CONTEXT] [FLAGS] [--] [CMD [ARGS...]]
   pot doctor                    the backend, bindings (by path), instances, this workspace, pot's state
   pot run --command NAME --manifest PATH -- ARGS
                                 the wrappers' entry: a kit command, under its own policy (a wrapper runs it)
-  pot init [DIR]                write a minimal root (graft.lib.mkRoot), for someone without one
+  pot init [DIR]                write a minimal root (pot.lib.mkRoot), for someone without one
 
 flags (before CMD; one run only):
   --package PKG  --read PATH  --write PATH  --net HOST[:PORT]  --env NAME
@@ -3056,7 +3060,7 @@ def grant_flow(host, root, grants, sts, inline=False, commit=False):
             entry = st.get("entry")
             have = set(entry["requests"]) if entry else set()
             reqs = st["requests"]
-            kind = {"root": "root kit", "repo": "repo kit", "scion": "scion kit"}[st["kind"]]
+            kind = {"root": "root kit", "repo": "repo kit", "scion": "submodule kit"}[st["kind"]]
             scope = {"root": "every run that uses it", "repo": "every run in this repository",
                      "scion": f"every workspace that pins {st['kit'][4:]}"}[st["kind"]]
             state = C.STATUS_WORDS[st["status"]]
@@ -3754,7 +3758,7 @@ def fetch_back(host, rec, ev, rd):
     for b in order:
         n = run_git(host, src, "rev-list", "--count", f"{base}..refs/remotes/{rn}/{b}").stdout.strip()
         shown.append(f"{rn}/{b} ({n} commit{'s' if n != '1' else ''} on {short})")
-    print(visible(f"pot: fetched run {rid} into {C.canon_path(src, host.home)}: " + (", ".join(shown) or "its scions' commits")))
+    print(visible(f"pot: fetched run {rid} into {C.canon_path(src, host.home)}: " + (", ".join(shown) or "its submodules' commits")))
     signs = c.get("unsigned") and run_git(host, src, "config", "--bool", "commit.gpgsign").stdout.strip() == "true"
     ac = (R.last(ev, "after") or {}).get("agent_config")
     if ac:
@@ -3770,7 +3774,7 @@ def fetch_back(host, rec, ev, rd):
     if shown:
         print(visible(f"  take it: git merge {rn if signs else first_ref}"))
     for path in ((R.last(ev, "after") or {}).get("scions") or {}):
-        print(visible(f"  {path}: its commits are in that scion's refs/remotes/{rn}/* (a fix there goes to its provider)"))
+        print(visible(f"  {path}: its commits are in that submodule's refs/remotes/{rn}/* (a fix there goes to its provider)"))
     return 0
 
 
@@ -3806,8 +3810,7 @@ def doctor(host, root, rootjson):
         lines.append((f"! {label:<8} {first}" if label else f"{'':<9}! {first}") if bad else f"{label:<11}{first}")
         lines.extend(" " * 11 + r for r in rest)
     sp = lambda p: C.canon_path(C.expand(p, host.home), host.home) if p else p   # noqa: E731
-    ver = "v2.22.0"
-    lines.append(f"pot doctor · root {root.get('name', '?')} · {host.machine} · pot {ver}")
+    lines.append(f"pot doctor · root {root.get('name', '?')} · {host.machine} · pot {VERSION}")
     # the backend
     try:
         bname, bprog = backend_cmd(host, None)
@@ -3924,7 +3927,7 @@ def doctor(host, root, rootjson):
             cache = {}
             w = workspace_facts(host, [r["top"]], ctx, cache)[0]
             kit = (f"repo kit {w['flakeDir'] or '.'} (pot-kits)" if w.get("repoKit") is not None else "no repo kit")
-            sc_ = ", ".join(f"{s['name']} {s['tag'] or '(unverified)'}" for s in w["scions"] if s.get("manifest")) or "no scion kits"
+            sc_ = ", ".join(f"{s['name']} {s['tag'] or '(unverified)'}" for s in w["scions"] if s.get("manifest")) or "no submodule kits"
             row("workspace", f"{C.repo_short_name(w)}: {w['id']} · {kit} · {sc_}")
         except C.Refusal as e:
             row("workspace", f"{C.canon_path(r['top'], host.home)}: {e.message}", True)
@@ -4026,24 +4029,24 @@ def all_kit_status(host, root, context, flags):
 # ---------------------------------------------------------------- init
 
 INIT_FLAKE = """{
-  # A minimal pot root (graft.lib.mkRoot): pot init wrote it; edit it, then build it again.
-  inputs.graft.url = "GRAFT";
-  inputs.nixpkgs.follows = "graft/nixpkgs";
-  outputs = { graft, nixpkgs, ... }:
+  # A minimal pot root (pot.lib.mkRoot): pot init wrote it; edit it, then build it again.
+  inputs.pot.url = "POTURL";
+  inputs.nixpkgs.follows = "pot/nixpkgs";
+  outputs = { pot, nixpkgs, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
     in
     {
-      packages = forAll (pkgs: rec {
-        pot = graft.lib.mkRoot {
+      packages = forAll (pkgs: let
+        root = pot.lib.mkRoot {
           inherit pkgs;
           grantsFile = "GRANTS";
           stateDir = "~/.local/state/pot";
           hidden = [ ];                       # beyond pot's defaults
           tools = [ ];                        # packages on every run's PATH
           # Claude Code: the claude on your PATH, with a token file from `claude setup-token`
-          kits."claude-code@personal" = graft.kits.claude-code { inherit pkgs; binary = "host"; };
+          kits."claude-code@personal" = pot.kits.claude-code { inherit pkgs; binary = "host"; };
           defaultInstance.claude-code = "personal";
           contexts.work.include = [ ];        # root kits whose requests reach every run here
           bindings = {
@@ -4052,8 +4055,7 @@ INIT_FLAKE = """{
             nix."*" = { via = "daemon-untrusted"; };
           };
         };
-        default = pot;
-      });
+      in { pot = root; default = root; });
     };
 }
 """
@@ -4069,11 +4071,11 @@ def init(host, args, flags):
     f = os.path.join(d, "flake.nix")
     if os.path.exists(f):
         raise C.Refusal(f"pot init: {C.canon_path(f, host.home)} exists; edit it, or choose another folder: pot init DIR")
-    graft_url = os.environ.get("POT_INIT_GRAFT") or "github:danielnaab/graft/v2.20.0"
+    pot_url = os.environ.get("POT_INIT_URL") or f"{URL}/v{VERSION}"
     os.makedirs(d, exist_ok=True)
     grants = os.path.join(C.canon_path(d, host.home), "grants.json")
     with open(f, "w") as fh:
-        fh.write(INIT_FLAKE.replace("GRAFT", graft_url).replace("GRANTS", grants))
+        fh.write(INIT_FLAKE.replace("POTURL", pot_url).replace("GRANTS", grants))
     cd = C.canon_path(d, host.home)
     print(visible(f"wrote {cd}/flake.nix: a minimal root. Next:\n"
                   f"  nix profile install path:{d}#pot      # pot on your PATH (or: nix build path:{d}#pot, and add result/bin)\n"
@@ -4156,7 +4158,7 @@ def main(argv):
     if args[:1] == ["trailer"]:
         return trailer(args[1:])     # git's hook, on the host and inside a run: nothing else is read
     if (sys.platform == "darwin" or root.get("darwin")) and not root.get("inner") and not root.get("backends"):
-        err("pot: this root has no backend for darwin (a root built before Seatbelt's return): rebuild it with this graft")
+        err("pot: this root has no backend for darwin (a root built before Seatbelt's return): rebuild it with this pot")
         return 1
     try:
         verb, context, flags, cmd = parse(args, root)

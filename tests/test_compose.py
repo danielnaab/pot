@@ -662,7 +662,7 @@ class Kit12(unittest.TestCase):
                 C.validate_kit(self.kit(recipes={"x": bad}), "k", HOME)
         with self.assertRaisesRegex(C.KitError, r"k: recipes.x: \{ run; description; \}"):
             C.validate_kit(self.kit(recipes={"x": {"run": "mk", "shell": "sh"}}), "k", HOME)
-        # F1: a 1.0 or 1.1 kit's recipes get the same checks (graft writes them into kits.just too)
+        # F1: a 1.0 or 1.1 kit's recipes get the same checks (the producer writes them into kits.just too)
         with self.assertRaisesRegex(C.KitError, lit):
             C.validate_kit({"recipes": {"x": "other $HOME"}}, "k", HOME)
         with self.assertRaisesRegex(C.KitError, r"recipes.x: runs \.\./\.\./sh, which is not one of this kit's commands \(none\)"):
@@ -712,12 +712,12 @@ class Kit11(unittest.TestCase):
         _, rep = C.compose(inp(r=r, flags={"net": ["x.org"]}, workspace=[ws(kit={})]))
         rep = dict(rep, command={"name": "pi", "kit": "root:pi"})
         self.assertEqual(C.permanent_fix("--net", "x.org:443", rep, r),
-                         "a provider or endpoint in programs.pot.kits.pi (graft.kits.pi; home-manager switch)\n"
+                         "a provider or endpoint in programs.pot.kits.pi (pot.kits.pi; home-manager switch)\n"
                          "or requests.network in the repo kit (flake.nix, perSystem)\n"
                          "or programs.pot.kits.daniel.requests.network, for every repository (home-manager switch)")
         rep = dict(rep, command={"name": "pi", "kit": "root:pi@work"})
         self.assertTrue(C.permanent_fix("--net", "x.org:443", rep, root()).startswith(
-            'a provider or endpoint in kits."pi@work" (graft.kits.pi; rebuild the root)\nor '))
+            'a provider or endpoint in kits."pi@work" (pot.kits.pi; rebuild the root)\nor '))
         # other flags, and other root kits, are as before
         self.assertFalse(C.permanent_fix("--read", "/x", rep, r).startswith("a provider"))
         rep = dict(rep, command={"name": "claude", "kit": "root:claude-code@personal"})

@@ -668,7 +668,7 @@ def readme(policy, launch):
     ctx = policy["context"]
     return f"""# pot: this run ({ctx})
 
-You are inside a pot run (pot, graft's sandbox), context `{ctx}`, access `{policy['access']}`.
+You are inside a pot run, context `{ctx}`, access `{policy['access']}`.
 The policy is /run/pot/policy.json; `pot why PATH|HOST|CMD|VAR` explains one item.
 
 - HOME is empty but for what the policy places there. ~/.pot-hidden lists the paths

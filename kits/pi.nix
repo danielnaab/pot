@@ -1,7 +1,7 @@
-# graft.kits.pi: the pi coding agent (pi.dev) as an agent kit (design §6.3). A root calls it once, as the
+# pot.kits.pi: the pi coding agent (pi.dev) as an agent kit (design §6.3). A root calls it once, as the
 # root kit pi, or once per instance, as pi@<instance> (the root's kits key names it):
 #
-#   graft.kits.pi {
+#   pot.kits.pi {
 #     pkgs;                        # the root's nixpkgs
 #     binary ? "managed";          # "managed": ~/.pi/agent/bin/pi, pi's managed install, resolved on the host
 #                                  # at each start; or a package with bin/pi
@@ -31,7 +31,7 @@
 let
   lib = pkgs.lib;
   managed = binary == "managed";
-  err = msg: throw "graft.kits.pi: ${msg}";
+  err = msg: throw "pot.kits.pi: ${msg}";
   upper = lib.stringToCharacters "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   lower = lib.stringToCharacters "abcdefghijklmnopqrstuvwxyz";
   # a url's network request: https HOST (443) or HOST:PORT; http HOST:PORT (80). Hosts are lowercased, a trailing

@@ -1,20 +1,21 @@
 # pot.lib.kitsFor (contract pot-lib/1): a repository's kits as the bundle pot reads at run start,
-# packages.<system>.pot-kits (contract pot-kits/1). The one Nix edge between pot and a producer: graft's
-# mkFlake calls it once per system and knows nothing of a kit's fields.
+# packages.<system>.pot-kits (contract pot-kits/1). The one Nix edge between pot and a producer: any flake may
+# call it once per system (tuteur's mkFlake does, through its consumer's inputs.pot) and need know nothing of a
+# kit's fields.
 #
 #   kitsFor {
 #     pkgs;              # the system's nixpkgs
 #     self ? null;       # the repo kit: { kit; file; } (file: where it is written, for pot's messages)
-#     scions ? { };      # scions.<name> = { kit; file; }: each scion's kit
+#     scions ? { };      # scions.<name> = { kit; file; }: each submodule kit (a git submodule at a release tag)
 #     tools ? [ ];       # packages for bin/ (the repo kit's own `tools` are added here)
 #     files ? [ ];       # what the producer has pot protect in every run: paths relative to the flake
 #                        # directory, or "**/NAME" anywhere in the repository
-#     recipes ? { };     # the producer's own recipes (graft's outdated, upgrade, graft-check), in kit/1's
+#     recipes ? { };     # the producer's own recipes (tuteur's outdated, upgrade, check), in kit/1's
 #                        # recipe form, for kits.just (shape fixed in v2.17.0; generated from v2.18.0)
 #   }
 #
 # The result's passthru.wrappers: the declared commands' wrappers, one package (v2.18.0); passthru.kitsJust: the
-# kits.just text (a string, so graft check can compare it with nix eval, without a build).
+# kits.just text (a string, so a producer can compare it with nix eval, without a build).
 #
 # The bundle: kit.json { version = 1; self; scions.<name>; protect; } (each kit a manifest that keeps its
 # `file`), bin/ (the tools) and closure (the store paths a run needs). compose.py validates it as it
@@ -30,8 +31,8 @@ let
     if !(builtins.isAttrs u && u ? kit && u ? file && builtins.isString u.file)
     then throw "pot: kitsFor: ${where} is { kit; file; } (file: a string naming where the kit is written)"
     else u;
-  # kit.packages, tools' old name: gone at the source in v2.17.0 (pot still reads it in a bundle graft v2.16.x
-  # built)
+  # kit.packages, tools' old name: gone at the source in graft v2.17.0 (pot still reads it in a bundle graft
+  # v2.16.x built)
   noPackages = u: if builtins.isAttrs u.kit && u.kit ? packages
     then throw "pot: ${u.file}: packages is tools' old name, gone in v2.17.0: give tools" else u;
   selfU = if self == null then null else noPackages (unit "self" self);
@@ -55,7 +56,7 @@ let
   cu = "${pkgs.coreutils}/bin";
   wrapperText = c: ''
     #!${sh}
-    # graft (pot-kits/1): ${c.n}, a command of ${c.slot}, run by pot under its own policy
+    # pot (pot-kits/1): ${c.n}, a command of ${c.slot}, run by pot under its own policy
     m=@out@/commands/${c.n}.json
     prog=${lib.escapeShellArg c.prog}
     u=$(${cu}/id -un)
@@ -79,7 +80,7 @@ let
     if [ -x "$l" ]; then
       r=$(${cu}/realpath "$l")
       [ ! -e "''${r%/bin/pot}/share/pot/run-1" ] || exec "$l" run --command ${c.n} --manifest "$m" -- "$@"
-      why="your root's pot predates wrapped commands: take graft v2.18.0 in your root (home-manager switch)"
+      why="your root's pot predates wrapped commands: take pot 0.1.0 or later in your root (home-manager switch)"
     fi
     [ -n "$prog" ] || { echo "pot: ${c.n} needs pot (''${why:-no root here: ~/.config/pot/launcher is missing})" >&2; exit 126; }
     echo "pot: ${c.n} runs without pot (''${why:-no root here: ~/.config/pot/launcher is missing})" >&2
@@ -89,9 +90,9 @@ let
     { name = "wrappers/bin/${c.n}"; value = wrapperText c; }
     { name = "commands/${c.n}.json"; value = builtins.toJSON { version = 1; command = c.n; kit = c.slot; }; }
   ]) allCmds);
-  # kits.just: graft's fixed header, then one recipe per kit recipe and producer recipe
+  # kits.just: pot's fixed header, then one recipe per kit recipe and producer recipe
   recipeUnits = lib.optional (selfU != null) selfU ++ lib.attrValues scionUs;
-  # F1 (v2.18.0): every recipe is checked here, inside the text graft writes (nix eval reads kitsJust without a
+  # F1 (v2.18.0): every recipe is checked here, inside the text the producer writes (nix eval reads kitsJust without a
   # build, so the build's own check would come too late): a name, then words of a safe set, one space apart, the first
   # one of the kit's own commands (a tool, for the producer's). compose.py checks the same at build and at run start.
   recipeOf = from: cmds: n: r: let
@@ -117,7 +118,7 @@ let
     + "[positional-arguments]\n${r.n} *args:\n    exec \"{{tools}}/bin/${r.cmd}\"${lib.concatMapStrings (a: " '" + a + "'") r.args} \"$@\"\n";
   kitsJust = if recipeTwice != { }
     then throw "pot: kitsFor: two recipes are named ${lib.head (lib.attrNames recipeTwice)} (${lib.concatStringsSep " and " recipeTwice.${lib.head (lib.attrNames recipeTwice)}})"
-    else "# Generated by graft from the kits' recipes (pot-kits/1). graft sync writes it and graft check compares it:\n"
+    else "# Generated from the kits' recipes (pot-kits/1) by the bundle's producer, which writes and compares it:\n"
     + "# do not edit. The importing justfile defines `tools`, the tools package (its root, not its bin/).\n"
     + lib.concatMapStrings recipeText (lib.sort (a: b: a.n < b.n) allRecipes);
   env = pkgs.buildEnv {

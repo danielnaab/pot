@@ -1,6 +1,6 @@
-# graft.lib.mkRoot: a root as data (design §1, §13.1), and its `pot`.
+# pot.lib.mkRoot: a root as data (design §1, §13.1), and its `pot`.
 #
-#   graft.lib.mkRoot {
+#   pot.lib.mkRoot {
 #     pkgs;                         # the root's nixpkgs (--package builds from it alone)
 #     grantsFile ? "~/.config/pot/grants.json";   # host-only, hidden from every run (D7)
 #     stateDir ? "~/.local/state/pot";             # runs, logs, caches, state: hidden
@@ -56,7 +56,7 @@ let
   lib = pkgs.lib;
   # pot's programs, byte-compiled for this root's python (v2.18.0): each start (pot, its backend steps, a wrapped
   # command's) skips compiling them again; unchecked-hash, as a store path's mtime says nothing
-  potSrc = pkgs.runCommand "graft-pot-compiled" { } ''
+  potSrc = pkgs.runCommand "pot-compiled" { } ''
     cp -r ${potSrc0} $out && chmod -R u+w $out
     ${pkgs.python3}/bin/python3 -m compileall -q --invalidation-mode unchecked-hash $out
   '';
@@ -65,7 +65,7 @@ let
   python = pkgs.python3;
   # defaultAccount (v2.15.0's): deprecated in v2.16.0, gone in v2.17.0; the argument stays only to say so
   defaultInstance' = if defaultAccount == null then defaultInstance
-    else throw "graft.lib.mkRoot: defaultAccount is gone (v2.17.0): defaultInstance.<kit> = \"NAME\"";
+    else throw "pot.lib.mkRoot: defaultAccount is gone (v2.17.0): defaultInstance.<kit> = \"NAME\"";
   # the floor every run gets, which a root's hidden adds to and cannot remove: agents' folders and
   # credential stores, and their configuration in a workspace
   baseHidden = [ "~/.claude" "~/.claude.json" "~/.pi/agent/auth.json" "~/.pi/agent/mcp-auth.json" "~/.codex/auth.json" "~/.local/share/opencode/auth.json" ];
@@ -86,8 +86,8 @@ let
   reservedContexts = [ "explain" "why" "grant" "review" "init" "run" "serve" "runs" "doctor" ];
   badContexts = lib.filter (n: lib.elem n reservedContexts) (lib.attrNames contexts);
 
-  # §8: the standard set, first on every run's PATH (a root adds graft, or any other command, to `tools`;
-  # in a graft consumer, the repo's pot-kits bin/ carries its own graft)
+  # §8: the standard set, first on every run's PATH (a root adds any other command to `tools`;
+  # in a repository with a pot-kits bundle, its bin/ carries the producer's own tools)
   standard = with pkgs; [ bashInteractive coreutils findutils gnugrep gnused gawk diffutils less gitMinimal which file
     tree ripgrep fd jq curl gnutar gzip unzip xz gnupatch python3 just gh ];
   inspectTools = with pkgs; lib.optionals (!darwin) [ procps iproute2 lsof systemdMinimal ];
@@ -223,8 +223,8 @@ let
   '';
 in
 if badContexts != [ ] then throw "pot: mkRoot: a context may not be named like a pot verb: ${lib.concatStringsSep ", " badContexts}"
-else if badLimits != [ ] then throw "graft.lib.mkRoot: limits is { memoryMax; tasksMax; } and clones { keepDays; maxSize; } (not ${lib.concatStringsSep ", " badLimits})"
-else if badDefaults != [ ] then throw "graft.lib.mkRoot: ${lib.concatStringsSep "; " badDefaults}"
+else if badLimits != [ ] then throw "pot.lib.mkRoot: limits is { memoryMax; tasksMax; } and clones { keepDays; maxSize; } (not ${lib.concatStringsSep ", " badLimits})"
+else if badDefaults != [ ] then throw "pot.lib.mkRoot: ${lib.concatStringsSep "; " badDefaults}"
 # share/pot/run-1 (v2.18.0): this pot takes `pot run`, the wrappers' entry; a wrapper looks for it beside the
 # launcher's bin/pot, and runs its command unwrapped (with one line) under an older root's pot
 else pkgs.runCommand "pot" {
