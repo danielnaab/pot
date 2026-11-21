@@ -1,0 +1,4 @@
+# Bytecode from a local unit-test run or the contracts section (python -m unittest in core/)
+__pycache__/
+result
+result-*
