@@ -54,6 +54,8 @@ pub fn configures_engine(name: &str) -> bool {
         "XDG_",
         "DBUS_",
         "LD_",
+        // N5: socket activation; podman passes the caller's fds 3.. into the container
+        "LISTEN_",
     ];
     const NAMES: &[&str] = &[
         "HOME",

@@ -1424,6 +1424,10 @@ mod tests {
             "_CONTAINERS_USERNS_CONFIGURED",
             "LD_PRELOAD",
             "TMPDIR",
+            // N5: podman hands the caller's fds 3.. to the container under LISTEN_FDS (socket activation)
+            "LISTEN_FDS",
+            "LISTEN_PID",
+            "LISTEN_FDNAMES",
         ] {
             let (mut p, l) = run_dir("read-only");
             for it in p.items.iter_mut().filter(|i| i.kind == "env") {

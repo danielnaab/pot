@@ -100,7 +100,7 @@ it, which is often pot's state.
 **A run's variables reach the container through the engine's environment** (`--env NAME`: the engine reads the
 value, so no value is in an argument or a file; policy-1 rule 6 rules out an env file). So a run may not be granted
 a variable the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
-`_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `HOME`,
+`_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `LISTEN_*`, `HOME`,
 `PATH`, `TMPDIR`, `NOTIFY_SOCKET`, `REGISTRY_AUTH_FILE`, `SSH_AUTH_SOCK`, or one of Go's runtime variables (`GODEBUG`,
 `GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). A later `run` could hand the
 values over a pipe instead (`--env-file /dev/fd/N`), which would lift this.
@@ -191,7 +191,12 @@ is).
 ## What's next
 
 1. `run`: the docker image (`docker import` of an empty tar), `-t` when stdin is a terminal, the exit status; then
-   the proxy over a bound socket, and the bindings.
+   the proxy over a bound socket, and the bindings. From the audit's third pass: `run` returns only once the
+   container is gone (`--rm` leaves conmon's cleanup running after `podman run` returns, which recreated
+   `enginestore` after `cleanup`, N7); the run's storage.conf sets `runroot` inside the run folder (today runtime
+   state goes to the user's `XDG_RUNTIME_DIR`); `cleanup` removes a killed run's container and store through the
+   engine (`podman rm -f`, then `podman unshare rm -rf enginestore`: subuid-owned files) and reports a removal it
+   could not make (N6).
 2. Write access: pot's core resolves the workspace's protected paths and pins and passes them to the backend
    (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
 3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
