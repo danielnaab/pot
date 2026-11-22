@@ -71,7 +71,7 @@ podman
   --env TZDIR=/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo
   --env USER=u
   --rootfs [CWD]/read-only/rootfs:O
-  /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-secrets 3 22 /usr/bin/env -i -C /home/u/src/notes -- [..] notes check --all
+  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-secrets 3 /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u/src/notes -- [..] notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
 
 ```

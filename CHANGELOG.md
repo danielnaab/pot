@@ -37,6 +37,11 @@ v2.14.0's `sandbox` on).
   - `prepare` refuses, with a secret, a shell the run can't see.
   - A SIGTERM before the engine starts records status 143.
   - The engine processes are matched by the configured program's names.
+- **The container backend's third audit (T1, T2):** no secret's value is ever in a process's arguments. The run's
+  bash, in an environment `env -i` cleared, declares each record, then execs `env -u _ -u SHLVL -u PWD -u OLDPWD -C
+  CWD -- POT'S VALUES… ARGV`. `prepare` refuses an `env` item bash can't hand over faithfully (`UID`, `SHELLOPTS`,
+  `SHLVL`, `PWD`, `_`, `PS1`, `BASH_*` and the like). A test that moves the run's store puts it back and cleans up,
+  even when it fails.
 
 ## v0.2.0 - 2026-11-21
 

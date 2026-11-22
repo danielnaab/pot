@@ -73,6 +73,27 @@ pub fn configures_engine(name: &str) -> bool {
     PREFIXES.iter().any(|p| name.starts_with(p)) || NAMES.contains(&name)
 }
 
+/// A variable bash can't hand over faithfully to the command (T1): read-only in bash (`UID`, `EUID`, `PPID`,
+/// `BASHOPTS`, `SHELLOPTS`), set by bash at its start or its exec (`SHLVL`, `PWD`, `OLDPWD`, `_`), unset by a
+/// non-interactive bash (`PS1`, `PS2`), one of bash's own (`BASH_*`), or a name of the script's (`__pot_*`). Refused for
+/// every `env` item, whatever the engine, so a run's environment does not depend on whether it holds a secret.
+pub fn bash_sets(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "UID",
+        "EUID",
+        "PPID",
+        "BASHOPTS",
+        "SHELLOPTS",
+        "SHLVL",
+        "PWD",
+        "OLDPWD",
+        "_",
+        "PS1",
+        "PS2",
+    ];
+    NAMES.contains(&name) || name.starts_with("BASH_") || name.starts_with("__pot_")
+}
+
 /// The run's storage.conf: native overlay (no `mount_program`), the store a folder of the run's own. A fresh store
 /// per run costs about 10 ms against a persistent one (podman 5.4.1, 2026-11-21: 96 ms against 105 ms a start).
 pub fn storage_conf(store: &str) -> String {

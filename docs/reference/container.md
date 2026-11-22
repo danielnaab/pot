@@ -111,16 +111,23 @@ run's files; the conformance audit of 2026-11-21 found a secret there, R3). **A 
 `secret: true`) never reaches the engine. With one, every variable passed by name (the secrets, `TERM`, `COLORTERM`
 and the plain items) goes over a pipe instead. `run` writes `NAME=value` records, each ended by a NUL, then the
 sentinel record `.`. The engine passes the pipe's read end on with `--preserve-fd FD`, which keeps its number, and
-`run` gives the script that number. No other fd of the caller's reaches the container. The run's bash (the config's
-`shell`) starts first. It only reads: it collects the records up to the sentinel and closes the fd. If the stream is
-not whole (no pipe, a short read, a record that is not `NAME=value`), it exits 125 and nothing runs. Otherwise it execs
-`/usr/bin/env -i -C CWD -- POT'S VALUES… RECORDS… ARGV`. The command's environment is then exactly the planned one:
-pot's values, `env.set`, the items and the secrets. Nothing of bash's (`SHLVL`, `PWD`, `_`, its own `RANDOM` or
-`UID`) or of the engine's (`HOSTNAME`) is added, and a secret named like a bash variable keeps its value (audit S1,
-S3). Without a secret, `env -C CWD -u HOSTNAME --` removes the one variable podman adds, unless the plan sets it. The
+`run` gives the script that number. No other fd of the caller's reaches the container. The entry starts with
+`/usr/bin/env -i --`, which clears what the engine set. Then the run's bash (the config's `shell`) collects the
+records up to the sentinel and closes the fd. If the stream is not whole (no pipe, a short read, a record that is not
+`NAME=value`), it exits 125 and nothing runs. Otherwise it declares each record in bash (`unset -v NAME`, which drops
+a special meaning such as `RANDOM`'s, then `declare -x`). A record is never an argument: an earlier version passed
+the records to `env -i`, and the audit read a secret in that process's `/proc/PID/cmdline` (T1). Bash then execs the
+last hop, `/usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV`, whose arguments hold only names
+and pot's values, which are not secret. The command's environment is then exactly the planned one: pot's values,
+`env.set`, the items and the secrets. Nothing of bash's (`SHLVL`, `PWD`, `_`) or the engine's (`HOSTNAME`) is
+added, and a secret named like a bash variable (`RANDOM`, `SECONDS`, `IFS`) keeps its value (audit S1, S3, T1). For
+this to hold, `prepare` refuses, for every `env` item and under either engine, a name bash can't hand over: read-only
+in bash (`UID`, `EUID`, `PPID`, `BASHOPTS`, `SHELLOPTS`), set by bash itself (`SHLVL`, `PWD`, `OLDPWD`, `_`), unset
+by it (`PS1`, `PS2`), `BASH_*`, or the script's own `__pot_*` (`engine::bash_sets`). Without a secret, `env -C CWD -u HOSTNAME --` removes the one variable podman adds, unless the plan sets it. The
 value is in no file, no argument and not in the engine's environment (checked in a real run: a marker value was in
 no file of the run folder or of `$XDG_RUNTIME_DIR/crun`, and in no engine process's arguments or environment, while
-the command printed it). With a secret, `prepare` refuses a shell that is not a real file under a path the run binds
+the command printed it; and with every process on the host watched while a 100 000-byte variable slowed the
+script's reads, no process's arguments ever held a record's value). With a secret, `prepare` refuses a shell that is not a real file under a path the run binds
 (S5). docker passes no file descriptor, so `prepare` refuses a secret variable under docker. The run's bash is used
 rather than this binary, which would need its own closure (glibc, libgcc) bound, a closure the config does not name. A plain variable may not be one the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
 `_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `LISTEN_*`, `HOME`,
@@ -145,7 +152,7 @@ hidden list is a change to pot's core, listed in [What's next](#whats-next).
 | (always) | `run --interactive --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same, and `--name pot-HASH` (16 hex digits of the run folder's path, FNV-1a) |
 | (always) | `--init`: the engine's init is PID 1 (catatonit, or docker's `docker-init`), a read-only bind of the engine's own file; the command is never PID 1, which ignores a signal it has no handler for | the same |
 | stdin a terminal | `--tty`, added by `run` | the same |
-| a secret `env` item | `--preserve-fd FD`, added by `run`; no `--env NAME`; the entry is `SHELL --noprofile --norc -c SCRIPT pot-secrets FD N /usr/bin/env -i -C CWD -- POT'S VALUES… ARGV` | refused |
+| a secret `env` item | `--preserve-fd FD`, added by `run`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-secrets FD /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` | refused |
 | (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never --entrypoint ""` |
@@ -264,7 +271,8 @@ refused, since a field this backend does not know could narrow the run):
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
 - a path a bind can't name (`:`, `,` or `"`), and a command whose name holds `=` (`env` would read it as a variable);
-- a run's variable that configures the container engine (above), and a secret variable under docker;
+- a run's variable that configures the container engine, or that bash can't hand over (above), and a secret
+  variable under docker;
 - a path that is not its real path, and a bind source that does not exist (above).
 
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the

@@ -43,17 +43,22 @@ pub fn upholds(engine: Engine, g: &str) -> bool {
 
 pub const DOCKER_IMAGE: &str = "localhost/pot-empty:1";
 
-/// The run's bash, before the command (R3, S1, S3): it reads `NAME=value` records, each ended by a NUL, from the
-/// pipe's fd (its first argument; `run` gives the number), up to the sentinel record `.`, and closes the fd. Unless
-/// the stream was whole it refuses, and nothing runs. Then it execs the next N words (`env -i -C CWD -- pot's
-/// values`), the records and the command: bash only reads, so its own variables never reach the command.
+/// The run's bash, before the command (R3, S1, S3, T1). It starts in an environment `env -i` cleared, reads
+/// `NAME=value` records, each ended by a NUL, from the pipe's fd (its first argument; `run` gives the number), up to the
+/// sentinel record `.`, and closes the fd; unless the stream was whole it refuses, and nothing runs. Each record is
+/// then declared in bash (`unset -v NAME`, which drops a special meaning such as RANDOM's, then `declare -x`), never
+/// passed as an argument, and bash execs the last hop: `env -u` what bash adds, `-C CWD -- POT'S VALUES… ARGV`.
 pub const SECRETS_SCRIPT: &str = concat!(
-    r#"fd=$1 n=$2; shift 2; pre=("${@:1:$n}"); shift "$n"; recs=(); whole=; "#,
-    r#"while IFS= read -r -d '' kv <&"$fd"; do if [ "$kv" = . ]; then whole=1; break; fi; "#,
-    r#"case $kv in [A-Za-z_]*=*) recs+=("$kv") ;; *) break ;; esac; done; exec {fd}<&-; "#,
-    r#"[ "$whole" = 1 ] || { echo "pot: the run's variables did not arrive whole: nothing runs" >&2; exit 125; }; "#,
-    r#"exec "${pre[@]}" "${recs[@]}" "$@""#
+    r#"__pot_fd=$1; shift; __pot_recs=(); __pot_whole=; "#,
+    r#"while IFS= read -r -d '' __pot_r <&"$__pot_fd"; do if [ "$__pot_r" = . ]; then __pot_whole=1; break; fi; "#,
+    r#"case $__pot_r in [A-Za-z_]*=*) __pot_recs+=("$__pot_r") ;; *) break ;; esac; done; exec {__pot_fd}<&-; "#,
+    r#"[ "$__pot_whole" = 1 ] || { echo "pot: the run's variables did not arrive whole: nothing runs" >&2; exit 125; }; "#,
+    r#"for __pot_r in "${__pot_recs[@]}"; do unset -v "${__pot_r%%=*}" && declare -x -- "$__pot_r" || exit 125; done; "#,
+    r#"unset -v __pot_r __pot_recs __pot_whole __pot_fd; exec "$@""#
 );
+
+/// What bash adds to the environment of what it execs: the last hop's `env -u` removes it (T1).
+pub const BASH_ADDS: &[&str] = &["_", "SHLVL", "PWD", "OLDPWD"];
 
 /// What the engines add to the command's environment that pot does not plan: `env -u` removes it (S3).
 pub const ENGINE_ADDS: &[&str] = &["HOSTNAME"];
@@ -294,6 +299,12 @@ fn gaps(i: &Inputs) -> Vec<String> {
                 e.value
             ));
         }
+    }
+    for e in p.effective("env").filter(|e| crate::engine::bash_sets(&e.value)) {
+        out.push(format!(
+            "the variable {}, which bash sets or keeps read-only, as a run's variable",
+            e.value
+        ));
     }
     for it in p.items.iter().filter(|it| it.effective && !known_kind(&it.kind)) {
         out.push(format!("an item of kind {} ({})", it.kind, it.class));
@@ -755,15 +766,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         }
         entry.push("--".into());
     } else {
-        // the script reads the pipe (fd 3, which run renumbers), then execs env -i with pot's values and the pipe's
-        let mut pre = vec![
-            "/usr/bin/env".to_string(),
-            "-i".into(),
-            "-C".into(),
-            cwd,
-            "--".into(),
-        ];
-        pre.extend(set.iter().map(|(k, v)| format!("{k}={v}")));
+        // T1: env -i clears what the engine set; bash reads the pipe and declares the records; the last hop drops
+        // what bash adds and adds pot's values. No record is ever an argument
+        entry.extend(["/usr/bin/env", "-i", "--"].map(String::from));
         entry.extend(
             [
                 i.paths.shell.as_str(),
@@ -773,11 +778,15 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 SECRETS_SCRIPT,
                 "pot-secrets",
                 "3",
+                "/usr/bin/env",
             ]
             .map(String::from),
         );
-        entry.push(pre.len().to_string());
-        entry.extend(pre);
+        for n in BASH_ADDS {
+            entry.extend(["-u".to_string(), (*n).to_string()]);
+        }
+        entry.extend(["-C".to_string(), cwd, "--".into()]);
+        entry.extend(set.iter().map(|(k, v)| format!("{k}={v}")));
     }
     entry.extend(l.argv.iter().cloned());
     Ok(Plan {
@@ -1036,24 +1045,38 @@ mod tests {
         // with pot's values as operands: neither the run's bash nor the engine adds to its environment
         assert_eq!(plan.piped, ["TERM", "COLORTERM", "NOTES_TOKEN"]);
         assert!(!has(&plan, "--env TERM"));
-        let n: usize = plan.entry[7].parse().unwrap();
+        // T1: env -i, then bash, then the last hop with pot's values; the records are declared in bash
         assert_eq!(
-            plan.entry[..7],
+            plan.entry[..18],
             [
+                "/usr/bin/env",
+                "-i",
+                "--",
                 "/nix/store/b-bash/bin/bash",
                 "--noprofile",
                 "--norc",
                 "-c",
                 SECRETS_SCRIPT,
                 "pot-secrets",
-                "3"
+                "3",
+                "/usr/bin/env",
+                "-u",
+                "_",
+                "-u",
+                "SHLVL",
+                "-u",
+                "PWD",
+                "-u"
             ]
         );
-        let pre = &plan.entry[8..8 + n];
-        assert_eq!(pre[..5], ["/usr/bin/env", "-i", "-C", "/home/u/src/notes", "--"]);
-        assert!(pre.contains(&"NOTES_CACHE=/home/u/.cache/notes".to_string()));
-        assert!(pre.contains(&"PS1=(pot:review) \\w \\$ ".to_string()), "{pre:?}");
-        assert_eq!(plan.entry[8 + n..], ["notes", "check", "--all"]);
+        assert_eq!(plan.entry[18..22], ["OLDPWD", "-C", "/home/u/src/notes", "--"]);
+        let last = &plan.entry[22..];
+        assert!(last.contains(&"NOTES_CACHE=/home/u/.cache/notes".to_string()));
+        assert!(
+            last.contains(&"PS1=(pot:review) \\w \\$ ".to_string()),
+            "{last:?}"
+        );
+        assert_eq!(last[last.len() - 3..], ["notes", "check", "--all"]);
         assert!(has(&plan, "--env NOTES_CACHE=/home/u/.cache/notes"));
         assert_eq!(plan.root, ["--rootfs", "/r/rootfs:O"]);
         // without a secret: env -C, and what the engine adds (HOSTNAME) removed
@@ -1538,6 +1561,50 @@ mod tests {
         let argv = plan.argv();
         assert!(!argv.iter().any(|a| a == "--rm"), "{argv:?}");
         assert_eq!(argv[..3], ["docker", "run", "--interactive"]);
+    }
+
+    /// T1: no record is ever an exec's argument: the entry holds no `NAME=` of a piped variable, and the script's only
+    /// execs are the fd's close and the last hop's `exec "$@"` (the records are declared in bash, not passed).
+    #[test]
+    fn no_record_is_ever_an_execs_argument() {
+        let (p, l) = run_dir("read-only");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(!plan.piped.is_empty());
+        for w in plan.argv() {
+            assert!(!plan.piped.iter().any(|n| w.starts_with(&format!("{n}="))), "{w}");
+        }
+        let execs: Vec<&str> = SECRETS_SCRIPT
+            .match_indices("exec ")
+            .map(|(i, _)| &SECRETS_SCRIPT[i..])
+            .collect();
+        assert_eq!(execs.len(), 2, "{SECRETS_SCRIPT}");
+        assert!(execs[0].starts_with("exec {__pot_fd}<&-;"), "{}", execs[0]);
+        assert_eq!(execs[1], r#"exec "$@""#);
+        assert!(!SECRETS_SCRIPT.contains("recs[@]}\" \"$@"));
+    }
+
+    /// T1: a variable bash can't hand over faithfully is refused for every env item.
+    #[test]
+    fn a_variable_bash_sets_is_refused() {
+        for (name, refused) in [
+            ("UID", true),
+            ("BASH_ENV", true),
+            ("SHLVL", true),
+            ("_", true),
+            ("RANDOM", false),
+            ("IFS", false),
+        ] {
+            let (mut p, l) = run_dir("access-none");
+            for it in p.items.iter_mut().filter(|i| i.kind == "env") {
+                it.value = name.into();
+            }
+            for engine in [Engine::Podman, Engine::Docker] {
+                let r = go(&p, &l, engine, &nothing());
+                let want =
+                    format!("the variable {name}, which bash sets or keeps read-only, as a run's variable");
+                assert_eq!(r.err().is_some_and(|g| g.contains(&want)), refused, "{name}");
+            }
+        }
     }
 
     /// S5: with secrets the run's bash reads them, so it must be a real file under a path the plan binds.

@@ -1019,6 +1019,191 @@ fn podman_the_commands_environment_is_the_plan() {
     }
 }
 
+/// T1: a variable bash can't hand over faithfully (readonly or set by bash itself) is refused by prepare, whatever
+/// the engine.
+#[test]
+fn prepare_refuses_a_variable_bash_cannot_hand_over() {
+    for name in [
+        "UID",
+        "EUID",
+        "PPID",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "SHLVL",
+        "PWD",
+        "OLDPWD",
+        "_",
+        "PS2",
+        "BASH_ARGV0",
+        "BASH_ENV",
+    ] {
+        let (top, run) = world("bash-refused", "podman", "podman", &["/bin/sh", "-c", "true"]);
+        let path = run.join("policy.json");
+        let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for it in p["items"].as_array_mut().unwrap() {
+            if it["kind"] == "env" {
+                it["value"] = name.into();
+            }
+        }
+        fs::write(&path, p.to_string()).unwrap();
+        let out = verb(&top, &run, "prepare").output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(&format!(
+                "the variable {name}, which bash sets or keeps read-only"
+            )),
+            "{err}"
+        );
+    }
+}
+
+/// T1: no record's value is in any process's arguments at any moment of the run (every process on the host is
+/// watched while it runs; a 100 000-byte variable passed by name slows the script's read loop, as the audit did).
+#[test]
+fn podman_no_value_is_ever_in_an_argument() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let marker = "pot-t1-marker-4b9e2d";
+    let (top, run) = world(
+        "podman-argv",
+        "podman",
+        &program,
+        &["/bin/sh", "-c", "echo \"$NOTES_TOKEN\""],
+    );
+    prepare(&top, &run);
+    for attempt in 0..6 {
+        let mut child = verb(&top, &run, "run")
+            .env("NOTES_TOKEN", marker)
+            .env("COLORTERM", "x".repeat(100_000))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut caught = vec![];
+        let mut scans = 0;
+        let has = |c: &[u8]| c.windows(marker.len()).any(|w| w == marker.as_bytes());
+        let show = |c: &[u8]| -> Vec<String> {
+            c.split(|b| *b == 0)
+                .take(4)
+                .map(|a| String::from_utf8_lossy(a).chars().take(40).collect())
+                .collect()
+        };
+        let mut seen = BTreeSet::new();
+        while child.try_wait().unwrap().is_none() {
+            for e in fs::read_dir("/proc").unwrap().flatten() {
+                let pid = e.file_name().to_string_lossy().into_owned();
+                if !pid.bytes().all(|b| b.is_ascii_digit()) || !seen.insert(pid) {
+                    continue;
+                }
+                let Ok(c) = fs::read(e.path().join("cmdline")) else {
+                    continue;
+                };
+                if has(&c) {
+                    caught.push(show(&c));
+                }
+                // the run's bash: watched closely until it has exec'd the command (the audit's catch.py)
+                let words: Vec<&[u8]> = c.split(|b| *b == 0).collect();
+                if words.get(1) == Some(&&b"--noprofile"[..]) && words.contains(&&b"pot-secrets"[..]) {
+                    loop {
+                        scans += 1;
+                        let Ok(c) = fs::read(e.path().join("cmdline")) else {
+                            break;
+                        };
+                        if has(&c) {
+                            caught.push(show(&c));
+                            break;
+                        }
+                        // gone (a zombie's is empty), or the command itself
+                        if c.is_empty()
+                            || (!c.windows(11).any(|w| w == b"pot-secrets")
+                                && !c.starts_with(b"/usr/bin/env"))
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            marker,
+            "attempt {attempt}: the command has the secret"
+        );
+        assert!(
+            caught.is_empty(),
+            "attempt {attempt} ({scans} scans): a value in argv: {caught:?}"
+        );
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+        prepare(&top, &run);
+    }
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// T1, deterministic: the entry run on the host, every `/usr/bin/env` in it replaced by a program that records its
+/// arguments, then runs env: no exec's arguments hold a record's value, and the command has it.
+#[test]
+fn no_exec_in_the_entry_is_given_a_value() {
+    let (top, run) = world(
+        "entry-argv",
+        "podman",
+        "podman",
+        &["/bin/sh", "-c", "echo \"[$NOTES_TOKEN]\""],
+    );
+    prepare(&top, &run);
+    let argv = fs::read(run.join("container.argv")).unwrap();
+    let words: Vec<String> = argv
+        .strip_suffix(&[0])
+        .unwrap()
+        .split(|b| *b == 0)
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    let at = words.iter().position(|w| w == "--rootfs").unwrap() + 2;
+    let (rec, log) = (top.join("record-env"), top.join("record-env.log"));
+    fs::write(
+        &rec,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexec {} \"$@\"\n",
+            log.display(),
+            coreutils("env")
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&rec).status().unwrap();
+    let entry: Vec<String> = words[at..]
+        .iter()
+        .map(|w| {
+            if w == "/usr/bin/env" {
+                rec.display().to_string()
+            } else {
+                w.clone()
+            }
+        })
+        .collect();
+    let stream = top.join("stream");
+    fs::write(&stream, b"NOTES_TOKEN=t1-value\0.\0").unwrap();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(r#"exec 3<"$0"; exec "$@""#)
+        .arg(&stream)
+        .args(&entry)
+        .env_clear()
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[t1-value]\n");
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(!calls.is_empty());
+    assert!(
+        !calls.contains("t1-value"),
+        "a value in an exec's arguments: {calls}"
+    );
+}
+
 /// S3: a secret named like one of bash's own variables arrives with its value, not bash's.
 #[test]
 fn podman_a_secret_named_like_a_bash_variable_keeps_its_value() {
@@ -1027,7 +1212,16 @@ fn podman_a_secret_named_like_a_bash_variable_keeps_its_value() {
         return;
     };
     let envp = coreutils("env");
-    for name in ["RANDOM", "SECONDS", "UID", "SHELLOPTS", "SHLVL", "BASH_ARGV0"] {
+    for name in [
+        "RANDOM",
+        "SECONDS",
+        "LINENO",
+        "GROUPS",
+        "IFS",
+        "HISTCMD",
+        "EPOCHSECONDS",
+        "SRANDOM",
+    ] {
         let (top, run) = world("podman-bashvar", "podman", &program, &[&envp, "-0"]);
         let path = run.join("policy.json");
         let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -1076,6 +1270,12 @@ fn podman_cleanup_keeps_the_state_of_a_live_run_with_a_linked_store() {
     let real = top.join("store-moved");
     fs::rename(run.join("enginestore"), &real).unwrap();
     symlink(&real, run.join("enginestore")).unwrap();
+    // T2: whatever happens below, the store goes back and cleanup runs, so the container and crun's state go
+    let _restore = Restore {
+        top: top.clone(),
+        run: run.clone(),
+        real: real.clone(),
+    };
     let out = verb(&top, &run, "cleanup").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
@@ -1089,11 +1289,39 @@ fn podman_cleanup_keeps_the_state_of_a_live_run_with_a_linked_store() {
         !engine_processes(&run).is_empty(),
         "the container should still run"
     );
-    fs::remove_file(run.join("enginestore")).unwrap();
-    fs::rename(&real, run.join("enginestore")).unwrap();
+    restore_store(&run, &real);
     ok(&verb(&top, &run, "cleanup").output().unwrap());
     assert_eq!(names(&run), set(LEFT));
     assert_eq!(engine_processes(&run), Vec::<String>::new());
+}
+
+/// The run's store back in its place, when a test moved it and linked it.
+fn restore_store(run: &Path, real: &Path) {
+    if run
+        .join("enginestore")
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        let _ = fs::remove_file(run.join("enginestore"));
+    }
+    if real.exists() && run.join("enginestore").symlink_metadata().is_err() {
+        let _ = fs::rename(real, run.join("enginestore"));
+    }
+}
+
+/// On drop (a test's end, or its panic): the store back, then cleanup, which removes the container through the
+/// engine (and with it crun's state) and the store.
+struct Restore {
+    top: PathBuf,
+    run: PathBuf,
+    real: PathBuf,
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        restore_store(&self.run, &self.real);
+        let _ = verb(&self.top, &self.run, "cleanup").output();
+    }
 }
 
 /// S5: with secrets, prepare refuses a shell that is not a real file under a path the plan binds.
