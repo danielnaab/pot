@@ -98,18 +98,51 @@ pub const ENGINE_ADDS: &[&str] = &["HOSTNAME"];
 
 /// S5: with the entry script (a secret, a binding or the network), the config's shell must be a real file (not a link) under a
 /// path the plan binds. Otherwise the gap.
+/// X1: with write access the entry checks the pins with the config's shell and the `stat` beside its `env`, so both too.
 pub fn program_gaps(plan: &Plan, shell: &str, host: &dyn Host) -> Vec<String> {
-    let bound = plan
-        .sources
-        .iter()
-        .any(|s| shell == s || shell.starts_with(&format!("{}/", s.trim_end_matches('/'))));
-    if !plan.fifo || (real_file(shell, host) && bound) {
-        return vec![];
+    let bound = |f: &str| {
+        plan.sources
+            .iter()
+            .any(|s| f == s || f.starts_with(&format!("{}/", s.trim_end_matches('/'))))
+    };
+    let mut out = vec![];
+    if (plan.fifo || plan.stat.is_some()) && !(real_file(shell, host) && bound(shell)) {
+        out.push(format!(
+            "the config's shell {shell} (the run's entry runs it: it must be a real file under a path the run binds)"
+        ));
     }
-    vec![format!(
-        "the config's shell {shell} (the run's entry runs it: it must be a real file under a path the run binds)"
-    )]
+    // coreutils' stat may be a link to its multicall binary in the same store path: its real path must be a file under
+    // a path the run binds, and so must the link
+    if let Some(stat) = &plan.stat {
+        let real = host.realpath(stat);
+        let ok = bound(stat) && real.as_deref().is_some_and(|r| real_file(r, host) && bound(r));
+        if !ok {
+            out.push(format!(
+                "{stat}, beside the config's env (the run's entry checks the pins with it: it and its real path must be under a path the run binds)"
+            ));
+        }
+    }
+    out
 }
+
+/// X1 (QA, 2026-11-22): the pin check, before anything else in the container. An engine binds a source by path, so a
+/// process that swaps a pin's folder for a link while the engine starts can make it bind another folder (podman's
+/// and docker's runtimes can't bind from an open descriptor of the caller's: tested, EACCES and EINVAL). So the
+/// entry checks, from inside, that every pin is a mount point (`/proc/self/mountinfo`) whose file is the device and
+/// inode prepare recorded (`/run/pot/pins.txt`, a line `DEV:INO PATH` each; `stat` is coreutils', its first
+/// argument). Otherwise nothing runs (exit 125), and it names each pin: the engine may have bound another folder
+/// there and made mount points in it. After the check no process outside can change the container's mounts.
+pub const PIN_CHECK: &str = concat!(
+    r#"__pot_stat=$1 __pot_list=$2; shift 2; __pot_mp=$'\n'; __pot_bad=; "#,
+    r#"while read -r __pot_x __pot_x __pot_x __pot_x __pot_m __pot_x; do __pot_mp+="$__pot_m"$'\n'; done </proc/self/mountinfo; "#,
+    r#"while IFS=' ' read -r __pot_want __pot_p; do "#,
+    r#"__pot_m=${__pot_p//\\/\\134}; __pot_m=${__pot_m// /\\040}; "#,
+    r#"case $__pot_mp in *$'\n'"$__pot_m"$'\n'*) ;; *) __pot_bad+=" $__pot_p (not a mount point)"; continue ;; esac; "#,
+    r#"[ "$("$__pot_stat" -c %d:%i -- "$__pot_p" 2>/dev/null)" = "$__pot_want" ] || __pot_bad+=" $__pot_p (another file)"; "#,
+    r#"done <"$__pot_list"; "#,
+    r#"if [ -n "$__pot_bad" ]; then echo "pot: the workspace in the container is not the pins prepare recorded:$__pot_bad; the engine may have bound another folder there and made mount points in it; nothing ran" >&2; exit 125; fi; "#,
+    r#"unset -v __pot_stat __pot_list __pot_mp __pot_bad __pot_x __pot_m __pot_want __pot_p; exec "$@""#
+);
 
 /// A real file: it exists, is not a folder, and is its own real path (no link, no `..`).
 fn real_file(p: &str, host: &dyn Host) -> bool {
@@ -265,6 +298,8 @@ pub struct Plan {
     pub pins: Vec<(String, Kind)>,
     /// Start notes (launch.json `notes`): a sealed folder over the cap.
     pub notes: Vec<String>,
+    /// X1, write access: coreutils' `stat` (beside the config's `env`), which the entry's pin check runs.
+    pub stat: Option<String>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -474,9 +509,11 @@ fn gaps(i: &Inputs) -> Vec<String> {
     out
 }
 
-/// The paths a `--volume` names: one with ':' or ',' can't be said there.
+/// The paths a `--volume` names: one with ':' or ',' can't be said there; nor (X5) one with a control character, which
+/// docker's `--mount` can't carry (a newline failed docker at run).
 fn unsayable(plan: &[(String, Mount)], closure: &[String]) -> Vec<String> {
-    let bad = |s: &str| s.contains(':') || s.contains(',') || s.contains('"');
+    let bad =
+        |s: &str| s.contains(':') || s.contains(',') || s.contains('"') || s.chars().any(char::is_control);
     let mut out = vec![];
     for (dest, m) in plan {
         if bad(dest) {
@@ -658,7 +695,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             for top in &tops {
                 if real(top, &mut unreal) {
                     m.bind(top, top, if write { WRITE } else { READ }, !write);
-                    kinds.insert((*top).to_string(), Kind::Folder);
+                    if write {
+                        kinds.insert((*top).to_string(), Kind::Folder);
+                    }
                 }
             }
             if let Some(wp) = pins_of(l, &w.path, &w.common).filter(|_| write) {
@@ -727,6 +766,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 for (name, kind) in &entries {
                     let (src, at) = (format!("{d}/{name}"), format!("{base}/{name}"));
                     match kind {
+                        Entry::NotUtf8 => {
+                            refuse.push(format!("a sealed folder's entry whose name is not UTF-8: {src}"));
+                        }
                         Entry::Link(target) => files.push(RunFile::Link {
                             name: at,
                             target: target.clone(),
@@ -878,6 +920,10 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         vec!["/nix/store".into()]
     };
 
+    if write && p.mode == "in-place" {
+        // X1: what the entry's pin check compares, written by prepare once the placeholders exist
+        m.bind(&rd("pins.txt"), &format!("{run}/pins.txt"), READ, true);
+    }
     let mut mounts: Vec<(String, Mount)> = m.by_dest.into_iter().map(|(d, (_, mt))| (d, mt)).collect();
     // every workspace path still bound onto itself, by kind, for prepare to record and run to check again
     let pins: Vec<(String, Kind)> = mounts
@@ -892,8 +938,11 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     let bad = unsayable(&mounts, &closure);
     if !bad.is_empty() {
         refuse.push(format!(
-            "paths a bind can't name (':', ',' or '\"'): {}",
-            bad.join(", ")
+            "paths a bind can't name (':', ',', '\"' or a control character): {}",
+            bad.iter()
+                .map(|b| crate::visible(b))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     if !refuse.is_empty() {
@@ -1033,6 +1082,27 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     };
     // podman can't take -w with --rootfs (the spike): coreutils env changes directory, then execs the command
     let mut entry = vec![];
+    // X1: with pins, the entry checks them first, then runs the rest; without the pipe the last hop then drops what
+    // bash adds, as the pipe's last hop does
+    let stat = (!pins.is_empty()).then(|| {
+        let dir = i.paths.env.rsplit_once('/').map_or("", |(d, _)| d);
+        format!("{dir}/stat")
+    });
+    if let Some(stat) = &stat {
+        entry.extend(
+            [
+                i.paths.shell.as_str(),
+                "--noprofile",
+                "--norc",
+                "-c",
+                PIN_CHECK,
+                "pot-pins",
+                stat.as_str(),
+                &format!("{run}/pins.txt"),
+            ]
+            .map(String::from),
+        );
+    }
     if fifo {
         // T1: env -i clears what the engine set; bash reads the pipe, starts socat with the network, and declares the
         // records; the last hop drops what bash adds and adds pot's values. No record is ever an argument
@@ -1061,7 +1131,13 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         entry.extend(set.iter().map(|(k, v)| format!("{k}={v}")));
     } else {
         // what the engine adds to the command's environment, unless the plan sets it (S3)
-        entry.extend(["/usr/bin/env".to_string(), "-C".into(), cwd]);
+        entry.push("/usr/bin/env".to_string());
+        if stat.is_some() {
+            for n in BASH_ADDS {
+                entry.extend(["-u".to_string(), (*n).to_string()]);
+            }
+        }
+        entry.extend(["-C".to_string(), cwd]);
         for n in ENGINE_ADDS
             .iter()
             .filter(|n| !set.contains_key(**n) && !pass.iter().any(|x| x == *n))
@@ -1092,6 +1168,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         seals,
         pins,
         notes,
+        stat,
     })
 }
 
@@ -1325,7 +1402,13 @@ mod tests {
             }
             for p in &self.files {
                 if let Some(n) = child(p) {
-                    out.push((n, Entry::File));
+                    // a name the test spells with U+FFFD stands for one that is not UTF-8
+                    let kind = if n.contains('\u{FFFD}') {
+                        Entry::NotUtf8
+                    } else {
+                        Entry::File
+                    };
+                    out.push((n, kind));
                 }
             }
             out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1641,7 +1724,7 @@ mod tests {
         let gaps = go(&p, &l, Engine::Podman, &nothing()).unwrap_err();
         assert_eq!(
             gaps,
-            ["paths a bind can't name (':', ',' or '\"'): /home/u/src/a:b"]
+            ["paths a bind can't name (':', ',', '\"' or a control character): /home/u/src/a:b"]
         );
     }
 
@@ -1882,7 +1965,7 @@ mod tests {
         let gaps = go(&p, &l, Engine::Docker, &nothing()).unwrap_err();
         assert_eq!(
             gaps,
-            ["paths a bind can't name (':', ',' or '\"'): /home/u/state/\"x"]
+            ["paths a bind can't name (':', ',', '\"' or a control character): /home/u/state/\"x"]
         );
     }
 
@@ -2660,6 +2743,43 @@ mod tests {
         }
         // the command starts where it was asked to, in the writable workspace
         assert!(plan.entry.windows(2).any(|w| w == ["-C", NOTES]));
+        // X1: the entry checks the pins first, from the recorded list, with coreutils' stat; the last hop then drops
+        // what bash adds
+        assert_eq!(plan.entry[4], PIN_CHECK);
+        assert_eq!(
+            plan.entry[5..8],
+            ["pot-pins", "/nix/store/c-coreutils/bin/stat", "/run/pot/pins.txt"]
+        );
+        // then the rest of the entry: here the pipe's (a secret item), which clears the environment itself
+        assert_eq!(plan.entry[8..11], ["/usr/bin/env", "-i", "--"]);
+        // without the pipe, the last hop drops what the check's bash adds
+        let (p2, mut l2) = run_dir("write");
+        let mut p2 = p2;
+        p2.items.retain(|i| i.kind != "env");
+        l2.argv = vec!["true".into()];
+        let no_pipe = go(&p2, &l2, Engine::Podman, &notes_host()).unwrap();
+        assert!(!no_pipe.fifo);
+        assert_eq!(
+            no_pipe.entry[8..18],
+            [
+                "/usr/bin/env",
+                "-u",
+                "_",
+                "-u",
+                "SHLVL",
+                "-u",
+                "PWD",
+                "-u",
+                "OLDPWD",
+                "-C"
+            ]
+        );
+        assert!(has(&plan, "--volume /r/pins.txt:/run/pot/pins.txt:ro"));
+        assert_eq!(plan.stat.as_deref(), Some("/nix/store/c-coreutils/bin/stat"));
+        // read access has no pins, so no check
+        let (p, l) = run_dir("read-only");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(plan.stat.is_none() && !plan.entry.contains(&PIN_CHECK.to_string()));
     }
 
     /// A sealed folder, as bwrap's `seal`: a folder of the run's bound writable at its path, each entry of the
@@ -2843,5 +2963,30 @@ mod tests {
         assert!(upholds(Engine::Podman, false, true, "protected-as-mounts"));
         assert!(upholds(Engine::Docker, false, true, "protected-as-mounts"));
         assert!(!upholds(Engine::Podman, false, false, "protected-as-mounts"));
+    }
+
+    /// X5: a path holding a control character (a newline) can't be said in docker's `--mount`, and a sealed entry
+    /// whose name is not UTF-8 can't be said at all: both refused when prepare plans them, naming each, never at run.
+    #[test]
+    fn a_pin_or_sealed_entry_that_a_bind_cant_name_is_refused() {
+        let (p, mut l) = run_dir("write");
+        l.pins.as_mut().unwrap()[0].ro.push(crate::launch::Pin {
+            path: "/home/u/src/notes/a\nb".into(),
+            kind: Kind::File,
+        });
+        let gaps = go(&p, &l, Engine::Docker, &notes_host()).unwrap_err();
+        assert!(
+            gaps.iter()
+                .any(|g| g.contains("paths a bind can't name") && g.contains("/home/u/src/notes/a\\x0ab")),
+            "{gaps:?}"
+        );
+        let (p, l) = run_dir("write");
+        let mut host = notes_host();
+        host.files.push("/home/u/src/notes/.pi/bad\u{FFFD}name");
+        let gaps = go(&p, &l, Engine::Podman, &host).unwrap_err();
+        assert_eq!(
+            gaps,
+            ["a sealed folder's entry whose name is not UTF-8: /home/u/src/notes/.pi/bad\u{FFFD}name"]
+        );
     }
 }

@@ -232,15 +232,18 @@ class Pins:
                 self.seen.add("ro:" + d)
                 self.ro.append(d)
         for f in self.ro:
-            if f in self.planned:
-                continue
-            st = os.lstat(f)
-            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
-                raise Refused(f"{self.rel(f)} has another hard link, so a run could write it through that link (a run "
-                              "must not write what decides the sandbox or what the host runs): replace it with a copy "
-                              "of its own (cp -p F F.copy && mv F.copy F), then run again", "hard-link", f)
+            if f not in self.planned:
+                self.single(f)
         if place:
             self.place()
+
+    def single(self, f):
+        """A protected file with a second hard link is refused: a run could write it through that link."""
+        st = os.lstat(f)
+        if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+            raise Refused(f"{self.rel(f)} has another hard link, so a run could write it through that link (a run "
+                          "must not write what decides the sandbox or what the host runs): replace it with a copy "
+                          "of its own (cp -p F F.copy && mv F.copy F), then run again", "hard-link", f)
 
     def place(self):
         """Create the planned placeholders, never through what appeared at their paths since (a link is never
@@ -289,6 +292,24 @@ def resolve_workspace(gitbin, w):
     d = resolve(top, common, w["protected"], hooks)
     d["sealed"] = [] if d.get("refused") else sealed_dirs({}, top, w.get("sealed") or [])
     return d
+
+
+def recheck(d):
+    """X2 (QA): a backend's prepare checks each pin pot's core resolved again before it binds it, as bubblewrap did when
+    it resolved them there itself: no link on or above it (bwrap's message), the same kind, and a protected file with
+    no second hard link (bwrap's message). A placeholder is checked when it is placed."""
+    p = Pins(d["top"], d["common"], [], {})
+    planned = {ph["path"] for ph in d["placeholders"]}
+    pins = [(x, "folder") for x in d["dirs"]] + [(r["path"], r["kind"]) for r in d["ro"]]
+    for path, kind in pins:
+        if path in planned:
+            continue
+        p.nolink(path, p.top if path.startswith(p.top + "/") or path == p.top else p.common)
+        if not os.path.lexists(path) or p.is_folder(path) != (kind == "folder"):
+            raise Stop(f"{p.rel(path)} changed after pot resolved the workspace's pins: run again")
+    for path, kind in pins:
+        if kind == "file" and path not in planned:
+            p.single(path)
 
 
 def place(d):
@@ -530,9 +551,8 @@ def main(argv):
                 json.dump(before, f)
             print(json.dumps({"notes": notes}))
             return 0
-        before = read_own(rundir, "before.json")
-        if before is None:
-            raise OSError("before.json is missing (run prepare first)")
+        # X6: as bwrap's after, a missing before.json is an empty look (a link there is still refused)
+        before = read_own(rundir, "before.json") or {"pins": [], "hostrun": {}, "refs": {}}
         ev = {"commits": [], "unsigned": 0, "touches_host_run": [], "repo_kit_change": [], "new_git_metadata": [],
               "sealed_left": []}
         for sd in read_own(rundir, "sealed.json") or []:

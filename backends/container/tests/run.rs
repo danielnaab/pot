@@ -3342,7 +3342,13 @@ fn run_refuses_a_pin_changed_after_prepare() {
         let Some(program) = engine_program(engine) else {
             continue;
         };
-        let cases: [(&str, Change, &str); 3] = [
+        let cases: [(&str, Change, &str); 4] = [
+            (
+                // X3: the same inode, rewritten in place (as inode reuse would look): its size and ctime differ
+                "rewritten",
+                |ws| fs::write(ws.join("flake.nix"), "{ changed = true; }\n").unwrap(),
+                "flake.nix",
+            ),
             (
                 "replaced",
                 |ws| {
@@ -3393,4 +3399,219 @@ fn run_refuses_a_pin_changed_after_prepare() {
             ok(&verb(&top, &run, "cleanup").output().unwrap());
         }
     }
+}
+
+/// X1 (QA, 2026-11-22): a process exchanges a `dirs` pin (`newdir`, holding the pin `newdir/flake.nix`) with a link to
+/// a folder outside the workspace, over and over (`renameat2` `RENAME_EXCHANGE`), while `run` starts the engine. The
+/// engine resolves a bind's source by path, so it may bind the outside folder; the entry's pin check (every pin a
+/// mount point of the inode prepare recorded, from inside the container, before the command) must then stop the run.
+/// Over many tries under each engine the command never reads or writes the outside folder; each try either runs on
+/// the real pins or is stopped by the check, which says so.
+#[test]
+fn a_pin_swapped_for_a_link_while_run_starts_is_never_used() {
+    let swap = r#"
+import ctypes, os, sys, time
+d, victim, secs = sys.argv[1], sys.argv[2], float(sys.argv[3])
+libc = ctypes.CDLL(None, use_errno=True); AT = -100; EXCH = 2
+link = d + ".lnk"; os.symlink(victim, link)
+def x():
+    if libc.renameat2(AT, d.encode(), AT, link.encode(), EXCH) != 0: raise OSError(ctypes.get_errno(), "renameat2")
+end = time.time() + secs; real = True
+try:
+    while time.time() < end:
+        x(); real = not real; time.sleep(0.001)
+finally:
+    if not real: x()
+    os.unlink(link)
+"#;
+    let tries: usize = std::env::var("POT_TEST_RACE_TRIES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(12);
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some((top, run, ws, _)) = write_world(&format!("{engine}-race"), engine, &program, false, |ws| {
+            put(ws, &[("newdir/flake.nix", "{ }\n")]);
+        }) else {
+            continue;
+        };
+        let victim = top.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("mark"), "VICTIM-MARK\n").unwrap();
+        let cat = coreutils("cat");
+        set_script(
+            &run,
+            r"$1 newdir/mark 2>/dev/null; (echo x > newdir/written) 2>/dev/null && echo WROTE; echo done",
+            &[&cat],
+        );
+        let python = find("python3").unwrap();
+        let (mut ran_real, mut checked, mut stopped) = (0, 0, 0);
+        for i in 0..tries {
+            prepare(&top, &run);
+            let mut swapper = Command::new(&python)
+                .args(["-I", "-c", swap])
+                .arg(ws.join("newdir"))
+                .arg(&victim)
+                .arg("1.5")
+                .spawn()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(100 + 40 * (i as u64 % 8)));
+            let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+            swapper.wait().unwrap();
+            let (stdout, stderr) = (
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            assert!(
+                !stdout.contains("VICTIM-MARK"),
+                "{engine} try {i}: the run read the outside folder: {stdout}"
+            );
+            assert!(
+                !victim.join("written").exists(),
+                "{engine} try {i}: the run wrote the outside folder"
+            );
+            if stdout.contains("done") {
+                ran_real += 1;
+                assert_eq!(out.status.code(), Some(0), "{engine} try {i}: {stderr}");
+            } else {
+                // stopped: by run's check, by the entry's pin check, or by the engine itself (podman stats each
+                // source before it starts, and may find the swap's moment); never with the command run
+                assert_ne!(out.status.code(), Some(0), "{engine} try {i}: {stderr}");
+                if stderr.contains("not the pins prepare recorded") {
+                    checked += 1;
+                } else {
+                    stopped += 1;
+                }
+            }
+            // the engine may have made a mount point in the outside folder when it bound it: only a stopped run may
+            // leave one, and the check named the pin
+            let extra: Vec<String> = names(&victim).into_iter().filter(|n| n != "mark").collect();
+            if !extra.is_empty() {
+                assert!(
+                    stderr.contains("newdir"),
+                    "{engine} try {i}: {extra:?} made with no report: {stderr}"
+                );
+                for n in extra {
+                    let _ = fs::remove_file(victim.join(&n)).or_else(|_| fs::remove_dir(victim.join(&n)));
+                }
+            }
+            ok(&verb(&top, &run, "cleanup").output().unwrap());
+            assert_eq!(engine_processes(&run), Vec::<String>::new());
+        }
+        eprintln!(
+            "{engine}: {tries} tries: {ran_real} ran on the real pins, {checked} stopped by the entry's pin check, {stopped} stopped before (run's check or the engine)"
+        );
+    }
+}
+
+/// X1: the entry's pin check itself, deterministically: a pin whose recorded inode is not what the container sees
+/// stops the run (125) before the command, naming the pin, under each engine.
+#[test]
+fn the_entrys_pin_check_stops_a_run_whose_pins_are_not_recorded() {
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some((top, run, ws, _)) =
+            write_world(&format!("{engine}-pincheck"), engine, &program, false, |_| {})
+        else {
+            continue;
+        };
+        set_script(&run, "echo ran", &[]);
+        prepare(&top, &run);
+        let list = run.join("pins.txt");
+        let flake = format!(" {}/flake.nix", ws.display());
+        let text = fs::read_to_string(&list).unwrap();
+        assert!(text.lines().any(|l| l.ends_with(&flake)), "{text}");
+        let wrong: String = text
+            .lines()
+            .map(|l| {
+                if l.ends_with(&flake) {
+                    format!("0:0{flake}\n")
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect();
+        fs::set_permissions(&list, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        fs::write(&list, wrong).unwrap();
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(125), "{engine}: {err}");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("ran"));
+        assert!(
+            err.contains("not the pins prepare recorded")
+                && err.contains(&format!("{}/flake.nix (another file)", ws.display())),
+            "{engine}: {err}"
+        );
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+        // with the pins as recorded the command runs, and the check's bash adds nothing to its environment
+        let mut l: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(run.join("launch.json")).unwrap()).unwrap();
+        l["argv"] = serde_json::json!([coreutils("env")]);
+        fs::write(run.join("launch.json"), l.to_string()).unwrap();
+        prepare(&top, &run);
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        ok(&out);
+        let env = String::from_utf8_lossy(&out.stdout);
+        for n in ["SHLVL=", "_=", "OLDPWD=", "PWD=", "__pot"] {
+            assert!(!env.lines().any(|l| l.starts_with(n)), "{engine}: {n} in {env}");
+        }
+        assert!(env.lines().any(|l| l.starts_with("POT_RUN=")), "{engine}: {env}");
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+    }
+}
+
+/// X4 (QA): the host's look (`pins.py`) runs in an environment of its own: `PATH`, `HOME`, the locale, and what git and
+/// its signature check read, never the caller's other variables (a secret's among them) nor its `GIT_*` ones. Needs no
+/// engine: `prepare` and `after` run the look, the config's `python` a stand-in that records its environment.
+#[test]
+fn the_hosts_look_runs_in_its_own_environment() {
+    let Some((top, run, _, _)) = write_world("look-env", "podman", "podman", false, |_| {}) else {
+        eprintln!("python3 or git is not on PATH: no look");
+        return;
+    };
+    let python = find("python3").unwrap();
+    let dump = top.join("look-env.txt");
+    let stand_in = top.join("python3");
+    fs::write(
+        &stand_in,
+        format!(
+            "#!{}\n{} >> {}\nexec {} \"$@\"\n",
+            which("sh").display(),
+            coreutils("env"),
+            dump.display(),
+            python.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stand_in, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = top.join("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    cfg["python"] = stand_in.display().to_string().into();
+    fs::write(&path, cfg.to_string()).unwrap();
+    for v in ["prepare", "after"] {
+        let out = verb(&top, &run, v)
+            .env("POT_TEST_X4_MARKER", "look-environment-marker")
+            .env("GIT_DIR", "/nonexistent")
+            .env("GIT_CONFIG_PARAMETERS", "'core.fsmonitor'='/bin/false'")
+            .output()
+            .unwrap();
+        ok(&out);
+    }
+    let seen = fs::read_to_string(&dump).unwrap();
+    assert!(!seen.contains("look-environment-marker"), "{seen}");
+    assert!(!seen.lines().any(|l| l.starts_with("GIT_")), "{seen}");
+    assert!(
+        !seen
+            .lines()
+            .any(|l| l.starts_with("CARGO") || l.starts_with("RUST")),
+        "{seen}"
+    );
+    for k in ["PATH=", "HOME="] {
+        assert!(seen.lines().any(|l| l.starts_with(k)), "{k} missing: {seen}");
+    }
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
 }

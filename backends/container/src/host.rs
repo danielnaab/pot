@@ -25,6 +25,8 @@ pub enum Entry {
     Folder,
     File,
     Link(String),
+    /// X5: a name that is not UTF-8 (the listed name is its lossy form, for a message only).
+    NotUtf8,
 }
 
 pub struct RealHost;
@@ -52,7 +54,9 @@ impl Host for RealHost {
             .flatten()
             .filter_map(|e| {
                 let m = e.path().symlink_metadata().ok()?;
-                let kind = if m.file_type().is_symlink() {
+                let kind = if e.file_name().to_str().is_none() {
+                    Entry::NotUtf8
+                } else if m.file_type().is_symlink() {
                     Entry::Link(std::fs::read_link(e.path()).ok()?.to_string_lossy().into_owned())
                 } else if m.is_dir() {
                     Entry::Folder
@@ -97,4 +101,28 @@ impl Host for RealHost {
 /// The caller's effective uid: the owner of /proc/self (std has no getuid, and unsafe is forbidden).
 pub fn euid() -> Option<u32> {
     Path::new("/proc/self").metadata().ok().map(|m| m.uid())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// X5: a name that is not UTF-8 is listed as such, never mangled into another name.
+    #[test]
+    fn entries_list_a_name_that_is_not_utf8_as_such() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let d = std::env::temp_dir().join(format!("pot-container-entries-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(std::ffi::OsStr::from_bytes(b"bad\xffname")), "").unwrap();
+        std::fs::write(d.join("good"), "").unwrap();
+        let got = RealHost.entries(&d.display().to_string());
+        std::fs::remove_dir_all(&d).unwrap();
+        assert_eq!(
+            got,
+            [
+                ("bad\u{FFFD}name".to_string(), Entry::NotUtf8),
+                ("good".to_string(), Entry::File)
+            ]
+        );
+    }
 }

@@ -477,10 +477,12 @@ The policy is /run/pot/policy.json; `pot why PATH|HOST|CMD|VAR` explains one ite
 def workspace_pins(cfg, launch, w):
     """0.3.0: an in-place workspace's pins as pot's core resolved them at the run's start (launch.json's pins), else
     (a launch.json written without them) resolved here, by the same code (pins.resolve_workspace). A refusal there
-    stops the run with its message; otherwise the placeholders are created now (PLACED, for cleanup)."""
+    stops the run with its message; each pin is checked again (X2: a link, a hard link or another kind since stops the
+    run); then the placeholders are created (PLACED, for cleanup)."""
     d = next((x for x in launch.get("pins") or [] if x["top"] == w["path"]), None) or P.resolve_workspace(cfg["git"], w)
     if d.get("refused"):
         raise Stop(d["refused"]["message"])
+    P.recheck(d)
     P.place(d)
     return Pins.from_data(d, w["protected"])
 

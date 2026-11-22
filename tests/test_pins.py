@@ -252,6 +252,34 @@ class Bwrap(unittest.TestCase):
         i = args.index(a)
         self.assertEqual(args[i - 1:i + 2], ["--ro-bind", a, a])
 
+    def test_a_hard_link_made_after_resolving_is_refused_at_prepare(self):
+        # X2 (QA): as bwrap before 0.3.0, which resolved at prepare: each ro and dirs path is checked again there
+        def pins(w):
+            d = P.resolve_workspace("git", w)
+            os.link(os.path.join(w["path"], "AGENTS.md"), os.path.join(w["path"], "agents-link"))
+            return [d]
+        with self.assertRaisesRegex(B.Stop, "^AGENTS.md has another hard link, so a run could write it through that link"):
+            self.prepare(pins)
+
+    def test_a_link_made_after_resolving_is_refused_at_prepare(self):
+        def pins(w):
+            d = P.resolve_workspace("git", w)
+            f = os.path.join(w["path"], "sub", "deep", "flake.nix")
+            os.unlink(f)
+            os.symlink("../../flake.nix", f)
+            return [d]
+        with self.assertRaisesRegex(B.Stop, "^sub/deep/flake.nix is a symbolic link, so the sandbox can't make it read-only"):
+            self.prepare(pins)
+
+    def test_a_pin_whose_kind_changed_after_resolving_is_refused_at_prepare(self):
+        def pins(w):
+            d = P.resolve_workspace("git", w)
+            os.unlink(os.path.join(w["path"], "AGENTS.md"))
+            os.mkdir(os.path.join(w["path"], "AGENTS.md"))
+            return [d]
+        with self.assertRaisesRegex(B.Stop, "^AGENTS.md changed after pot resolved the workspace's pins"):
+            self.prepare(pins)
+
     def test_a_refusal_in_the_data_stops_prepare(self):
         def pins(w):
             return [{"top": w["path"], "common": w["common"], "dirs": [], "ro": [], "placeholders": [], "dotgits": [],
@@ -338,6 +366,12 @@ class Look(unittest.TestCase):
             json.dump([{"dest": self.top + "/.pi", "base": base, "entries": ["keep"], "rel": ".pi"}], f)
         self.look("before")
         self.assertEqual(self.look("after")["sealed_left"], [{"path": ".pi/new.json", "type": "file", "size": 2}])
+
+    def test_after_without_before_is_bwraps_empty_look(self):
+        # X6 (QA): bwrap's after takes a missing before.json as an empty one
+        self.assertFalse(os.path.exists(os.path.join(self.rd, "before.json")))
+        ev = self.look("after")
+        self.assertEqual((ev["commits"], ev["touches_host_run"], ev["new_git_metadata"]), ([], [], []))
 
     def test_it_never_reads_through_a_link(self):
         self.look("before")

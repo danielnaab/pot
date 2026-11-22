@@ -202,6 +202,7 @@ run's that the plan binds, but for the pipe and the proxy's socket, which `run` 
 | `/bin/sh`, `/usr/bin/env`, the CA bundle, `/etc/passwd`, `/etc/group`, `/etc/hosts` | read-only binds | the same |
 | `access: read` (in place) | `PATH` bound read-only, and `common` when it is outside (a worktree's); in each, sockets and hidden paths masked | the same |
 | `access: write` (in place) | `PATH` bound writable, and `common` when it is outside (a worktree's); then launch.json's `pins`: each of `dirs` bound writable onto itself and each of `ro` read-only onto itself; sockets and hidden paths masked as with read access; each sealed folder a folder of the run's (`RUNDIR/sealed/N`) bound writable at its path with its entries bound read-only into it ([Write access](#write-access)) | the same, with `--mount` (`readonly` for `ro`) |
+| `access: write` (in place), the entry | first the pin check: `SHELL --noprofile --norc -c PIN_CHECK pot-pins STAT /run/pot/pins.txt`, then the rest of the entry; without the pipe the last hop is `/usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD …` ([Write access](#write-access)) | the same |
 | `access: none` | no workspace at all (pot 0.2.0): `PATH` and `common` masked where a bound folder would show them (bwrap's `unseen`); the command starts in the home | the same |
 | `read`, `write` items | bound read-only or writable, where the path exists and is not hidden | the same |
 | `socket` items | bound; every other socket under a bound folder or the workspace is masked | the same |
@@ -255,12 +256,31 @@ implementation, no port of `Pins` here):
   link, its kind, a protected file with one link, no placeholder there yet): the host may have changed it since pot
   resolved it.
 - **Checked again before the engine.** `prepare` records each workspace path the plan binds (the top, each pin, each
-  sealed entry) with its device and inode in `container.env`; `run`, just before it starts the engine, refuses one
-  that is now another file, a link, of another kind, or (a protected file) has a second hard link: `the workspace
-  changed since prepare: PATH (…); run prepare again`, and the engine never starts. bubblewrap has no such check: it
-  binds by path when it starts, right after its own resolution. The engine still resolves a bind's source when it
-  mounts it, so a change in the moment between this check and the mount is not caught; only a process of the
-  caller's on the host could make one.
+  sealed entry) with its device and inode, and a file's size and status-change time (X3: a file replaced by one
+  that reuses its inode, or rewritten in place, is not taken for it), in `container.env`; `run`, just before it
+  starts the engine, refuses one that is now another file or changed, a link, of another kind, or (a protected
+  file) has a second hard link: `the workspace changed since prepare: PATH (…); run prepare again`, and the engine
+  never starts.
+- **Checked inside the container, before the command** (X1, QA 2026-11-22). The engines resolve a bind's source by
+  path when they mount it, so a process that can rename in the workspace (a process of the caller's, or a
+  concurrent run, sandboxed or not, whose own pins do not cover that folder) can swap a pin's folder for a link to
+  another folder in the moment between `run`'s check and the engine's mount. Under podman the QA's swap won 6 of 22
+  tries: the engine bound the outside folder, the run read and wrote it, and the engine made a mount point in it.
+  Binding from a descriptor `run` holds open is not possible: rootless podman can't open another process's
+  `/proc/PID/fd/N` (`statfs …: permission denied`), and runc refuses to bind a mount from another mount namespace
+  (`mount src=/proc/PID/fd/3 …: invalid argument`), both tried on platform-vm. So the entry checks first, from
+  inside: `prepare` writes `pins.txt` (`DEV:INO PATH` for each pin), bound read-only at `/run/pot/pins.txt`, and the
+  run's bash, before anything else, checks that each pin is a mount point (`/proc/self/mountinfo`) whose file has
+  that device and inode (coreutils' `stat`, beside the config's `env`). Otherwise nothing runs: exit 125, naming
+  each pin (`pot: the workspace in the container is not the pins prepare recorded: PATH (another file) …; the engine
+  may have bound another folder there and made mount points in it; nothing ran`). After the check no process
+  outside can change the container's mounts (a rename on the host moves the mounted folder with its mount). The
+  engine's own mount point in a swapped-in folder is detected and reported this way, not prevented: an empty file or
+  folder the engine made, never written by the run. Tested under both engines with the QA's swap
+  (`a_pin_swapped_for_a_link_while_run_starts_is_never_used`: no try read or wrote the outside folder; podman 2 of 20
+  stopped by this check, the rest by `run`'s check or podman's own source check). bubblewrap binds by path too, so
+  the same race exists there in principle (the QA's swap won 0 of 40, bubblewrap binding within milliseconds of its
+  start); it is not changed here.
 - **Sealed folders**, as bwrap's `seal`: each of `pins`' `sealed` folders (not hidden, at most 256 entries) is the run
   folder's `sealed/N`, bound writable at its path, with each entry of the host's bound read-only into it (`prepare`
   makes its mount point in `sealed/N` first, so no engine creates one as root) and a link made there as the same
@@ -270,11 +290,15 @@ implementation, no port of `Pins` here):
 - **The host's look.** `prepare` runs pot's own code, `PYTHON -I -S PINS before GIT RUNDIR` (the config's programs, in
   pot's environment, as bwrap's `prepare` runs), which writes `before.json` (bwrap's: the git metadata fingerprint,
   the host-run files' hashes, the refs) and prints the start notes for hidden paths git tracks; `prepare` adds those
-  and a sealed folder's note to launch.json's `notes`, the one key a backend built apart adds. `after` runs `PINS
+  and a sealed folder's note to launch.json's `notes`, the one key a backend built apart adds. It runs in an
+  environment of its own (X4): `PATH`, `HOME`, `USER`, `LOGNAME`, the locale, `TZ`, `TMPDIR`, `XDG_CONFIG_HOME` and `GNUPGHOME` (git's configuration and its
+  signature check), and no other variable of the caller's, a `GIT_*` one neither. `after` runs `PINS
   after`, which reports what bwrap's `after` does for an in-place write run: `commits`, `unsigned`, `base`,
   `touches_host_run`, `repo_kit_change`, `new_git_metadata`, `hidden_blanked`, and `sealed_left` (from the seals
-  `prepare` recorded in `sealed.json`). It reads the run folder's files never through a link, and its arguments hold
-  paths only. `agent_config` stays empty, as it is for bwrap's in-place runs.
+  `prepare` recorded in `sealed.json`); a missing `before.json` is an empty look, as bwrap's (X6). It reads the run
+  folder's files never through a link, and its arguments hold paths only. `agent_config` stays empty, as it is for
+  bwrap's in-place runs. launch.json's keys come back in serde_json's order when `prepare` adds notes (pot reads them
+  by name; keeping the order would need serde_json's `preserve_order` and a new crate, so it is left: X6).
 
 ## Run and cleanup
 
@@ -444,7 +468,8 @@ refused, since a field this backend does not know could narrow the run):
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
-- a path a bind can't name (`:`, `,` or `"`), and a command whose name holds `=` (`env` would read it as a variable);
+- a path a bind can't name (`:`, `,`, `"` or a control character, such as a newline: X5), a sealed entry whose name is not
+  UTF-8 (named), and a command whose name holds `=` (`env` would read it as a variable);
 - a run's variable that configures the container engine, or that bash can't hand over (above); a binding's variable
   that bash can't hand over, or that is not a `NAME`;
 - a path that is not its real path, and a bind source that does not exist (above).
@@ -514,8 +539,11 @@ write runs only.
   `mkdir` outside the workspace; a sealed folder's new entry stays in the run folder and is in `sealed_left`; a
   created `missing.md` (protected, absent at the start) is in `touches_host_run`, as under bwrap; in a worktree, the
   common `config`, `hooks`, the worktree's git directory and its `.git` file hold and a commit works; a link on a
-  pin and a hard-linked protected file stop `prepare` with bwrap's message and place nothing; a pin replaced, linked
-  or hard-linked after `prepare` stops `run` before the engine starts
+  pin and a hard-linked protected file stop `prepare` with bwrap's message and place nothing; a pin replaced, rewritten
+  in place, linked or hard-linked after `prepare` stops `run` before the engine starts; after the QA audit
+  (2026-11-22, X1-X6): a pin swapped for a link while `run` starts is never used (12 to 20 tries under each engine),
+  a pin the container does not see as recorded stops the entry (125) before the command, the command's environment
+  gains nothing from the check, and the look's environment holds no caller variable but its own list
 - [core/pins.py](../../core/pins.py): `Pins`, `resolve_workspace` (the pins), `before_look`, `look_after` (the look)
 - [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `credentials`, `deliver`, `mcp_servers`, `masked`, `Pins`, `cleanup`, `run` (the proxy),
   `after` (denials and loopback) (the reference backend); [core/proxy.py](../../core/proxy.py)

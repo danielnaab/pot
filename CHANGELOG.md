@@ -78,6 +78,14 @@ v2.14.0's `sandbox` on).
   host-run changes, new git metadata, hidden paths committed empty, sealed leftovers) by running core's `pins.py`.
   New config keys `pins` and `git` (with `python`); `probe` proves `protected-as-mounts` when they are named. Clone
   mode, `git.fetch`, `nix`, `status.relay` and siblings are still refused.
+- **The container backend's write access, after its audit (X1-X6):** the run's entry checks, inside the container and
+  before the command, that every pin is a mount point of the inode `prepare` recorded, so a pin's folder swapped
+  for a link while the engine starts is never used (exit 125, naming the pin; the engines can't bind from an open
+  descriptor). `run`'s check also compares a file's size and status-change time. bubblewrap's `prepare` checks each
+  resolved pin again (a link, a hard link or another kind since pot resolved it stops the run, as before 0.3.0).
+  `pins.py` runs in an environment of its own (no caller variable but its list, no `GIT_*`). A path with a control
+  character, or a sealed entry whose name is not UTF-8, is refused at `prepare`. `after` takes a missing
+  `before.json` as an empty look, as bwrap does.
 
 ### Changed
 

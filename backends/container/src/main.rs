@@ -330,32 +330,57 @@ struct PinRecord {
     kind: launch::Kind,
     dev: u64,
     ino: u64,
+    /// X3: a file's size and status-change time too, so a file replaced by one that reuses its inode (or rewritten in
+    /// place) is not taken for it.
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    ctime: (i64, i64),
     /// A protected file: it must have no second hard link.
     single: bool,
 }
 
-/// What is at PATH now, never through a link: (kind, dev, ino, links), or why it is no pin.
-fn pin_now(path: &str) -> Result<(launch::Kind, u64, u64, u64), &'static str> {
+/// What identifies a pin: its device and inode, and for a file its size and status-change time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    ctime: (i64, i64),
+}
+
+/// What is at PATH now, never through a link: (kind, identity, links), or why it is no pin. A folder's identity is its
+/// device and inode (its size and times change with its entries).
+fn pin_now(path: &str) -> Result<(launch::Kind, Identity, u64), &'static str> {
     use std::os::unix::fs::MetadataExt as _;
     let m = Path::new(path).symlink_metadata().map_err(|_| "missing")?;
     if m.file_type().is_symlink() {
         return Err("a link");
     }
-    let kind = if m.is_dir() {
-        launch::Kind::Folder
+    let (kind, size, ctime) = if m.is_dir() {
+        (launch::Kind::Folder, 0, (0, 0))
     } else {
-        launch::Kind::File
+        (launch::Kind::File, m.size(), (m.ctime(), m.ctime_nsec()))
     };
-    Ok((kind, m.dev(), m.ino(), m.nlink()))
+    Ok((
+        kind,
+        Identity {
+            dev: m.dev(),
+            ino: m.ino(),
+            size,
+            ctime,
+        },
+        m.nlink(),
+    ))
 }
 
-/// Each pin as it should be: KIND, no link, and (SINGLE) no second hard link; with RECORDED, the same inode.
-fn pin_gap(path: &str, kind: launch::Kind, single: bool, recorded: Option<(u64, u64)>) -> Option<String> {
+/// Each pin as it should be: KIND, no link, and (SINGLE) no second hard link; with RECORDED, the same identity.
+fn pin_gap(path: &str, kind: launch::Kind, single: bool, recorded: Option<Identity>) -> Option<String> {
     let why = match pin_now(path) {
         Err(why) => why.to_string(),
-        Ok((k, _, _, _)) if k != kind => format!("not the {kind:?} it was").to_lowercase(),
-        Ok((_, d, i, _)) if recorded.is_some_and(|r| r != (d, i)) => "another file".into(),
-        Ok((launch::Kind::File, _, _, n)) if single && n > 1 => "a second hard link".into(),
+        Ok((k, _, _)) if k != kind => format!("not the {kind:?} it was").to_lowercase(),
+        Ok((_, id, _)) if recorded.is_some_and(|r| r != id) => "another file, or changed".into(),
+        Ok((launch::Kind::File, _, n)) if single && n > 1 => "a second hard link".into(),
         Ok(_) => return None,
     };
     Some(format!("{path} ({why})"))
@@ -447,16 +472,24 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
     // write access: the placeholders, then every pin's inode as it is now, for run to check again
     make_placeholders(rundir, p)?;
     let mut pins = vec![];
+    let mut listed = String::new();
     for (path, kind) in &p.pins {
-        let (_, dev, ino, _) = pin_now(path)
+        let (_, id, _) = pin_now(path)
             .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path}: {why}")))?;
+        let _ = writeln!(listed, "{}:{} {path}", id.dev, id.ino);
         pins.push(PinRecord {
             path: path.clone(),
             kind: *kind,
-            dev,
-            ino,
+            dev: id.dev,
+            ino: id.ino,
+            size: id.size,
+            ctime: id.ctime,
             single: single.contains(path),
         });
+    }
+    if p.stat.is_some() {
+        // X1: what the entry's pin check compares, from inside the container
+        write_new(&rundir.join("pins.txt"), listed.as_bytes(), 0o444)?;
     }
     let mut argv = Vec::new();
     for a in p.argv() {
@@ -589,7 +622,16 @@ fn look(cfg: &Config, verb: &str, rundir: &Path) -> Result<serde_json::Value, St
     let t = cfg
         .look_tools()
         .ok_or("write access: the backend's --config names no python, pins and git")?;
-    let out = std::process::Command::new(&t.python)
+    // X4: an environment of its own: the caller's PATH, home, identity and locale, and what git and its signature
+    // check read (XDG_CONFIG_HOME, GNUPGHOME); never another variable (a secret's), nor a GIT_* one
+    let mut cmd = std::process::Command::new(&t.python);
+    cmd.env_clear();
+    for k in LOOK_KEEP {
+        if let Some(v) = std::env::var_os(k) {
+            cmd.env(k, v);
+        }
+    }
+    let out = cmd
         .args(["-I", "-S", &t.pins, verb, &t.git])
         .arg(rundir)
         .stdin(std::process::Stdio::null())
@@ -604,6 +646,21 @@ fn look(cfg: &Config, verb: &str, rundir: &Path) -> Result<serde_json::Value, St
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("the host's look ({verb}): {e}"))
 }
+
+/// The caller's variables the host's look keeps (X4).
+const LOOK_KEEP: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "GNUPGHOME",
+];
 
 /// After `place`, for a write run: the seals' record (`sealed.json`, for after's `sealed_left`), the look before the run
 /// (`before.json`), and the start notes in launch.json (a sealed folder over the cap, a hidden path git tracks).
@@ -816,7 +873,15 @@ struct EngineEnv {
 fn pins_unchanged(pins: &[PinRecord]) -> Result<(), String> {
     let changed: Vec<String> = pins
         .iter()
-        .filter_map(|r| pin_gap(&r.path, r.kind, r.single, Some((r.dev, r.ino))))
+        .filter_map(|r| {
+            let id = Identity {
+                dev: r.dev,
+                ino: r.ino,
+                size: r.size,
+                ctime: r.ctime,
+            };
+            pin_gap(&r.path, r.kind, r.single, Some(id))
+        })
         .collect();
     if changed.is_empty() {
         Ok(())
@@ -1728,6 +1793,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "placeholders.json",
         "sealed.json",
         "before.json",
+        "pins.txt",
     ] {
         match fs::remove_file(rd(n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
