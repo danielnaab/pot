@@ -26,46 +26,17 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 0.3.0: the workspace's pins and the host's look, shared with pot's core and the container backend (pins.py)
+from pins import (EMPTY_BLOB, GIT, GITFILES, HOST_RUN_EXTRA, PLACED, PLACEHOLDERS, SEAL_MAX, Pins, Stop,  # noqa: E402,F401
+                  fingerprint, fold, git, git_lines, git_run, hostrun_hashes, refs, sealed_dirs, sealed_left, tilde, visible, walk_named)
+import pins as P  # noqa: E402
+
 GUARANTEES = ["closure-store", "own-netns", "own-pidns", "no-tiocsti", "protected-as-mounts", "local-listen",
               "in-place", "same-path-clone", "private-proxy", "root-files"]
-GITFILES = ["config", "config.worktree", "hooks", "info", "commondir", "gitdir"]
-# S1: names host git reads in a git directory that a run could create when they are absent (commondir would point
-# host git at a run-written config). pot puts a neutral placeholder at each absent one, read-only in the run, and
-# removes it after: commondir "." (the directory itself), the others empty (host git verified to work with each).
-PLACEHOLDERS = {"commondir": ".\n", "config.worktree": "", "gitdir": ""}
-PLACED = []   # every placeholder this backend made, written to <run dir>/placeholders.json even when prepare stops
-# §9: changed host-run files the after event reports, beyond the protect list
-HOST_RUN_EXTRA = [".gitmodules", ".lfsconfig", ".gitattributes", ".github/workflows", ".forgejo/workflows",
-                  ".gitlab-ci.yml"]
 SECRET_RE = re.compile(r"^(\.env|\.env\..*|.*\.tfstate.*|id_(rsa|dsa|ecdsa|ed25519).*|\.git-credentials|\.netrc"
                        r"|.*\.pem|.*\.key)$")
 PAYLOAD_DIRS = {".venv", "node_modules", "site-packages"}
-
-
-class Stop(Exception):
-    pass
-
-
-def visible(s, lines=False):
-    """Run-chosen text, safe for the host's terminal: C0 and C1 controls as \\xNN, Unicode format characters (Cf:
-    bidi overrides and isolates, zero-width ones) as \\uNNNN (R8), a byte that is not UTF-8 as \\xNN (G2). LINES keeps
-    a newline (a message's own lines).
-    pot.py and bwrap.py hold the same function (bwrap's never keeps lines)."""
-    import unicodedata
-    out = []
-    for c in s:
-        o = ord(c)
-        if c == "\n" and lines:
-            out.append(c)
-        elif o < 0x20 or 0x7f <= o <= 0x9f:
-            out.append(f"\\x{o:02x}")
-        elif 0xdc80 <= o <= 0xdcff:
-            out.append(f"\\x{o - 0xdc00:02x}")     # G2: a byte that is not UTF-8 (surrogateescape)
-        elif o > 0x9f and unicodedata.category(c) == "Cf":
-            out.append(f"\\u{o:04x}" if o <= 0xffff else f"\\U{o:08x}")
-        else:
-            out.append(c)
-    return "".join(out)
 
 
 def load(rundir):
@@ -80,10 +51,6 @@ def eff(policy, kind):
     return [i for i in policy["items"] if i["kind"] == kind and i["effective"]]
 
 
-def tilde(p, home):
-    return "~" + p[len(home):] if p == home or p.startswith(home + "/") else p
-
-
 # ---------------------------------------------------------------- probe
 
 def probe(cfg):
@@ -96,246 +63,9 @@ def probe(cfg):
     print(json.dumps({"guarantees": GUARANTEES}))
 
 
-# ---------------------------------------------------------------- the workspace's pins (in place)
-
-def fold(name):
-    """v2.19.2: a name as macOS's default filesystem (APFS, case- and normalization-insensitive) compares it: Unicode
-    canonical caseless matching, NFD(casefold(NFD(name))). There .Envrc, FLAKE.NIX, flaKe.nix (a Kelvin sign) and
-    ﬂake.nix (a ligature) are the files host direnv and nix open as .envrc and flake.nix, so a protect pattern's name
-    and a .git compare folded, on every system: on a case-sensitive one, that only protects more."""
-    import unicodedata
-    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
-
-
-GIT = fold(".git")
-
-
-def walk_named(top, names):
-    """The .git entries under TOP, and the entries a **/NAME pattern names (NAMES), each compared folded; never below
-    a .git, never through a link. Sorted."""
-    want = {fold(n) for n in names}
-    gits, named = [], []
-    for d, ds, fs in os.walk(top):
-        for e in ds + fs:
-            k = fold(e)
-            if k == GIT:
-                gits.append(os.path.join(d, e))
-            elif k in want:
-                named.append(os.path.join(d, e))
-        ds[:] = [e for e in ds if fold(e) != GIT]
-    return sorted(gits), sorted(named)
-
-
-class Pins:
-    def __init__(self, top, common, protect, cfg):
-        self.top, self.common, self.protect, self.cfg = top, common, protect, cfg
-        self.dirs, self.ro, self.seen = [], [], set()
-        self.placeholders = []
-
-    def rel(self, p):
-        return p[len(self.top) + 1:] if p.startswith(self.top + "/") else p
-
-    def nolink(self, p, root):
-        d = p
-        while len(d) > len(root):
-            if os.path.islink(d):
-                what = "make it read-only" if d == p else f"pin {self.rel(p)}, below it"
-                raise Stop(f"{self.rel(d)} is a symbolic link, so the sandbox can't {what} (a run must not write "
-                           "what decides the sandbox or what the host runs): replace the link with what it points "
-                           "to, or remove it, then run again")
-            d = os.path.dirname(d)
-
-    def pin(self, how, p):
-        root = self.top if p.startswith(self.top + "/") else self.common
-        self.nolink(p, root)
-        up, d = [], p
-        while True:
-            d = os.path.dirname(d)
-            if len(d) <= len(root):
-                break
-            up.insert(0, d)
-        if how == "rw":
-            up.append(p)
-        for d in up:
-            if d not in self.seen:
-                self.seen.add(d)
-                self.dirs.append(d)
-        if how == "ro" and ("ro:" + p) not in self.seen:
-            self.seen.add("ro:" + p)
-            self.ro.append(p)
-
-    def gitdirs(self, g):
-        out = [g]
-        wt = os.path.join(g, "worktrees")
-        if os.path.isdir(wt):
-            for d in sorted(os.listdir(wt)):
-                if os.path.isfile(os.path.join(wt, d, "HEAD")):
-                    out += self.gitdirs(os.path.join(wt, d))
-        mods = os.path.join(g, "modules")
-        if os.path.isdir(mods):
-            out += self.below(mods)
-        return out
-
-    def below(self, d):
-        out = []
-        for e in sorted(os.listdir(d)):
-            p = os.path.join(d, e)
-            if os.path.isdir(p) and not os.path.islink(p):
-                out += self.gitdirs(p) if os.path.isfile(os.path.join(p, "HEAD")) else self.below(p)
-        return out
-
-    def scan(self):
-        self.dotgits, self.named = walk_named(self.top, [p[3:] for p in self.protect if p.startswith("**/")])
-
-    def allgitdirs(self):
-        out = []
-        for e in self.dotgits:
-            if os.path.isdir(e) and not os.path.islink(e):
-                out += self.gitdirs(e)
-        if self.common != os.path.join(self.top, ".git"):
-            out += self.gitdirs(self.common)
-        return out
-
-    def compute(self, hooks):
-        self.scan()
-        for g in self.allgitdirs():
-            self.pin("rw", g)
-            if os.path.isfile(os.path.join(g, "config")) and not os.path.isdir(os.path.join(g, "hooks")):
-                os.mkdir(os.path.join(g, "hooks"))
-            for name, body in PLACEHOLDERS.items():
-                f = os.path.join(g, name)
-                if not os.path.lexists(f) and os.path.isfile(os.path.join(g, "HEAD")):
-                    with open(f, "x") as fh:
-                        fh.write(body)
-                    self.placeholders.append([f, body])
-                    PLACED.append([f, body])
-            for f in GITFILES:
-                if os.path.lexists(os.path.join(g, f)):
-                    self.pin("ro", os.path.join(g, f))
-        for e in self.dotgits:
-            if not (os.path.isdir(e) and not os.path.islink(e)):
-                self.pin("ro", e)
-        for e in self.named:
-            self.pin("ro", e)
-        for p in self.protect:
-            if p.startswith("**/"):
-                continue
-            ap = os.path.join(self.top, p.rstrip("/"))
-            self.nolink(ap, self.top)
-            if os.path.lexists(ap):
-                self.pin("ro", ap)
-        if hooks and (hooks.startswith(self.top + "/") or hooks.startswith(self.common + "/")):
-            os.makedirs(hooks, exist_ok=True)
-            self.pin("ro", hooks)
-        # a protected folder is read-only throughout: a mount point pinned below it (a scion's folder,
-        # the parent of its .git file) is bound read-only too, or its deeper bind would make it writable
-        rod = [p for p in self.ro if os.path.isdir(p) and not os.path.islink(p)]
-        for d in [d for d in self.dirs if any(d.startswith(r + "/") for r in rod)]:
-            self.dirs.remove(d)
-            if ("ro:" + d) not in self.seen:
-                self.seen.add("ro:" + d)
-                self.ro.append(d)
-        for f in self.ro:
-            st = os.lstat(f)
-            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
-                raise Stop(f"{self.rel(f)} has another hard link, so a run could write it through that link (a run "
-                           "must not write what decides the sandbox or what the host runs): replace it with a copy of "
-                           "its own (cp -p F F.copy && mv F.copy F), then run again")
-
-
-def git_lines(s):
-    """K1: git's output as lines, split at newlines only (str.splitlines also splits at U+0085, U+2028 and the
-    other line breaks a run-chosen name may hold)."""
-    return [l for l in s.split("\n") if l]
-
-
-def git_run(argv, env=None, timeout=None):
-    """K1: every host git call that reads run-chosen names (refs, paths, subjects) reads bytes, decoded with
-    surrogateescape (a byte that is not UTF-8 survives; visible() shows it as \\xNN; a CR stays one). K3: pathspecs
-    are literal (GIT_LITERAL_PATHSPECS), so a run-chosen path is never pathspec magic."""
-    env = {**(os.environ if env is None else env), "GIT_LITERAL_PATHSPECS": "1"}
-    r = subprocess.run(argv, capture_output=True, env=env, timeout=timeout)
-    r.stdout = r.stdout.decode("utf-8", "surrogateescape")
-    r.stderr = r.stderr.decode("utf-8", "surrogateescape")
-    return r
-
-
-def git(cfg, top, *args):
-    """Host git reading a run-written repository: no hooks, no fsmonitor, no config it could run."""
-    return git_run([cfg["git"], "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-                    "-c", "safe.directory=*", "-C", top] + list(args))
-
-
-def fingerprint(cfg, pins):
-    """What host git, a shell prompt, an editor or direnv would read and could run code from."""
-    lines = set(pins.dotgits) | set(pins.named)
-    for g in pins.allgitdirs():
-        lines.add(g)
-        for f in GITFILES:
-            if os.path.lexists(os.path.join(g, f)):
-                lines.add(os.path.join(g, f))
-    for l in git_lines(git(cfg, pins.top, "ls-files", "-s").stdout):
-        if l.startswith("160000 "):
-            lines.add("gitlink " + l.split("\t", 1)[1])
-    return sorted(lines)
-
-
-def hostrun_hashes(top, protect):
-    """Contents of host-run files (the protect list, plus §9's extras): path -> hash."""
-    import hashlib
-    out = {}
-    pats = [p for p in protect if not p.startswith("**/")] + HOST_RUN_EXTRA
-    names = {fold(p[3:]) for p in protect if p.startswith("**/")}
-
-    def h(p):
-        if os.path.isdir(p) and not os.path.islink(p):
-            for d, ds, fs in os.walk(p):
-                ds[:] = [x for x in ds if fold(x) != GIT]
-                for f in fs:
-                    h(os.path.join(d, f))
-        elif os.path.lexists(p):
-            try:
-                with open(p, "rb") as f:
-                    out[p[len(top) + 1:]] = hashlib.sha256(f.read()).hexdigest()
-            except OSError:
-                out[p[len(top) + 1:]] = "unreadable"
-    for p in pats:
-        h(os.path.join(top, p))
-    for d, ds, fs in os.walk(top):
-        ds[:] = [x for x in ds if fold(x) != GIT and x != "node_modules"]
-        for f in fs + ds:
-            if fold(f) in names:
-                h(os.path.join(d, f))
-    return out
-
-
-def refs(cfg, top):
-    r = git(cfg, top, "for-each-ref", "--format=%(objectname) %(refname)")
-    head = git(cfg, top, "rev-parse", "HEAD").stdout.strip()
-    return {"refs": git_lines(r.stdout), "head": head}
-
-
 # ---------------------------------------------------------------- prepare
 
 EMPTY = None   # <run dir>/empty, set by prepare: what a hidden file, a secret or a socket shows
-
-
-def sealed_dirs(cfg, top, patterns):
-    """v2.19.1: the real folders under TOP that a sealedProtect pattern names: **/NAME anywhere (a .git pruned, as
-    Pins.scan does), or a path from the top. The outermost only: a sealed folder's entries are read-only throughout."""
-    out = []
-    names = [p[3:] for p in patterns if p.startswith("**/")]
-    if names and os.path.isdir(top):
-        out += walk_named(top, names)[1]          # folded, as Pins.scan; links and files are left out below
-    for p in patterns:
-        if not p.startswith("**/"):
-            out.append(os.path.join(top, p.rstrip("/")))
-    out = sorted({d for d in out if os.path.isdir(d) and not os.path.islink(d)})
-    return [d for d in out if not any(d.startswith(o + "/") for o in out)]
-
-
-EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"     # git's empty blob (SHA-1)
-SEAL_MAX = 256    # entries a sealed folder takes (3 bwrap arguments each; bwrap's limit is 9000 in all)
 
 
 def seal(mount, src, dest, base):
@@ -355,33 +85,6 @@ def seal(mount, src, dest, base):
             mount(d, 1, ["--ro-bind", s, d])
     return names
 
-
-def sealed_left(base, entries, rel):
-    """v2.19.1: what a run left in a seal's BASE, beyond the entries' mount points: (path shown, type, size), never
-    following a link; pi's lock folders (proper-lockfile's NAME.lock) left out."""
-    out = []
-    for e in sorted(os.listdir(base)):
-        if e in entries:
-            continue
-        p = os.path.join(base, e)
-        if e.endswith(".lock") and os.path.isdir(p) and not os.path.islink(p):
-            continue
-        todo = [(p, f"{rel}/{e}")]
-        while todo:
-            q, shown = todo.pop(0)
-            st = os.lstat(q)
-            if stat.S_ISLNK(st.st_mode):
-                out.append((shown, "link", None))
-            elif stat.S_ISDIR(st.st_mode):
-                kids = sorted(os.listdir(q))
-                if not kids:
-                    out.append((shown + "/", "folder", None))
-                todo = [(os.path.join(q, k), f"{shown}/{k}") for k in kids] + todo
-            elif stat.S_ISREG(st.st_mode):
-                out.append((shown, "file", st.st_size))
-            else:
-                out.append((shown, "other", None))
-    return out
 
 
 def masked(p):
@@ -771,6 +474,17 @@ The policy is /run/pot/policy.json; `pot why PATH|HOST|CMD|VAR` explains one ite
 """
 
 
+def workspace_pins(cfg, launch, w):
+    """0.3.0: an in-place workspace's pins as pot's core resolved them at the run's start (launch.json's pins), else
+    (a launch.json written without them) resolved here, by the same code (pins.resolve_workspace). A refusal there
+    stops the run with its message; otherwise the placeholders are created now (PLACED, for cleanup)."""
+    d = next((x for x in launch.get("pins") or [] if x["top"] == w["path"]), None) or P.resolve_workspace(cfg["git"], w)
+    if d.get("refused"):
+        raise Stop(d["refused"]["message"])
+    P.place(d)
+    return Pins.from_data(d, w["protected"])
+
+
 def prepare(cfg, rundir, print_cmd=False):
     global EMPTY
     policy, launch = load(rundir)
@@ -945,9 +659,7 @@ def prepare(cfg, rundir, print_cmd=False):
                 if not common.startswith(top + "/"):
                     mount(common, 1, ["--ro-bind", common, common])
             continue
-        pins = Pins(top, common, w["protected"], cfg)
-        hooks = git(cfg, top, "rev-parse", "--path-format=absolute", "--git-path", "hooks").stdout.strip()
-        pins.compute(hooks)
+        pins = workspace_pins(cfg, launch, w)
         pinsets.append(pins)
         mount(top, 0, ["--bind", top, top])
         if not common.startswith(top + "/"):
@@ -986,20 +698,10 @@ def prepare(cfg, rundir, print_cmd=False):
     # own; a clone holds only what git holds, so masking its copy protects nothing) is masked, and nothing is bound
     # inside a hidden folder there. One that git tracks gets a start note: the run sees it empty
     if not view and policy["access"] != "none":
-        ws_hidden = []
-        for w in policy["workspace"]:
-            if w.get("clone"):
-                continue
-            top = w["path"]
-            for h in hidden:
-                if (h.startswith(top + "/")) and os.path.lexists(h) and h not in ws_hidden:
-                    ws_hidden.append(h)
-                    rel = os.path.relpath(h, top)
-                    tracked = git(cfg, top, "ls-files", "-z", "--", rel).stdout
-                    if tracked:
-                        notes.append(f"pot: {tilde(h, home)} is hidden here, but git tracks it: the run sees it empty, and "
-                                     "git's history still holds it; don't commit it from this run")
-                        launch.setdefault("hiddenTracked", {}).setdefault(top, []).append(rel)
+        ws_hidden, more, tracked = P.workspace_hidden(cfg, policy, hidden, home)
+        notes += more
+        if tracked:
+            launch["hiddenTracked"] = tracked
         hdirs = [h for h in ws_hidden if os.path.isdir(h) and not os.path.islink(h)]
         mounts[:] = [m for m in mounts if not any(m[0].startswith(h + "/") for h in hdirs)]
         for h in ws_hidden:
@@ -1097,11 +799,7 @@ def prepare(cfg, rundir, print_cmd=False):
             for x in a:
                 f.write(x.encode() + b"\0")
     # before the run: what the after event compares
-    before = {"pins": [], "hostrun": {}, "refs": {}}
-    for pins in pinsets:
-        before["pins"].append({"top": pins.top, "fingerprint": fingerprint(cfg, pins)})
-        before["hostrun"][pins.top] = hostrun_hashes(pins.top, pins.protect)
-        before["refs"][pins.top] = refs(cfg, pins.top)
+    before = P.before_look(cfg, pinsets)
     for w, pins in clones:
         if not launch.get("inClone"):     # a sibling in its caller's clone: the caller's end stages it (v2.20.0)
             before.setdefault("clones", []).append({"top": w["path"], "clone": w["clone"], "gits": sorted(pins.dotgits)})
@@ -1399,41 +1097,7 @@ def after(cfg, rundir):
             ev["sealed_left"] += [{"path": visible(p), "type": t, "size": z} for p, t, z in sealed_left(sd["base"], sd["entries"], sd["rel"])]
         except OSError:
             pass
-    for b in before["pins"]:
-        top = b["top"]
-        w = next(w for w in policy["workspace"] if w["path"] == top)
-        pins = Pins(top, w["common"], w["protected"], cfg)
-        pins.scan()
-        new = sorted(set(fingerprint(cfg, pins)) - set(b["fingerprint"]))
-        ev["new_git_metadata"] += [visible(n.replace(top + "/", "")) for n in new]
-        now = hostrun_hashes(top, w["protected"])
-        was = before["hostrun"].get(top, {})
-        ev["touches_host_run"] += sorted(visible(p) for p in set(now) | set(was) if now.get(p) != was.get(p))
-        old = set(before["refs"].get(top, {}).get("refs", []))
-        cur = refs(cfg, top)
-        # commits new on local branches and HEAD only: fetched ones (refs/remotes) are not the run's
-        local = [l for l in cur["refs"] if l.split(" ", 1)[1].startswith("refs/heads/")]
-        newrefs = [l.split(" ", 1)[0] for l in local if l not in old]
-        if cur["head"] and cur["head"] != before["refs"].get(top, {}).get("head"):
-            newrefs.append(cur["head"])
-        if newrefs:
-            olds = [l.split(" ", 1)[0] for l in old] + ([before["refs"][top]["head"]] if before["refs"].get(top, {}).get("head") else [])
-            r = git(cfg, top, "rev-list", *newrefs, "--not", *olds) if olds else git(cfg, top, "rev-list", *newrefs)
-            commits = [c for c in r.stdout.split() if c]
-            ev["commits"] += [c[:12] for c in commits]
-            if commits:
-                sig = git(cfg, top, "log", "--no-walk", "--format=%G?", *commits).stdout.split()
-                ev["unsigned"] += sum(1 for s in sig if s == "N")
-                ev["base"] = before["refs"].get(top, {}).get("head", "")[:12]
-                # v2.19.1: a hidden path git tracks, which the run saw empty, committed empty at a new tip
-                for rel in (launch.get("hiddenTracked") or {}).get(top, []):
-                    for tip in newrefs:
-                        t = git(cfg, top, "ls-tree", "-z", tip, "--", rel).stdout.split("\0")[0]
-                        if t and t.split()[2:3] == [EMPTY_BLOB] and visible(rel) not in ev.setdefault("hidden_blanked", []):
-                            ev["hidden_blanked"].append(visible(rel))
-        # the repo kit's own files only: its flake directory, or the top's flake.nix and flake.lock
-        flake = (launch.get("repoKitPaths") or {}).get(top, [])
-        ev["repo_kit_change"] += [p for p in ev["touches_host_run"] if any(p == f or p.startswith(f + "/") for f in flake)]
+    P.look_after(cfg, policy, before, ev, launch.get("hiddenTracked") or {}, launch.get("repoKitPaths") or {})
     try:
         with open(os.path.join(rundir, "proxy.log")) as f:
             counts, local = {}, {}

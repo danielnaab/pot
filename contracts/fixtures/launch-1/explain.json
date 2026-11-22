@@ -179,5 +179,147 @@
   "ssh": "/run/current-system/sw/bin/ssh",
   "workmux": "/tmp/pot-test/sbfake/workmux",
   "tmux": "/tmp/pot-test/sbfake/tmux"
- }
+ },
+ "pins": [
+  {
+   "top": "/tmp/pot-test/sbc",
+   "common": "/tmp/pot-test/sbc/.git",
+   "dirs": [
+    "/tmp/pot-test/sbc/.git",
+    "/tmp/pot-test/sbc/.git/modules",
+    "/tmp/pot-test/sbc/.git/modules/scions",
+    "/tmp/pot-test/sbc/.git/modules/scions/sbk",
+    "/tmp/pot-test/sbc/scions"
+   ],
+   "ro": [
+    {
+     "path": "/tmp/pot-test/sbc/.git/config",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/config.worktree",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/hooks",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/info",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/commondir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/gitdir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/config",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/config.worktree",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/hooks",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/info",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/commondir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/gitdir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/scions/sbk/.git",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.gitmodules",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/flake.lock",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/flake.nix",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/justfile",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/AGENTS.md",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/sbk.yaml",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/scions",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/scions/sbk",
+     "kind": "folder"
+    }
+   ],
+   "placeholders": [
+    {
+     "path": "/tmp/pot-test/sbc/.git/commondir",
+     "kind": "file",
+     "text": ".\n"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/config.worktree",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/gitdir",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/commondir",
+     "kind": "file",
+     "text": ".\n"
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/config.worktree",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/sbc/.git/modules/scions/sbk/gitdir",
+     "kind": "file",
+     "text": ""
+    }
+   ],
+   "dotgits": [
+    "/tmp/pot-test/sbc/.git",
+    "/tmp/pot-test/sbc/scions/sbk/.git"
+   ],
+   "named": [
+    "/tmp/pot-test/sbc/.gitmodules",
+    "/tmp/pot-test/sbc/flake.lock",
+    "/tmp/pot-test/sbc/flake.nix",
+    "/tmp/pot-test/sbc/justfile"
+   ],
+   "sealed": []
+  }
+ ]
 }

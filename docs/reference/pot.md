@@ -1820,6 +1820,13 @@ or `.envrc` in a subfolder, say) is not stopped: the exit line, and `pot review`
 host-run file. The exception is the git names above: an absent `commondir`, `config.worktree` or `gitdir` gets a
 placeholder, so a run cannot create one.
 
+**Resolved once, by pot** (0.3.0). For a run with write access in place, pot itself resolves these pins as the run
+starts (`core/pins.py`) and hands the list to the backend in `launch.json`'s `pins`
+([launch.json/1](../../contracts/launch-1.md#pins)): the folders bound writable onto themselves, the paths bound
+read-only, the placeholders, the sealed folders, and a link or hard link that stops the run. bubblewrap and the
+container backend bind that list, so both protect exactly the same paths. Every check comes before any placeholder,
+so a run that is refused leaves none.
+
 **Names compare folded** (v2.19.2). A `**/NAME` pattern, and `.git`, match any spelling that macOS's default
 filesystem (APFS, case- and normalization-insensitive) takes for the same name: Unicode canonical caseless matching,
 NFD(casefold(NFD(name))). So `.Envrc` and `.ENVRC` are `**/.envrc` (the file host direnv opens there), and

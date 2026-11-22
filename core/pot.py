@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compose as C  # noqa: E402
 import clones as CL  # noqa: E402
 import runs as R  # noqa: E402
+import pins as P  # noqa: E402
 
 # pot's version, set here alone (CHANGELOG.md names it; pot doctor prints it; pot init pins it), and the flake
 # reference pot init's root takes pot from (POT_INIT_URL replaces the whole reference, tag included)
@@ -1721,6 +1722,10 @@ def run(host, root, context, flags, cmd):
         # flake.lock), and only where there is a repo kit
         launch["repoKitPaths"] = {w["top"]: ([w["flakeDir"]] if w.get("flakeDir") else ["flake.nix", "flake.lock"])
                                   for w in ws if w.get("repoKit") is not None}
+        # 0.3.0: the workspace's pins, resolved once here for every backend (launch.json's pins)
+        pins = workspace_pins(host.git, policy)
+        if pins is not None:
+            launch["pins"] = pins
         if cinfo:
             launch["clone"] = {k: cinfo[k] for k in ("base", "branch", "path", "scions", "objects")}
             w0 = ws[0] if ws else None
@@ -2399,6 +2404,17 @@ def launch_facts(host, root, policy, ws, flags, argv):
             "pane": os.environ.get("TMUX_PANE") if os.environ.get("TMUX") else None, "hostTools": host_tools()}
 
 
+def workspace_pins(gitbin, policy):
+    """0.3.0: each in-place workspace's pins for a run with write access, resolved once, by pot's core, for every
+    backend (launch.json's pins, contracts/launch-1.md): what to bind writable and read-only onto itself, the
+    placeholders the backend creates, the sealed folders, and a refusal (a link, a hard link) that stops the run in
+    the backend's prepare. None otherwise (read access, none, clone mode)."""
+    if policy["access"] != "write":
+        return None
+    out = [P.resolve_workspace(gitbin, w) for w in policy["workspace"] if not w.get("clone")]
+    return out or None
+
+
 def host_tools():
     """The host programs bindings run (never inside the run): from the caller's PATH, at start."""
     import shutil
@@ -2684,6 +2700,9 @@ def explain(host, root, context, flags, cmd):
             print(json.dumps(policy, indent=1))
         elif flags.get("backend-command"):
             launch = launch_facts(host, root, policy, ws, flags, report["argv"])
+            pins = workspace_pins(host.git, policy)
+            if pins is not None:
+                launch["pins"] = pins
             with open(os.path.join(tmp, "policy.json"), "w") as f:
                 json.dump(policy, f)
             with open(os.path.join(tmp, "launch.json"), "w") as f:

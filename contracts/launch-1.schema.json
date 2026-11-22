@@ -228,6 +228,13 @@
         }
       }
     },
+    "pins": {
+      "description": "0.3.0: a run with write access in place: each in-place workspace's pins, resolved once by pot's core at the run's start (core/pins.py resolve_workspace). The backend creates the placeholders, binds dirs writable and ro read-only, each onto itself, and seals the sealed folders; an entry with refused stops the run.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pins"
+      }
+    },
     "clone": {
       "type": "object",
       "required": [
@@ -565,6 +572,150 @@
               "file": {
                 "type": "string"
               }
+            }
+          }
+        }
+      }
+    },
+    "pins": {
+      "description": "One workspace's pins (contracts/launch-1.md, pins).",
+      "type": "object",
+      "required": [
+        "top",
+        "common",
+        "dirs",
+        "ro",
+        "placeholders",
+        "dotgits",
+        "named",
+        "sealed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "top": {
+          "$ref": "#/$defs/absolute"
+        },
+        "common": {
+          "$ref": "#/$defs/absolute"
+        },
+        "dirs": {
+          "description": "Folders bound writable onto themselves (mount points: not renamed or removed): each git directory, and every folder between a pin and the top or the common directory.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolute"
+          }
+        },
+        "ro": {
+          "description": "Paths bound read-only onto themselves, each with its kind.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/absolute"
+              },
+              "kind": {
+                "enum": [
+                  "file",
+                  "folder"
+                ]
+              }
+            }
+          }
+        },
+        "placeholders": {
+          "description": "What the backend creates before it binds: an absent git name host git reads (a file, with its text) or a git directory's hooks (a folder).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/absolute"
+              },
+              "kind": {
+                "enum": [
+                  "file",
+                  "folder"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "file"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "text"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          }
+        },
+        "dotgits": {
+          "description": "The .git entries under the top, as found: the before look's fingerprint.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolute"
+          }
+        },
+        "named": {
+          "description": "The entries a **/NAME protected pattern names, as found (compared folded).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolute"
+          }
+        },
+        "sealed": {
+          "description": "The outermost real folders a sealed pattern names (sealed_dirs).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolute"
+          }
+        },
+        "refused": {
+          "description": "A pin the sandbox can't make: the run stops with this message.",
+          "type": "object",
+          "required": [
+            "why",
+            "path",
+            "message"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "why": {
+              "enum": [
+                "link",
+                "hard-link"
+              ]
+            },
+            "path": {
+              "$ref": "#/$defs/absolute"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
             }
           }
         }

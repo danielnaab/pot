@@ -11,7 +11,7 @@ It never enters the run: no backend binds it there.
 | | |
 |---|---|
 | Version | 1: the file name's contract; the document has no `version` field (below) |
-| Producer | pot (`core/pot.py`: `launch_facts`, then `run` adds the run's facts); the backend's `prepare` adds its own keys |
+| Producer | pot (`core/pot.py`: `launch_facts`, then `run` adds the run's facts, the pins among them from `core/pins.py`); the backend's `prepare` adds its own keys |
 | Reader | a backend: bubblewrap (`core/bwrap.py`) and Seatbelt (`core/seatbelt.py`), built with pot, and a backend built apart, such as a container backend; pot itself (the start notes; a sibling's host entry reads its caller's file) |
 | Owner | pot |
 | Schema | [launch-1.schema.json](launch-1.schema.json) (JSON Schema 2020-12) |
@@ -32,15 +32,19 @@ built as its own binary reads it across the same seam as policy.json, so it is w
   "hostSigns": false, "hostPot": [ "/nix/store/…/bin/python3", "-I", "-c", "…", "/nix/store/…-pot-root.json" ],
   "wsFacts": [ { "top": "/home/u/src/r", "id": "repo:…", "…": "…" } ], "tree": "/home/u/.local/state/pot/runs/7f3a",
   "depth": 0, "repoKitPaths": { "/home/u/src/r": [ "flake.nix", "flake.lock" ] },
+  "pins": [ { "top": "/home/u/src/r", "common": "/home/u/src/r/.git", "dirs": [ "/home/u/src/r/.git" ],
+              "ro": [ { "path": "/home/u/src/r/.git/config", "kind": "file" }, { "path": "/home/u/src/r/flake.nix", "kind": "file" } ],
+              "placeholders": [ { "path": "/home/u/src/r/.git/commondir", "kind": "file", "text": ".\n" } ],
+              "dotgits": [ "/home/u/src/r/.git" ], "named": [ "/home/u/src/r/flake.nix" ], "sealed": [ ] } ],
   "policyDigest": "sha256-…",
   "closureCount": 158, "sealed": [ ], "notes": [ ]
 }
 ```
 
 **Two forms.** A run's file has every field down to `repoKitPaths`, and `policyDigest`. `pot explain
---backend-command` writes only the first fourteen (`argv` to `hostTools`) before it calls `prepare --print`
-([explain.json](fixtures/launch-1/explain.json)). The schema ties them: with `policyDigest`, the run's fields are
-required.
+--backend-command` writes only the first fourteen (`argv` to `hostTools`), and `pins` with write access, before it
+calls `prepare --print` ([explain.json](fixtures/launch-1/explain.json)). The schema ties them: with `policyDigest`,
+the run's fields are required.
 
 **When it is read.** pot writes the file twice before `prepare` (the second time with `hookEnv` and `policyDigest`);
 a backend reads the second. bubblewrap's and Seatbelt's `prepare` read it, add their keys and write it back; `run`,
@@ -92,6 +96,29 @@ backend leaves it as written and need not read it. **Backend**: added by a backe
 | `clone` | clone mode | MUST | `base` (the commit the clone started from), `objects` (the source's object folder) and each of `scions` (`name`, `path`, `commit`, `objects`): what `after` stages the clone's commits from. `branch` and `path` are Info. |
 | `rootRepo` | clone mode, of the root's repository | MUST | `true`: `after` flags changes to the root's files (`root_attention`). |
 | `grantsRel` | with `rootRepo`, when the grants file is inside it | MUST | The grants file's path in the repository, flagged too. |
+| `pins` | write access, a workspace in place (0.3.0) | MUST | Each in-place workspace's pins, which pot's core resolved at the run's start ([below](#pins)). |
+
+### pins
+
+With `access: write`, pot's core resolves each in-place workspace's pins once, as the run starts, and every backend
+carries out the same list (decided 2026-11-21: one implementation, `core/pins.py`, no copy in a backend). It describes
+this host at this moment, so it is here and not in policy.json. One entry per workspace entry in place (none for a
+clone), in policy.json's order:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `top`, `common` | absolute path | The workspace's `path` and `common`, as policy.json has them |
+| `dirs` | list of absolute paths | Folders bound writable onto themselves: each git directory (the top's `.git`, a worktree's common directory and its `worktrees/NAME`, a submodule's under `modules/`), and every folder between a pin and the top or the common directory. A mount point can't be renamed or removed, so no pin can be moved away with its folder |
+| `ro` | list of `{ path, kind }` | Bound read-only onto themselves, over the writable workspace: each git directory's `config`, `config.worktree`, `hooks`, `info`, `commondir` and `gitdir`, a `.git` file, what a `**/NAME` pattern names, and each protected path that exists. `kind` is `file` or `folder` (a placeholder's is the kind it will have) |
+| `placeholders` | list of `{ path, kind, text? }` | What the backend creates before it binds, each listed in `ro` too: an absent `commondir` (text `.\n`), `config.worktree` or `gitdir` (empty) in a git directory, so a run can't create one that host git would read; and a git directory's `hooks` folder (`kind: folder`, no text). A file is created exclusively, never through a link; one that appeared since stops the run. The backend removes a file placeholder after the run while it still holds its text, and leaves a folder |
+| `dotgits`, `named` | lists of absolute paths | The `.git` entries under the top, and what a `**/NAME` pattern names (names compared folded, as macOS compares them), as found: what the before look's fingerprint starts from |
+| `sealed` | list of absolute paths | The outermost real folders a `sealed` pattern names: each sealed as bubblewrap seals one (its entries read-only, new entries landing in the run folder) |
+| `refused` | `{ why, path, message }`, optional | A pin the sandbox can't make: `why` is `link` (a link on a protected path, or above one) or `hard-link` (a protected file with a second hard link). The backend's `prepare` stops the run with `message`, bubblewrap's; the lists are then empty |
+
+A backend checks each path again before it binds it (a link there, or a file with a second hard link, stops the run:
+something changed since pot resolved it). bubblewrap and the container backend bind these lists; Seatbelt resolves
+its own with the same code. A launch.json without `pins` for a write run (one a test wrote) makes bubblewrap resolve
+them itself, with the same code, and the container backend refuse write access.
 
 ### Added by a backend
 
@@ -115,7 +142,10 @@ built with pot. A backend built apart adds only `notes`; it keeps its own state 
   carries the version (`policy.json`'s `version: 1`). A pot that writes launch.json/1 writes policy.json/1; a later
   pair names both.
 - **Fields, not values, need a version.** A new field, or a changed meaning, is launch.json/2. A new host tool in
-  `hostTools` is a new field.
+  `hostTools` is a new field. One exception, in 0.3.0 (a contract change below 1.0, so a `0.(y+1)` release): `pins`,
+  added within version 1. It is optional, and no reader runs wider for not knowing it: bubblewrap and Seatbelt are
+  built with the pot that writes it, and a container backend before 0.3.0 refuses `access: write`, the only runs
+  that carry it (it reads launch.json leniently, so the field is ignored, never refused).
 - **Strict schema.** Every object pot builds is closed. Objects copied as written stay open: `root.contexts`' values
   and, in `wsFacts`, a `manifest` and the `rootRepoKits` entries.
 - **No secret values.** Nothing in the file is a secret: credentials are read on the host at run time from the
@@ -132,8 +162,11 @@ Read [policy.json/1's](policy-1.md#for-backend-authors) first: the verbs and the
 3. Start each binding's helper with the program in `hostTools`; stop before the command starts when one is missing.
 4. Bind `potBin`'s `pot` at `mounts.launcher` when `potBin` is set; start the siblings' broker with `hostPot` and
    `tree` when a row is a sibling and `hostPot` is set.
-5. Write the `after` event from `hostSigns`, `repoKitPaths`, `clone`, `rootRepo`, `grantsRel` and `inClone`.
-6. Never make launch.json visible in the run, never rewrite `policy.json`, and never change pot's fields; add only
+5. With write access in place, create `pins`' placeholders, bind its `dirs` writable and its `ro` read-only over the
+   workspace (each onto itself, deeper paths over shallower ones), seal its `sealed` folders, and stop on a `refused`
+   entry; check each path again before the bind.
+6. Write the `after` event from `hostSigns`, `repoKitPaths`, `clone`, `rootRepo`, `grantsRel` and `inClone`.
+7. Never make launch.json visible in the run, never rewrite `policy.json`, and never change pot's fields; add only
    `notes`.
 
 ## Fixtures
@@ -153,17 +186,23 @@ has its launch.json under the same name, from the same run; Seatbelt's was compo
 | `sibling-in-clone.json` | a sibling in its caller's clone: `inClone` |
 | `nix.json` | `closureCount` `the whole store (nix)` |
 | `inspect.json` | inspect: `walk`, no `closureCount` |
-| `hidden-tracked.json` | `hiddenTracked`, two `sealed` folders and a `note` |
-| `explain.json` | what `pot explain --backend-command` writes: the first fourteen fields (from `work-bindings.json`'s run) |
+| `hidden-tracked.json` | `hiddenTracked`, two `sealed` folders and a `note`; `pins` with two sealed folders |
+| `explain.json` | what `pot explain --backend-command` writes: the first fourteen fields, and `pins` (from `work-bindings.json`'s run) |
+| `work-bindings.json`, `git-fetch.json`, `nix.json`, `pi-agent.json`, `work-siblings.json` | `pins` (0.3.0): placeholders, a submodule's git directory, a protected folder (`scions`), a sealed folder (`pi-agent.json`) |
 
 `invalid/` holds documents a reader must reject: each breaks one rule above.
+
+The `pins` (0.3.0) were added to the fixtures by hand: what `core/pins.py`'s `resolve_workspace` returns for
+workspaces made like the tests' (`sbc`, `piws`, `nc`), with the paths made the fixtures'.
 
 pot's tests hold pot to the schema: `tests/run.sh contracts` validates the fixtures and refuses the invalid ones;
 the `pot`, `dispatch`, `sibling` and `pi` sections validate every `launch.json` their runs wrote.
 
 ## Sources
 
-- [core/pot.py](../core/pot.py): `launch_facts`, `host_tools`, `hook_env`, `host_pot`, `run` (writing launch.json),
+- [core/pins.py](../core/pins.py): `Pins`, `resolve`, `resolve_workspace`, `place` (the pins); `before_look`,
+  `look_after`, `workspace_hidden` (the host's look)
+- [core/pot.py](../core/pot.py): `launch_facts`, `host_tools`, `hook_env`, `host_pot`, `workspace_pins`, `run` (writing launch.json),
   `backend_notes`, `sibling_entry`, `explain`
 - [core/bwrap.py](../core/bwrap.py): `prepare`, `run_env`, `gitconfig_text`, `start_bindings`, `run`, `after`,
   `clone_after`, `cleanup`

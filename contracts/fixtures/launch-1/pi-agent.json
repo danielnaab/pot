@@ -224,6 +224,81 @@
  "tree": "/tmp/pot-test/pistate/runs/4d27",
  "depth": 0,
  "repoKitPaths": {},
+ "pins": [
+  {
+   "top": "/tmp/pot-test/piws",
+   "common": "/tmp/pot-test/piws/.git",
+   "dirs": [
+    "/tmp/pot-test/piws/.git"
+   ],
+   "ro": [
+    {
+     "path": "/tmp/pot-test/piws/.git/config",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/config.worktree",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/hooks",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/info",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/commondir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/gitdir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.pi",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/piws/flake.lock",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/piws/flake.nix",
+     "kind": "file"
+    }
+   ],
+   "placeholders": [
+    {
+     "path": "/tmp/pot-test/piws/.git/commondir",
+     "kind": "file",
+     "text": ".\n"
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/config.worktree",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/piws/.git/gitdir",
+     "kind": "file",
+     "text": ""
+    }
+   ],
+   "dotgits": [
+    "/tmp/pot-test/piws/.git"
+   ],
+   "named": [
+    "/tmp/pot-test/piws/.pi",
+    "/tmp/pot-test/piws/flake.lock",
+    "/tmp/pot-test/piws/flake.nix"
+   ],
+   "sealed": [
+    "/tmp/pot-test/piws/.pi"
+   ]
+  }
+ ],
  "policyDigest": "sha256-2f2e722a8707e5109dc0cffafbc09b69a2b14fd6192709c5ecad10fa81dc21b2",
  "closureCount": 163,
  "sealed": [

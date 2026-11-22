@@ -289,6 +289,145 @@
    "flake.lock"
   ]
  },
+ "pins": [
+  {
+   "top": "/tmp/pot-test/nc",
+   "common": "/tmp/pot-test/nc/.git",
+   "dirs": [
+    "/tmp/pot-test/nc/.git",
+    "/tmp/pot-test/nc/.git/modules",
+    "/tmp/pot-test/nc/.git/modules/scions",
+    "/tmp/pot-test/nc/.git/modules/scions/nkp",
+    "/tmp/pot-test/nc/scions"
+   ],
+   "ro": [
+    {
+     "path": "/tmp/pot-test/nc/.git/config",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/config.worktree",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/hooks",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/info",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/commondir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/gitdir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/config",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/config.worktree",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/hooks",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/info",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/commondir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/gitdir",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/scions/nkp/.git",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.gitmodules",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/flake.lock",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/flake.nix",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/kit.nix",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/scions/nkp/kit.nix",
+     "kind": "file"
+    },
+    {
+     "path": "/tmp/pot-test/nc/scions",
+     "kind": "folder"
+    },
+    {
+     "path": "/tmp/pot-test/nc/scions/nkp",
+     "kind": "folder"
+    }
+   ],
+   "placeholders": [
+    {
+     "path": "/tmp/pot-test/nc/.git/commondir",
+     "kind": "file",
+     "text": ".\n"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/config.worktree",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/gitdir",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/commondir",
+     "kind": "file",
+     "text": ".\n"
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/config.worktree",
+     "kind": "file",
+     "text": ""
+    },
+    {
+     "path": "/tmp/pot-test/nc/.git/modules/scions/nkp/gitdir",
+     "kind": "file",
+     "text": ""
+    }
+   ],
+   "dotgits": [
+    "/tmp/pot-test/nc/.git",
+    "/tmp/pot-test/nc/scions/nkp/.git"
+   ],
+   "named": [
+    "/tmp/pot-test/nc/.gitmodules",
+    "/tmp/pot-test/nc/flake.lock",
+    "/tmp/pot-test/nc/flake.nix",
+    "/tmp/pot-test/nc/kit.nix",
+    "/tmp/pot-test/nc/scions/nkp/kit.nix"
+   ],
+   "sealed": []
+  }
+ ],
  "policyDigest": "sha256-355e9b6c7d3f3dcd1a0995add3a79ef71c970351ab7998330e1534571a53a0c9",
  "closureCount": 158,
  "sealed": [],

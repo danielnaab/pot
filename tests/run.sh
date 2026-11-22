@@ -171,10 +171,10 @@ print(json.dumps(rec))' "$src/core" "$f")
   local ls=contracts/launch-1.schema.json lx=$src/contracts/fixtures/launch-1
   expect "contracts: launch.json/1's schema is a 2020-12 schema" quiet jsv --check-metaschema "$src/$ls"
   expect "contracts: launch.json/1's fixtures validate" valid "$ls" "$lx"/*.json
-  expect "contracts: launch.json/1's fixtures hold a clone, a root repository, a sibling, a hook's variables, an explain, the nix store, inspect's walk and a hidden path git tracks" quiet \
+  expect "contracts: launch.json/1's fixtures hold a clone, a root repository, a sibling, a hook's variables, an explain, the nix store, inspect's walk, a hidden path git tracks and the pins" quiet \
     jq -se 'any(.[]; .clone) and any(.[]; .rootRepo) and any(.[]; .siblingOf) and any(.[]; .hookEnv.GIT_INDEX_FILE)
       and any(.[]; has("policyDigest") | not) and any(.[]; .closureCount | type == "string") and any(.[]; .walk)
-      and any(.[]; .hiddenTracked)' "$lx"/*.json
+      and any(.[]; .hiddenTracked) and any(.[].pins[]?; (.placeholders | length > 0) and (.sealed | length > 0))' "$lx"/*.json
   for f in "$px"/*.json; do
     [ "$(basename "$f")" = seatbelt.json ] && continue     # composed by compose(), with no run: no launch.json
     expect "contracts: launch.json/1 has policy.json/1's $(basename "$f")'s launch.json" test -f "$lx/$(basename "$f")"
@@ -1189,6 +1189,10 @@ EOF
   expect "pot: runs/1, every log line and record this section's runs wrote validates" runs_valid "$work/sbstate" sb_
   expect "pot: policy.json/1, every policy.json this section's runs wrote validates" policies_valid "$work/sbstate"
   expect "pot: launch.json/1, every launch.json this section's runs wrote validates" launches_valid "$work/sbstate"
+  # 0.3.0: pot's core resolves an in-place write run's pins once and passes them (bwrap binds what they list)
+  # shellcheck disable=SC2016 # $1 is the inner shell's
+  expect "pot: 0.3.0, a run with write access in place has its workspace's pins in launch.json" quiet \
+    sh -c 'find "$1" -name launch.json -size +0 -exec cat {} + | jq -se "any(.[]; .pins[0].ro | length > 0)"' _ "$work/sbstate"
   cd "$work"
 }
 

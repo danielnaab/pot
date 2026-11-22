@@ -74,6 +74,15 @@ v2.14.0's `sandbox` on).
 - **`~/.config/containers` is in pot's default hidden list**, next to `~/.docker/config.json`. podman reads
   `containers.conf`, `mounts.conf` and `storage.conf` there. A run that could read or change them could widen a
   later container run. policy.json/1's fixtures hold the new item.
+- **pot's core resolves the workspace's pins, once, and passes them to the backend** (a contract change: 0.3.0).
+  For a run with write access in place, `core/pins.py` (bwrap.py's `Pins`, moved) lists what to bind writable and
+  read-only onto itself, the placeholders, the sealed folders, and a link or hard link that stops the run, and pot
+  writes it as launch.json/1's new optional `pins` (prose, schema and fixtures). bubblewrap binds that list instead
+  of resolving its own, with the same result; Seatbelt resolves its own with the same code. Every check now comes
+  before any placeholder, so a refused run leaves none. `pins` is the one field added within launch.json/1: no reader
+  runs wider for not knowing it (bubblewrap and Seatbelt are built with pot; an older container backend refuses
+  write access and ignores the field). `pins.py before|after` is the host's look (bwrap's before.json and the
+  in-place part of its after event) for a backend built apart.
 
 ## v0.2.0 - 2026-11-21
 
