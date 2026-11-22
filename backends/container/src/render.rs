@@ -75,7 +75,7 @@ pub const ENTRY_SCRIPT: &str = concat!(
     r#"case $__pot_r in *=*) __pot_recs+=("$__pot_r") ;; esac; __pot_i=$((__pot_i + 1)); done; "#,
     r#"[ "$__pot_whole" = 1 ] || { echo "pot: the run's variables did not arrive as planned: nothing runs" >&2; exit 125; }; "#,
     r#"if [ -n "$__pot_socat" ]; then "#,
-    r#""$__pot_socat" -lf /dev/null TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/pot/proxy.sock </dev/null >/dev/null 2>&1 & "#,
+    r#""$__pot_socat" -lf /dev/null TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/pot/proxy.sock </dev/null >/dev/null 2>&1 {__pot_fd}<&- & "#,
     r#"__pot_up=; for __pot_x in {1..300}; do "#,
     r#"while read -r __pot_x __pot_l __pot_x __pot_s __pot_x; do [ "$__pot_l $__pot_s" != "0100007F:0C38 0A" ] || { __pot_up=1; break; }; done </proc/net/tcp; "#,
     r#"[ -z "$__pot_up" ] || break; read -r -t 0.01 -u "$__pot_fd" __pot_x; done; "#,
