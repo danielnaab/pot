@@ -5,6 +5,7 @@
 //! This slice: `probe`, `prepare` (and `prepare --print`, which writes nothing), `run`, `after` and `cleanup`, for
 //! runs in place with read access or none. See docs/reference/container.md.
 
+mod bindings;
 mod engine;
 mod host;
 mod launch;
@@ -15,6 +16,7 @@ mod render;
 
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -226,6 +228,31 @@ fn print_plan(engine: &str, p: &Plan) -> String {
             words(proxy)
         );
     }
+    if !p.creds.is_empty() {
+        // bwrap's print_command: a via-file variable's value is its file's path; another's, "(the run holds it)"
+        let files = bindings::via_file(&p.creds);
+        let shown: Vec<String> = bindings::names(&p.creds)
+            .iter()
+            .map(|n| {
+                if files.contains_key(n) {
+                    format!("{n}={}/{n}", p.secrets_at)
+                } else {
+                    format!("{n}=(the run holds it)")
+                }
+            })
+            .collect();
+        let _ = writeln!(
+            out,
+            "# the bindings' values, read on the host when run starts, go over the named pipe: {}",
+            shown.join(" ")
+        );
+        if !files.is_empty() {
+            let _ = writeln!(
+                out,
+                "# a via-file value is written to the run folder's secrets/NAME (0400), removed when the command ends"
+            );
+        }
+    }
     if p.fifo {
         let _ = writeln!(
             out,
@@ -310,6 +337,16 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
                 fs::create_dir(&path).map_err(at(&path))?;
             }
             RunFile::File { name, text, mode } => write_new(&rundir.join(name), text.as_bytes(), *mode)?,
+            RunFile::PrivateDir { name } => {
+                use std::os::unix::fs::DirBuilderExt as _;
+                let path = rundir.join(name);
+                remove_tree(&path).map_err(at(&path))?;
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&path)
+                    .map_err(at(&path))?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(at(&path))?;
+            }
             RunFile::Link { name, target } => {
                 let path = rundir.join(name);
                 if path.symlink_metadata().is_ok() {
@@ -354,7 +391,7 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
     let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults,
-        "fifo": p.fifo, "proxy": p.proxy });
+        "fifo": p.fifo, "proxy": p.proxy, "credentials": p.creds, "hostless": p.hostless, "secretsAt": p.secrets_at });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -363,6 +400,13 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
 }
 
 fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
+    // what a run killed with SIGKILL left of the via-file bindings' values goes first, whatever prepare decides (a link
+    // there is removed, never followed)
+    if !print {
+        let s = rundir.join("secrets");
+        remove_tree(&s)
+            .map_err(|e| Refusal::new(&context_of(rundir), format!("can't remove {}: {e}", s.display())))?;
+    }
     let (p, l, plan) = plan(cfg, rundir)?;
     if print {
         let (engine, _) = engine(cfg).map_err(|m| Refusal::new(&p.context, m))?;
@@ -556,6 +600,15 @@ struct EngineEnv {
     /// With the network: pot's proxy, started in the run folder before the engine.
     #[serde(default)]
     proxy: Option<Vec<String>>,
+    /// The credential and mcp bindings: references to the host's key files and variables, never a value.
+    #[serde(default)]
+    credentials: Vec<bindings::Cred>,
+    /// The bindings' variables that take only their default when the binding has no value (never the host's).
+    #[serde(default)]
+    hostless: Vec<String>,
+    /// Where the run sees a via-file binding's file.
+    #[serde(default, rename = "secretsAt")]
+    secrets_at: String,
 }
 
 /// R2: the run folder's engine paths as `prepare` left them, checked just before the engine starts: the engine
@@ -824,6 +877,8 @@ fn stop_process(child: &mut std::process::Child) {
 struct Helpers {
     proxy: Option<std::process::Child>,
     files: Vec<PathBuf>,
+    /// The via-file bindings' folder, `secrets/`: removed with the values in it (a link there removed, not followed).
+    secrets: Option<PathBuf>,
 }
 
 impl Drop for Helpers {
@@ -836,14 +891,89 @@ impl Drop for Helpers {
                 let _ = fs::remove_file(f);
             }
         }
+        if let Some(s) = &self.secrets {
+            if let Err(e) = remove_tree(s) {
+                eprintln!("{}", visible(&format!("pot: can't remove {}: {e}", s.display())));
+            }
+        }
     }
+}
+
+/// The via-file bindings' values: each variable's name, the file's bytes.
+type SecretFiles = Vec<(String, Vec<u8>)>;
+
+/// bwrap's `deliver`, for the via-file values: each written to DIR/NAME (the run folder's `secrets/`, which prepare
+/// made 0700), mode 0400, this user's. DIR is opened without following a link and must be this user's 0700 folder;
+/// each file is created exclusively in it (`openat`, `O_EXCL|O_NOFOLLOW`), whatever was at its name removed first.
+fn write_secrets(dir: &Path, files: &SecretFiles) -> Result<(), String> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let at = |e: rustix::io::Errno, what: &str| format!("{}: {e}", dir.join(what).display());
+    let d = rustix::fs::open(
+        dir,
+        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| at(e, ""))?;
+    let st = rustix::fs::fstat(&d).map_err(|e| at(e, ""))?;
+    if Some(st.st_uid) != host::euid() || st.st_mode & 0o7777 != 0o700 {
+        return Err(format!(
+            "{}: not the folder prepare made (mode 0700, this user's)",
+            dir.display()
+        ));
+    }
+    for (n, v) in files {
+        match rustix::fs::unlinkat(&d, n.as_str(), AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(e) => return Err(at(e, n)),
+        }
+        let fd = rustix::fs::openat(
+            &d,
+            n.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o400),
+        )
+        .map_err(|e| at(e, n))?;
+        let mut off = 0;
+        while off < v.len() {
+            match rustix::io::write(&fd, &v[off..]) {
+                Ok(k) => off += k,
+                Err(rustix::io::Errno::INTR) => {}
+                Err(e) => return Err(at(e, n)),
+            }
+        }
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o400)).map_err(|e| at(e, n))?;
+    }
+    Ok(())
 }
 
 /// Just before the engine starts: the named pipe and the proxy's socket are what `run` made (a link or another kind of
 /// file in their place is refused).
-fn runtime_paths(abs: &Path, fifo: bool, proxy: bool) -> Result<(), String> {
-    use std::os::unix::fs::FileTypeExt as _;
+fn runtime_paths(abs: &Path, fifo: bool, proxy: bool, secrets: Option<&[String]>) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
     let mut bad = vec![];
+    // the via-file bindings' folder: this user's, 0700, holding exactly the files run wrote, each 0400 and this user's
+    if let Some(names) = secrets {
+        let dir = abs.join("secrets");
+        let mine = |m: &fs::Metadata, mode: u32| Some(m.uid()) == host::euid() && m.mode() & 0o7777 == mode;
+        let held: Option<std::collections::BTreeSet<String>> = fs::read_dir(&dir).ok().map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        });
+        let want: std::collections::BTreeSet<String> = names.iter().cloned().collect();
+        let ok = dir
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_dir() && mine(&m, 0o700))
+            && held.as_ref() == Some(&want)
+            && names.iter().all(|n| {
+                dir.join(n)
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.file_type().is_file() && mine(&m, 0o400))
+            });
+        if !ok {
+            bad.push(dir.display().to_string());
+        }
+    }
     let check = |n: &str, ok: &dyn Fn(&fs::FileType) -> bool, bad: &mut Vec<String>| {
         if !abs.join(n).symlink_metadata().is_ok_and(|m| ok(&m.file_type())) {
             bad.push(abs.join(n).display().to_string());
@@ -922,10 +1052,45 @@ fn wait_engine(
     Ok(status)
 }
 
+/// The bindings' values, read on the host now (bwrap's `credentials`), and refused before anything starts when one
+/// can't be delivered (bwrap's `deliver`); with the via-file ones' files. They live in `run`'s memory, on the pipe and
+/// (via file) in `secrets/` only.
+fn bound_values(env: &EngineEnv) -> Result<(Vec<bindings::Val>, SecretFiles), String> {
+    let vals = bindings::read(&env.credentials, &|n: &str| std::env::var_os(n))?;
+    bindings::check(&env.credentials, &vals)?;
+    let files = bindings::via_file(&env.credentials);
+    let secret_files = vals
+        .iter()
+        .filter(|v| files.contains_key(&v.name))
+        .map(|v| (v.name.clone(), v.value.as_bytes().to_vec()))
+        .collect();
+    Ok((vals, secret_files))
+}
+
+/// The value `run` writes to the pipe for N: a binding's (a via-file one's: its file in the run), as bwrap's `run`
+/// updates `run_env` with `deliver`; else the host's, unless N is a binding's variable only (`hostless`); else the
+/// plan's default for it.
+fn piped_value(env: &EngineEnv, vals: &[bindings::Val], n: &str) -> Option<std::ffi::OsString> {
+    if let Some(v) = vals.iter().find(|v| v.name == n) {
+        return Some(if bindings::via_file(&env.credentials).contains_key(n) {
+            format!("{}/{n}", env.secrets_at).into()
+        } else {
+            v.value.clone()
+        });
+    }
+    let host = if env.hostless.iter().any(|h| h == n) {
+        None
+    } else {
+        std::env::var_os(n)
+    };
+    host.or_else(|| env.defaults.get(n).map(Into::into))
+}
+
 /// Run the command `prepare` wrote, with the engine environment it recorded; return the command's status once the
 /// container is removed and the engine's processes for the run have ended. SIGTERM and SIGHUP stop the container
 /// (the engine's stop: SIGTERM, then SIGKILL after 10 s), retried until the container is gone; SIGINT is the
 /// command's (the terminal sends it to the engine too, which passes it on), as bwrap's run ignores it.
+#[allow(clippy::too_many_lines)] // the run's steps in order, each naming the audit finding it answers
 fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     use std::io::IsTerminal as _;
     use std::sync::Arc;
@@ -955,7 +1120,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         .split(|b| *b == 0)
         .map(|a| String::from_utf8_lossy(a).into_owned())
         .collect();
-    let env: EngineEnv = read_own(&abs.join("container.env"))
+    let mut env: EngineEnv = read_own(&abs.join("container.env"))
         .map_err(|err| err.to_string())
         .and_then(|t| serde_json::from_slice(&t).map_err(|err| format!("container.env: {err}")))
         .map_err(refuse)?;
@@ -964,7 +1129,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
             "container.argv was not prepared for {program}: run prepare again"
         )));
     }
-    let set: Vec<(String, String)> = env.set.into_iter().collect();
+    let set: Vec<(String, String)> = std::mem::take(&mut env.set).into_iter().collect();
     if e == Engine::Docker {
         let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
         if !argv.contains(&image) {
@@ -980,6 +1145,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
             .map_err(|err| refuse(format!("can't record the status: {err}")))?;
         return Ok(143);
     }
+    let (vals, secret_files) = bound_values(&env).map_err(refuse)?;
     // the named pipe and the proxy, just before the engine; stopped and removed when the command ends (Helpers' drop)
     let mut helpers = Helpers::default();
     if env.fifo {
@@ -990,9 +1156,16 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         helpers.files.push(abs.join("proxy.sock"));
         helpers.proxy = Some(start_proxy(&abs, proxy).map_err(refuse)?);
     }
+    let secret_names = (!bindings::via_file(&env.credentials).is_empty()).then(|| {
+        helpers.secrets = Some(abs.join("secrets"));
+        secret_files.iter().map(|f| f.0.clone()).collect::<Vec<_>>()
+    });
+    if secret_names.is_some() {
+        write_secrets(&abs.join("secrets"), &secret_files).map_err(refuse)?;
+    }
     // R2 again, now that the proxy runs: every path the engine is handed is as prepare left it, or as run made it
     engine_paths(&abs, e, &env.own).map_err(refuse)?;
-    runtime_paths(&abs, env.fifo, env.proxy.is_some()).map_err(refuse)?;
+    runtime_paths(&abs, env.fifo, env.proxy.is_some(), secret_names.as_deref()).map_err(refuse)?;
     let argv = lifecycle::run_argv(&argv, std::io::stdin().is_terminal());
 
     // U2: a variable passed by name that the host has unset takes pot's value: in the engine's environment (the
@@ -1012,9 +1185,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         .map_err(|err| refuse(format!("can't run {program}: {err}")))?;
     let done = Arc::new(AtomicBool::new(false));
     let feeder = env.fifo.then(|| {
-        let data = lifecycle::secret_records(&env.piped, |n| {
-            std::env::var_os(n).or_else(|| env.defaults.get(n).map(Into::into))
-        });
+        let data = lifecycle::secret_records(&env.piped, |n| piped_value(&env, &vals, n));
         feed_fifo(abs.join("secrets.fifo"), data, Arc::clone(&done))
     });
     let status = wait_engine(&mut child, &stop, e, &program, &abs, &set);
@@ -1251,7 +1422,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     let rd = |n: &str| abs.join(n);
     let mut failed = stop_proxies(&abs);
     failed.extend(cleanup_engine(cfg, &abs));
-    for n in ["enginehome", "dockercfg"] {
+    for n in ["enginehome", "dockercfg", "secrets"] {
         if let Err(e) = remove_tree(&rd(n)) {
             failed.push(format!("{}: {e}", rd(n).display()));
         }
@@ -1279,6 +1450,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "hidden.txt",
         "secrets.fifo",
         "proxy.sock",
+        "mcp.json",
     ] {
         match fs::remove_file(rd(n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {

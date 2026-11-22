@@ -4,7 +4,8 @@
 //! (rootless), `POT_TEST_DOCKER` a docker one (a daemon the caller may use). Elsewhere (the flake's sandbox) they
 //! pass without running. `cleanup`'s tests that need no engine always run.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -2281,4 +2282,578 @@ fn podman_the_named_pipe_is_unlinked_once_delivered() {
 #[test]
 fn docker_the_named_pipe_is_unlinked_once_delivered() {
     unlinked_case("docker");
+}
+
+// ---------------------------------------------------------------- the credential and mcp bindings
+
+/// A fake key, a marker no other file holds: each `from` kind, in each `via` mode.
+const KEYS: &[(&str, &str, &str)] = &[
+    // (variable, via, from kind)
+    ("A_TOKFILE", "env", "file"),
+    ("B_ENVFILE", "env", "envFile"),
+    ("C_FROMENV", "env", "env"),
+    ("D_SAME", "env", "none"),
+    ("E_TOKFILE", "file", "file"),
+    ("F_ENVFILE", "file", "envFile"),
+    ("G_FROMENV", "file", "env"),
+    ("H_SAME", "file", "none"),
+];
+
+fn marker(name: &str) -> String {
+    format!("pot-bind-marker-{}-7c1e", name.to_lowercase())
+}
+
+/// The host's variables a bindings run is given: the `env` and `none` kinds' values, and the mcp keys' none.
+fn bind_env() -> Vec<(String, String)> {
+    let mut v = vec![];
+    for (n, _, kind) in KEYS {
+        match *kind {
+            "env" => v.push((format!("POT_TEST_HOST_{n}"), marker(n))),
+            "none" => v.push(((*n).to_string(), marker(n))),
+            _ => {}
+        }
+    }
+    v
+}
+
+/// A run folder whose policy has a credential binding for each of KEYS, and two mcp bindings (MCPKEY via env, MCPFILE
+/// via file), their fake key files in the test's own `keys/`; ARGV the command.
+fn bind_world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, PathBuf) {
+    let (top, run) = world(name, engine, program, argv);
+    let keys = top.join("keys");
+    fs::create_dir_all(&keys).unwrap();
+    let mut bindings = vec![];
+    for (n, via, kind) in KEYS {
+        let from = match *kind {
+            "file" => {
+                // a token file: the whole file is the value
+                fs::write(keys.join(n), format!("{}\n", marker(n))).unwrap();
+                serde_json::json!({ "file": keys.join(n) })
+            }
+            "envFile" => {
+                fs::write(
+                    keys.join(n),
+                    format!("# fake\nexport {n}=\"{}\"\nOTHER=x\n", marker(n)),
+                )
+                .unwrap();
+                serde_json::json!({ "envFile": keys.join(n) })
+            }
+            "env" => serde_json::json!({ "env": format!("POT_TEST_HOST_{n}") }),
+            _ => serde_json::json!({}),
+        };
+        bindings.push(serde_json::json!({ "capability": "credential", "selector": format!("sel-{n}"),
+            "kit": "root:test", "request": format!("capability credential sel-{n} env={n}"), "via": via, "env": [n],
+            "from": from, "holds": "the run holds it" }));
+    }
+    for (n, via, server) in [("MCPKEY", "env", "s"), ("MCPFILE", "file", "t")] {
+        fs::write(keys.join(n), format!("{n}={}\n", marker(n))).unwrap();
+        bindings.push(serde_json::json!({ "capability": "mcp", "selector": server, "kit": "root:test",
+            "request": format!("capability mcp {server}"), "via": via, "env": [n], "from": { "file": keys.join(n) },
+            "holds": "the run holds it", "server": server, "url": format!("https://{server}.example/mcp"),
+            "header": "Authorization", "scheme": "Bearer", "config": "/run/pot/mcp.json" }));
+    }
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    p["bindings"] = bindings.into();
+    fs::write(&path, p.to_string()).unwrap();
+    (top, run)
+}
+
+/// Every variable of a bindings run, with the markers: the via-file ones hold their file's path in the run.
+fn bind_names() -> Vec<&'static str> {
+    KEYS.iter().map(|k| k.0).chain(["MCPKEY", "MCPFILE"]).collect()
+}
+
+fn via_file(n: &str) -> bool {
+    n == "MCPFILE" || KEYS.iter().any(|k| k.0 == n && k.1 == "file")
+}
+
+/// Under ENGINE: each `from` kind's value arrives, as the variable (via env) or as a 0400 file of the run's user at
+/// /run/pot/secrets/NAME, which the run can read and not write, remove or replace (via file); mcp.json is bwrap's,
+/// with no value; no marker is in a file of the run folder (but the via-file one's own, in secrets/) or of
+/// `$XDG_RUNTIME_DIR/crun`, in the engine's `inspect`, or in `container.argv`; and the secrets are gone when the
+/// command ends.
+fn bindings_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let (cat, stat, chmod, rm, sleep) = (
+        coreutils("cat"),
+        coreutils("stat"),
+        coreutils("chmod"),
+        coreutils("rm"),
+        coreutils("sleep"),
+    );
+    let mut script = String::new();
+    for n in bind_names() {
+        let _ = write!(script, "printf 'V %s=%s\\n' {n} \"${n}\"; ");
+    }
+    let _ = write!(
+        script,
+        "for f in /run/pot/secrets/*; do printf 'F %s=%s\\n' \"$f\" \"$({cat} \"$f\")\"; {stat} -c 'S %n %a %u' \"$f\"; done; \
+         (printf x > /run/pot/secrets/E_TOKFILE) 2>/dev/null && echo WRITABLE; \
+         (: > /run/pot/secrets/NEW) 2>/dev/null && echo CREATED; \
+         {chmod} 600 /run/pot/secrets/E_TOKFILE 2>/dev/null && echo CHMODDED; \
+         {rm} -f /run/pot/secrets/E_TOKFILE 2>/dev/null; [ -e /run/pot/secrets/E_TOKFILE ] || echo REMOVED; \
+         printf 'M '; {cat} /run/pot/mcp.json; echo; {sleep} 3"
+    );
+    let (top, run) = bind_world(
+        &format!("{engine}-bindings"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+    );
+    prepare(&top, &run);
+    let child = verb(&top, &run, "run")
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for("the container", || {
+        !fs::read_to_string(run.join("container.id"))
+            .unwrap_or_default()
+            .is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    let cid = fs::read_to_string(run.join("container.id")).unwrap();
+    // on the host, while the command runs: each via-file value in its own file, 0400, the caller's; nowhere else
+    let me = id("Uid:");
+    for n in bind_names().into_iter().filter(|n| via_file(n)) {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = run
+            .join("secrets")
+            .join(n)
+            .symlink_metadata()
+            .unwrap_or_else(|e| panic!("{n}: {e}"));
+        assert!(
+            m.file_type().is_file() && m.mode() & 0o7777 == 0o400 && u64::from(m.uid()) == me,
+            "{n}: {m:?}"
+        );
+    }
+    let inspect = if engine == "docker" {
+        Command::new(&program)
+            .args(["container", "inspect", cid.trim()])
+            .output()
+            .unwrap()
+    } else {
+        podman(&program, &run, &["container", "inspect", cid.trim()])
+    };
+    ok(&inspect);
+    let xdg = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap()).join("crun");
+    let words = argv_words(&run);
+    for n in bind_names() {
+        let mk = marker(n);
+        let mut found = files_holding(&run, &mk);
+        found.extend(files_holding(&xdg, &mk));
+        let own = run.join("secrets").join(n).display().to_string();
+        let want: Vec<String> = if via_file(n) { vec![own] } else { vec![] };
+        // the keys/ folder holds the fake key files; it is outside the run folder
+        assert_eq!(found, want, "{n}'s value is in a file");
+        assert!(
+            !String::from_utf8_lossy(&inspect.stdout).contains(&mk),
+            "{n} in inspect"
+        );
+        assert!(!words.iter().any(|w| w.contains(&mk)), "{n} in container.argv");
+    }
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for n in bind_names() {
+        let want = if via_file(n) {
+            format!("V {n}=/run/pot/secrets/{n}")
+        } else {
+            format!("V {n}={}", marker(n))
+        };
+        assert!(stdout.lines().any(|l| l == want), "{want}\n{stdout}");
+        if via_file(n) {
+            assert!(
+                stdout
+                    .lines()
+                    .any(|l| l == format!("F /run/pot/secrets/{n}={}", marker(n))),
+                "{n}\n{stdout}"
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .any(|l| l == format!("S /run/pot/secrets/{n} 400 {me}")),
+                "{n}\n{stdout}"
+            );
+        }
+    }
+    for bad in ["WRITABLE", "CREATED", "CHMODDED", "REMOVED"] {
+        assert!(!stdout.lines().any(|l| l == bad), "the run could: {bad}");
+    }
+    // mcp.json: bwrap's shape, a header naming its variable, a helper reading the file; no value
+    let mcp = stdout
+        .split("\nM ")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap_or_default();
+    let mcp: serde_json::Value = serde_json::from_str(mcp.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert_eq!(
+        mcp,
+        serde_json::json!({ "mcpServers": {
+            "s": { "type": "http", "url": "https://s.example/mcp", "headers": { "Authorization": "Bearer ${MCPKEY}" } },
+            "t": { "type": "http", "url": "https://t.example/mcp",
+                   "headersHelper": "read -r v < \"$MCPFILE\"; printf '%s%s%s' '{\"Authorization\": \"Bearer ' \"$v\" '\"}'" } } })
+    );
+    // gone when the command ends
+    assert!(
+        run.join("secrets").symlink_metadata().is_err(),
+        "secrets/ is left"
+    );
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    let mut left = set(LEFT);
+    left.insert("status".into());
+    assert_eq!(names(&run), left);
+}
+
+#[test]
+fn podman_bindings_arrive_from_every_source_and_nowhere_else() {
+    bindings_case("podman");
+}
+
+#[test]
+fn docker_bindings_arrive_from_every_source_and_nowhere_else() {
+    bindings_case("docker");
+}
+
+/// No exec (strace follows run, the engine and, under podman, the container's processes) is handed a binding's value.
+fn bind_strace_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(strace) = find("strace") else {
+        eprintln!("no strace on PATH");
+        return;
+    };
+    let cat = coreutils("cat");
+    let script = format!("echo \"[$A_TOKFILE][$MCPKEY]\"; {cat} \"$E_TOKFILE\" \"$MCPFILE\"");
+    let (top, run) = bind_world(
+        &format!("{engine}-bind-strace"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+    );
+    prepare(&top, &run);
+    let log = top.join("strace.log");
+    let out = Command::new(&strace)
+        .args(["-f", "-qq", "-e", "trace=execve,execveat", "-s", "1000000", "-o"])
+        .arg(&log)
+        .arg(BIN)
+        .arg("--config")
+        .arg(top.join("config.json"))
+        .arg("run")
+        .arg(&run)
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for n in ["A_TOKFILE", "MCPKEY", "E_TOKFILE", "MCPFILE"] {
+        assert!(stdout.contains(&marker(n)), "{n} did not arrive: {stdout}");
+    }
+    let execs = fs::read_to_string(&log).unwrap();
+    if engine == "podman" {
+        assert!(
+            execs.contains("pot-entry"),
+            "strace did not follow into the container"
+        );
+    }
+    for n in bind_names() {
+        let bad: Vec<&str> = execs.lines().filter(|l| l.contains(&marker(n))).collect();
+        assert!(bad.is_empty(), "{n}'s value in an exec's arguments: {bad:?}");
+    }
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_no_exec_is_handed_a_bindings_value() {
+    bind_strace_case("podman");
+}
+
+#[test]
+fn docker_no_exec_is_handed_a_bindings_value() {
+    bind_strace_case("docker");
+}
+
+/// A `run` killed with SIGKILL leaves the via-file secrets (and the container) to `cleanup`, which removes them.
+fn bind_killed_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let sleep = coreutils("sleep");
+    let (top, run) = bind_world(
+        &format!("{engine}-bind-killed"),
+        engine,
+        &program,
+        &[&sleep, "60"],
+    );
+    prepare(&top, &run);
+    let mut child = verb(&top, &run, "run")
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the container", || {
+        !fs::read_to_string(run.join("container.id"))
+            .unwrap_or_default()
+            .is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(run.join("secrets/E_TOKFILE").exists());
+    let docker_name = argv_value(&run, "--name").unwrap_or_default();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        run.join("secrets/E_TOKFILE").exists(),
+        "a killed run can't remove it: cleanup does"
+    );
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert!(
+        run.join("secrets").symlink_metadata().is_err(),
+        "secrets/ is left"
+    );
+    assert_eq!(names(&run), set(LEFT));
+    if engine == "podman" {
+        assert_eq!(engine_processes(&run), Vec::<String>::new());
+    } else {
+        let ps = Command::new(&program)
+            .args(["ps", "-a", "--quiet", "--filter", &format!("name={docker_name}")])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&ps.stdout).trim().is_empty(),
+            "docker's container is left"
+        );
+    }
+}
+
+#[test]
+fn podman_a_killed_runs_secrets_go_at_cleanup() {
+    bind_killed_case("podman");
+}
+
+#[test]
+fn docker_a_killed_runs_secrets_go_at_cleanup() {
+    bind_killed_case("docker");
+}
+
+/// What a killed run left in secrets/ goes when `prepare` runs again, even when it stops (and `cleanup` after it).
+#[test]
+fn prepare_removes_secrets_even_when_it_stops() {
+    let (top, run) = bind_world("bind-prepare-stops", "podman", "podman", &["true"]);
+    prepare(&top, &run);
+    // as a killed run leaves it
+    fs::write(run.join("secrets/E_TOKFILE"), marker("E_TOKFILE")).unwrap();
+    // prepare stops: a binding this slice does not carry out
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    p["bindings"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "capability": "nix", "selector": "*",
+        "kit": "root:test", "request": "capability nix", "socket": "/run/pot/nix.sock", "see": [],
+        "via": "daemon-untrusted", "notes": [] }));
+    fs::write(&path, p.to_string()).unwrap();
+    let out = verb(&top, &run, "prepare").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the nix binding"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        run.join("secrets").symlink_metadata().is_err(),
+        "secrets/ is left after prepare stopped"
+    );
+    // a link planted at secrets/ is removed, never followed
+    let outside = top.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keep"), "").unwrap();
+    symlink(&outside, run.join("secrets")).unwrap();
+    let _ = verb(&top, &run, "prepare").output().unwrap();
+    assert!(run.join("secrets").symlink_metadata().is_err() && outside.join("keep").exists());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// run refuses, before the engine starts, a value it can't deliver: an mcp via-file key with a quote (its helper
+/// could not carry it), and a key file that is not there. The refusal names the binding and the file, never the
+/// value; nothing is left in secrets/.
+fn bind_refusal_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let (top, run) = bind_world(&format!("{engine}-bind-refused"), engine, &program, &["true"]);
+    prepare(&top, &run);
+    let quoted = "pot-quoted\"marker";
+    fs::write(top.join("keys/MCPFILE"), format!("MCPFILE='{quoted}'\n")).unwrap();
+    let out = verb(&top, &run, "run")
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(
+        err.trim(),
+        "pot (review): the mcp binding t: its key holds a quote, a backslash or a control character, which its header \
+         helper cannot carry: use via = \"env\""
+    );
+    assert!(
+        run.join("container.id").symlink_metadata().is_err(),
+        "the engine started"
+    );
+    assert!(
+        fs::read_dir(run.join("secrets")).map_or(true, |mut d| d.next().is_none()),
+        "a secret is left"
+    );
+    // a missing key file: named, with the binding
+    fs::write(top.join("keys/MCPFILE"), "MCPFILE=fine\n").unwrap();
+    fs::remove_file(top.join("keys/B_ENVFILE")).unwrap();
+    let out = verb(&top, &run, "run")
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(
+        err.trim(),
+        format!(
+            "pot (review): the credential binding sel-B_ENVFILE reads {}: No such file or directory",
+            top.join("keys/B_ENVFILE").display()
+        )
+    );
+    assert!(run.join("container.id").symlink_metadata().is_err());
+    for n in bind_names() {
+        assert!(!err.contains(&marker(n)));
+    }
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert_eq!(names(&run), set(LEFT));
+}
+
+#[test]
+fn podman_a_value_run_cannot_deliver_is_refused_before_the_engine() {
+    bind_refusal_case("podman");
+}
+
+#[test]
+fn docker_a_value_run_cannot_deliver_is_refused_before_the_engine() {
+    bind_refusal_case("docker");
+}
+
+/// The command's environment equals bwrap's for the same policy: `run_env` updated with `deliver(credentials())`, as
+/// bwrap.py's `run` computes it (run here with the repository's core/bwrap.py), but for what this backend does not
+/// place yet: `BASH_ENV` and the exported not-found handler (`bash_env`), and `/run/pot/bin` and `/run/pot/notfound` on
+/// `PATH` (the shims, the not-found advice).
+fn bwrap_env_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(python) = find("python3") else {
+        eprintln!("no python3 on PATH");
+        return;
+    };
+    let envp = coreutils("env");
+    let (top, run) = bind_world(&format!("{engine}-bwrap-env"), engine, &program, &[&envp, "-0"]);
+    // the packages real store paths, as bwrap's run_env keeps only those that exist
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let pkg = |b: &str| which(b).parent().unwrap().parent().unwrap().display().to_string();
+    let mut n = 0;
+    for it in p["items"].as_array_mut().unwrap() {
+        if it["kind"] == "package" {
+            it["value"] = if n == 0 { pkg("env") } else { pkg("sh") }.into();
+            n += 1;
+        }
+    }
+    // a binding named like an env.set value (TZ): bwrap's binding wins
+    p["bindings"].as_array_mut().unwrap().push(
+        serde_json::json!({ "capability": "credential", "selector": "tz",
+        "kit": "root:test", "request": "capability credential tz env=TZ", "via": "env", "env": ["TZ"],
+        "from": { "env": "POT_TEST_TZ" }, "holds": "the run holds it" }),
+    );
+    fs::write(&path, p.to_string()).unwrap();
+    prepare(&top, &run);
+    let mut host = bind_env();
+    host.extend([
+        ("NOTES_TOKEN".to_string(), "notes-value".to_string()),
+        ("TERM".to_string(), "xterm".to_string()),
+        ("POT_TEST_TZ".to_string(), "Europe/Oslo".to_string()),
+    ]);
+    let out = verb(&top, &run, "run")
+        .envs(host.clone())
+        .env_remove("COLORTERM")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    let got: BTreeSet<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    let scratch = top.join("bwrap-secrets");
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(scratch.join("secrets")).unwrap();
+    let core = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core")).unwrap();
+    let bwrap_py = "import json, sys\nsys.path.insert(0, sys.argv[1])\nimport bwrap\n\
+        cfg = json.load(open(sys.argv[2]))\npolicy, launch = bwrap.load(sys.argv[3])\n\
+        env = bwrap.run_env(cfg, policy, launch)\n\
+        env.update(bwrap.deliver(policy, sys.argv[4], policy['mounts']['run'] + '/secrets', bwrap.credentials(policy)))\n\
+        sys.stdout.write(json.dumps(env))\n";
+    let py = Command::new(python)
+        .args(["-I", "-S", "-c", bwrap_py])
+        .arg(&core)
+        .arg(top.join("config.json"))
+        .arg(&run)
+        .arg(&scratch)
+        .envs(host)
+        .env_remove("COLORTERM")
+        .output()
+        .unwrap();
+    ok(&py);
+    let _ = fs::remove_dir_all(&scratch);
+    let bwrap: BTreeMap<String, String> = serde_json::from_slice(&py.stdout).unwrap();
+    let want: BTreeSet<String> = bwrap
+        .into_iter()
+        .filter(|(k, _)| k != "BASH_ENV" && !k.starts_with("BASH_FUNC_"))
+        .map(|(k, v)| {
+            let v = if k == "PATH" {
+                v.split(':')
+                    .filter(|d| !matches!(*d, "/run/pot/bin" | "/run/pot/notfound"))
+                    .collect::<Vec<_>>()
+                    .join(":")
+            } else {
+                v
+            };
+            format!("{k}={v}")
+        })
+        .collect();
+    assert!(want.contains("TZ=Europe/Oslo") && want.contains(&format!("A_TOKFILE={}", marker("A_TOKFILE"))));
+    assert!(want.contains("E_TOKFILE=/run/pot/secrets/E_TOKFILE"));
+    assert_eq!(got, want);
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_the_commands_environment_is_bwraps_with_bindings() {
+    bwrap_env_case("podman");
+}
+
+#[test]
+fn docker_the_commands_environment_is_bwraps_with_bindings() {
+    bwrap_env_case("docker");
 }

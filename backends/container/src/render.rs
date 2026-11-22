@@ -195,6 +195,10 @@ pub enum RunFile {
     Dir {
         name: String,
     },
+    /// A folder of the run's alone (mode 0700), emptied: the via-file bindings' `secrets/`, which run fills.
+    PrivateDir {
+        name: String,
+    },
     Link {
         name: String,
         target: String,
@@ -226,6 +230,13 @@ pub struct Plan {
     pub fifo: bool,
     /// With the network: the proxy's command, which `run` starts on the host in the run folder.
     pub proxy: Option<Vec<String>>,
+    /// The credential and mcp bindings (references only), whose values `run` reads on the host and writes to the pipe.
+    pub creds: Vec<crate::bindings::Cred>,
+    /// The bindings' variables that take no value from the host's variable of the same name when the binding has
+    /// none (only their default, if any): those that are not also an env item, `TERM` or `COLORTERM`.
+    pub hostless: Vec<String>,
+    /// Where the run sees a via-file binding's file: `/run/pot/secrets` (policy `mounts.run`'s `secrets`).
+    pub secrets_at: String,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -340,7 +351,13 @@ fn gaps(i: &Inputs) -> Vec<String> {
         )),
         Some(_) => {}
     }
-    let caps: BTreeSet<&str> = p.bindings.iter().map(|b| b.capability.as_str()).collect();
+    // credential and mcp are carried out (their values over the named pipe, a via-file one's file in secrets/)
+    let caps: BTreeSet<&str> = p
+        .bindings
+        .iter()
+        .map(|b| b.capability.as_str())
+        .filter(|c| !matches!(*c, "credential" | "mcp"))
+        .collect();
     for c in caps {
         out.push(format!("the {c} binding"));
     }
@@ -373,6 +390,16 @@ fn gaps(i: &Inputs) -> Vec<String> {
             "the variable {}, which bash sets or keeps read-only, as a run's variable",
             e.value
         ));
+    }
+    // a binding's variable never reaches the engine (it goes over the named pipe), but bash declares it (T1)
+    for n in crate::bindings::names(&crate::bindings::creds(p)) {
+        if !crate::bindings::is_name(&n) {
+            out.push(format!("a binding's variable {n:?}, which is not a NAME"));
+        } else if crate::engine::bash_sets(&n) {
+            out.push(format!(
+                "the variable {n}, which bash sets or keeps read-only, as a binding's variable"
+            ));
+        }
     }
     for it in p.items.iter().filter(|it| it.effective && !known_kind(&it.kind)) {
         out.push(format!("an item of kind {} ({})", it.kind, it.class));
@@ -640,12 +667,27 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         .map(|n| n.value.clone())
         .collect();
     let net_tools = i.net.filter(|_| !net.is_empty());
-    let fifo = net_tools.is_some() || p.effective("env").any(|e| e.secret == Some(true));
+    let creds = crate::bindings::creds(p);
+    let fifo = net_tools.is_some() || p.effective("env").any(|e| e.secret == Some(true)) || !creds.is_empty();
     if net_tools.is_some() {
         m.bind(&rd("proxy.sock"), PROXY_SOCK, READ, true);
     }
     if fifo {
         m.bind(&rd("secrets.fifo"), FIFO, READ, true);
+    }
+    // the bindings (bwrap's write_own and prepare): mcp.json for every run, read-only; with a via-file binding, the
+    // run folder's secrets/ (0700, empty: run writes each value there as NAME, 0400, and removes it), read-only
+    files.push(RunFile::File {
+        name: "mcp.json".into(),
+        text: crate::bindings::mcp_json(p),
+        mode: 0o444,
+    });
+    m.bind(&rd("mcp.json"), &format!("{run}/mcp.json"), READ, true);
+    if !crate::bindings::via_file(&creds).is_empty() {
+        files.push(RunFile::PrivateDir {
+            name: "secrets".into(),
+        });
+        m.bind(&rd("secrets"), &format!("{run}/secrets"), READ, true);
     }
     let hidden_txt: String = p
         .effective("hidden")
@@ -773,7 +815,8 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         })
         .collect();
     sources.extend(closure.iter().cloned());
-    let (set, mut pass, defaults) = environment(i, net_tools.is_some());
+    let (set, mut pass, defaults, hostless) =
+        environment(i, net_tools.is_some(), &crate::bindings::names(&creds));
     // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration).
     // S3: with a secret or the network, every variable passed by name goes over the named pipe, and the command
     // starts from an empty environment (env -i) with pot's values and the pipe's: the run's bash and the engine add
@@ -887,6 +930,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         defaults,
         fifo,
         proxy: net_tools.map(|t| proxy_argv(t, &p.context, l, &rd("denials"), &net)),
+        creds,
+        hostless,
+        secrets_at: format!("{run}/secrets"),
     })
 }
 
@@ -961,7 +1007,20 @@ fn is_proxy_var(n: &str) -> bool {
 
 /// The run's environment: what pot sets (bwrap's `run_env`, less what this slice does not place), then the
 /// names passed from the host by name only (`--env NAME`: the engine reads the value, so no value is in argv).
-fn environment(i: &Inputs, net: bool) -> (BTreeMap<String, String>, Vec<String>, BTreeMap<String, String>) {
+/// BOUND, the bindings' variables, come last (bwrap's `run` updates `run_env`'s with `deliver`'s): each is passed by
+/// name, and what the plan would have set is its default; those not passed from the host otherwise are returned as
+/// `hostless`.
+#[allow(clippy::type_complexity)] // the set values, the names passed, their defaults, the hostless ones
+fn environment(
+    i: &Inputs,
+    net: bool,
+    bound: &[String],
+) -> (
+    BTreeMap<String, String>,
+    Vec<String>,
+    BTreeMap<String, String>,
+    Vec<String>,
+) {
     let (p, l) = (i.policy, i.launch);
     let home = l.home.trim_end_matches('/');
     let mut path: Vec<String> = vec![];
@@ -1034,11 +1093,18 @@ fn environment(i: &Inputs, net: bool) -> (BTreeMap<String, String>, Vec<String>,
         }
         pass.retain(|n| !is_proxy_var(n));
     }
+    let mut hostless = vec![];
+    for n in bound {
+        if !pass.contains(n) {
+            pass.push(n.clone());
+            hostless.push(n.clone());
+        }
+    }
     let defaults = pass
         .iter()
         .filter_map(|n| env.remove(n).map(|v| (n.clone(), v)))
         .collect();
-    (env, pass, defaults)
+    (env, pass, defaults, hostless)
 }
 
 #[cfg(test)]
@@ -1430,7 +1496,6 @@ mod tests {
                 "pi-agent",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the credential binding",
                     "the status.relay binding",
                     "dir ~/.pi/agent/extensions (a folder of links)",
                     "dir ~/.pi/agent/git (a folder of links)",
@@ -1452,8 +1517,6 @@ mod tests {
                 "work-bindings",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the credential binding",
-                    "the mcp binding",
                     "the status.relay binding",
                     "file ~/.st/conf.json (mode reassert)",
                 ],
@@ -1815,6 +1878,159 @@ mod tests {
         }
         let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
         assert!(has(&plan, "--env TERM=dumb") && !has(&plan, "--env TERM") && plan.defaults.is_empty());
+    }
+
+    /// A run folder's policy with these bindings (the fixtures' shapes), its env items made plain (no secret) unless
+    /// SECRET.
+    fn bound(name: &str, bindings: &serde_json::Value, secret: bool) -> (Policy, Launch) {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&read(&format!("{PREPARE}/{name}/policy.json"))).unwrap();
+        v["bindings"] = bindings.clone();
+        for it in v["items"].as_array_mut().unwrap() {
+            if it["kind"] == "env" && !secret {
+                it.as_object_mut().unwrap().remove("secret");
+            }
+        }
+        let l = serde_json::from_str(&read(&format!("{PREPARE}/{name}/launch.json"))).unwrap();
+        (policy::parse(&v.to_string()).unwrap(), l)
+    }
+
+    fn cred_binding(sel: &str, env: &str, via: &str, from: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "capability": "credential", "selector": sel, "kit": "root:test",
+            "request": format!("capability credential {sel} env={env}"), "via": via, "env": [env], "from": from,
+            "holds": "the run holds it" })
+    }
+
+    fn mcp_binding(via: &str) -> serde_json::Value {
+        serde_json::json!({ "capability": "mcp", "selector": "s", "kit": "root:test", "request": "capability mcp s",
+            "via": via, "env": ["MCPKEY"], "from": { "file": "/keys/mcp.env" }, "holds": "the run holds it",
+            "server": "s", "url": "https://mcp.example/mcp", "header": "Authorization", "scheme": "Bearer",
+            "config": "/run/pot/mcp.json" })
+    }
+
+    /// credential and mcp: the variables go over the named pipe (never to the engine), read by run on the host; a
+    /// via-file binding's folder `secrets/` is bound read-only at /run/pot/secrets; mcp.json read-only at
+    /// /run/pot/mcp.json, always (bwrap writes it for every run), holding no value.
+    #[test]
+    fn credential_and_mcp_bindings_go_over_the_pipe_with_their_files() {
+        let b = serde_json::json!([
+            cred_binding(
+                "api.example",
+                "TESTTOK",
+                "file",
+                &serde_json::json!({ "file": "/keys/tok" })
+            ),
+            cred_binding(
+                "other",
+                "ENVTOK",
+                "env",
+                &serde_json::json!({ "env": "HOST_TOK" })
+            ),
+            mcp_binding("env"),
+        ]);
+        let (p, l) = bound("access-none", &b, false);
+        for engine in [Engine::Podman, Engine::Docker] {
+            let plan = go(&p, &l, engine, &nothing()).unwrap_or_else(|g| panic!("{g:?}"));
+            assert!(plan.fifo, "a binding takes the named pipe");
+            let ro = |src: &str, dest: &str| match engine {
+                Engine::Podman => format!("--volume {src}:{dest}:ro"),
+                Engine::Docker => format!("--mount type=bind,source={src},target={dest},readonly"),
+            };
+            assert!(
+                has(&plan, &ro("/r/secrets", "/run/pot/secrets")),
+                "{:#?}",
+                lines(&plan)
+            );
+            assert!(has(&plan, &ro("/r/mcp.json", "/run/pot/mcp.json")));
+            assert!(has(&plan, &ro("/r/secrets.fifo", FIFO)));
+            for n in ["TESTTOK", "ENVTOK", "MCPKEY"] {
+                assert_eq!(
+                    plan.piped.iter().filter(|x| *x == n).count(),
+                    1,
+                    "{n}: {:?}",
+                    plan.piped
+                );
+                assert!(plan.hostless.iter().any(|x| x == n));
+                // its name is in the entry's planned names (not secret), never a value or an --env
+                let argv = plan.argv();
+                assert!(
+                    !argv.iter().any(|w| w.starts_with(&format!("{n}="))),
+                    "{n}= in argv"
+                );
+                assert!(
+                    !argv.windows(2).any(|w| w[0] == "--env" && w[1] == n),
+                    "--env {n}"
+                );
+                assert!(!plan.engine_keep.iter().any(|x| x == n));
+            }
+            assert_eq!(plan.creds, crate::bindings::creds(&p));
+            assert!(plan.files.contains(&RunFile::PrivateDir {
+                name: "secrets".into()
+            }));
+            assert!(plan.files.contains(&RunFile::File {
+                name: "mcp.json".into(),
+                text: crate::bindings::mcp_json(&p),
+                mode: 0o444
+            }));
+        }
+        // no via-file binding: no secrets folder; no binding at all: mcp.json all the same, and no pipe for it
+        let (p, l) = bound("access-none", &serde_json::json!([mcp_binding("env")]), false);
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(!lines(&plan).iter().any(|x| x.contains("/run/pot/secrets:")));
+        let (p, l) = bound("access-none", &serde_json::json!([]), false);
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(!plan.fifo && plan.creds.is_empty());
+        assert!(has(&plan, "--volume /r/mcp.json:/run/pot/mcp.json:ro"));
+    }
+
+    /// As bwrap's `run` (`env.update(deliver(…))` after `run_env`): a binding's variable beats pot's values, env.set,
+    /// the items and the proxy's variables. Named like one of them, it leaves the plan's values and goes over the pipe;
+    /// what the plan would have given is its default, for a run where the binding has no value.
+    #[test]
+    fn a_bindings_variable_beats_every_other_value() {
+        let b = serde_json::json!([
+            cred_binding("tz", "TZ", "env", &serde_json::json!({})),
+            cred_binding("tok", "NOTES_TOKEN", "file", &serde_json::json!({})),
+            cred_binding("px", "HTTPS_PROXY", "env", &serde_json::json!({})),
+        ]);
+        let (p, l) = bound("network", &b, false);
+        let plan = go_net(&p, &l, Engine::Podman, &nothing()).unwrap_or_else(|g| panic!("{g:?}"));
+        let last_hop: Vec<&String> = plan.entry.iter().skip_while(|w| *w != "--").collect();
+        for n in ["TZ", "HTTPS_PROXY", "NOTES_TOKEN"] {
+            assert!(
+                !last_hop.iter().any(|w| w.starts_with(&format!("{n}="))),
+                "{n} set by the last hop"
+            );
+            assert_eq!(plan.piped.iter().filter(|x| *x == n).count(), 1, "{n}");
+        }
+        assert_eq!(
+            plan.defaults.get("TZ").map(String::as_str),
+            Some("America/Chicago")
+        );
+        assert_eq!(
+            plan.defaults.get("HTTPS_PROXY").map(String::as_str),
+            Some(PROXY_URL)
+        );
+        // NOTES_TOKEN is an env item too: the host's value is its fallback, so it is not hostless
+        assert!(plan.hostless.iter().any(|x| x == "TZ") && !plan.hostless.iter().any(|x| x == "NOTES_TOKEN"));
+    }
+
+    /// A binding's variable must be a name bash can hand over (T1), as an env item's.
+    #[test]
+    fn a_bindings_variable_bash_sets_is_refused() {
+        for (name, refused) in [
+            ("SHLVL", true),
+            ("BASH_ENV", true),
+            ("__pot_x", true),
+            ("RANDOM", false),
+        ] {
+            let b = serde_json::json!([cred_binding("x", name, "env", &serde_json::json!({}))]);
+            let (p, l) = bound("access-none", &b, false);
+            let r = go(&p, &l, Engine::Podman, &nothing());
+            let want =
+                format!("the variable {name}, which bash sets or keeps read-only, as a binding's variable");
+            assert_eq!(r.err().is_some_and(|g| g.contains(&want)), refused, "{name}");
+        }
     }
 
     /// T1: a variable bash can't hand over faithfully is refused for every env item.
