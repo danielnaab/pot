@@ -70,6 +70,13 @@ fn world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, Pa
         .filter(|o| o.status.success())
         .map(|o| o.stdout)
         .unwrap_or_default();
+    // without nix-store (the flake's sandbox): the store paths of sh and env, so their programs are bound
+    let closure = if closure.is_empty() {
+        let top_of = |p: &Path| p.components().take(4).collect::<PathBuf>().display().to_string();
+        format!("{}\n{}\n", top_of(&sh), top_of(&env)).into_bytes()
+    } else {
+        closure
+    };
     fs::write(store.join("base.txt"), &closure).unwrap();
     let s = |f: &str| store.join(f).display().to_string();
     let config = serde_json::json!({ "engine": engine, engine: program, "sh": sh, "shell": sh, "env": env,
@@ -432,8 +439,19 @@ fn cleanup_never_follows_a_link() {
     for n in ["container.id", "storage.conf", "passwd"] {
         symlink(victim.join("sub/keep"), run.join(n)).unwrap();
     }
+    // S2: a store that is not a real folder is named, and kept with the engine's state; the rest goes
     let out = Command::new(BIN).arg("cleanup").arg(&run).output().unwrap();
-    ok(&out);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    let r = fs::canonicalize(&run).unwrap().display().to_string();
+    assert!(
+        err.contains(&format!("{r}/enginestore (not a folder of the run's)")),
+        "{err}"
+    );
+    assert_eq!(names(&run), set(&["enginestore", "engineroot", "enginetmp"]));
+    assert_eq!(fs::read_to_string(victim.join("sub/keep")).unwrap(), "keep");
+    fs::remove_file(run.join("enginestore")).unwrap();
+    ok(&Command::new(BIN).arg("cleanup").arg(&run).output().unwrap());
     assert_eq!(names(&run), BTreeSet::new());
     assert_eq!(fs::read_to_string(victim.join("sub/keep")).unwrap(), "keep");
 }
@@ -553,6 +571,14 @@ fn run_refuses_an_engine_path_planted_after_prepare() {
         ("enginehome", "link"),
         ("rootfs", "link"),
         ("container.id", "file"),
+        // S4: every file the plan binds from the run folder
+        ("denials", "filelink"),
+        ("policy.json", "filelink"),
+        ("passwd", "filelink"),
+        ("hidden.txt", "filelink"),
+        ("emptydir", "link"),
+        // the status run records: a folder with something in it
+        ("status", "fulldir"),
     ] {
         let (top, run) = world(
             &format!("planted-{name}"),
@@ -571,10 +597,22 @@ fn run_refuses_an_engine_path_planted_after_prepare() {
         if p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
             fs::remove_dir_all(&p).unwrap();
         }
-        if plant == "link" {
-            symlink(&elsewhere, &p).unwrap();
-        } else {
-            fs::write(&p, "0000").unwrap();
+        match plant {
+            "link" => symlink(&elsewhere, &p).unwrap(),
+            "filelink" => {
+                let target = top.join("elsewhere-file");
+                if p.symlink_metadata().is_ok() {
+                    fs::copy(&p, &target).unwrap();
+                    fs::remove_file(&p).unwrap();
+                } else {
+                    fs::write(&target, "").unwrap();
+                }
+                symlink(&target, &p).unwrap();
+            }
+            "fulldir" => {
+                fs::create_dir_all(p.join("x")).unwrap();
+            }
+            _ => fs::write(&p, "0000").unwrap(),
         }
         let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
         assert_eq!(out.status.code(), Some(1), "{name}");
@@ -817,4 +855,298 @@ fn podman_cleanup_removes_a_mode_000_folder_of_another_id_or_names_it() {
     set_engine_program(&top, "podman", Path::new(&program));
     ok(&verb(&top, &run, "cleanup").output().unwrap());
     assert_eq!(names(&run), set(LEFT));
+}
+
+/// The run's `podman` as the tests run it, for the engine-free tests.
+fn secret_off(run: &Path) {
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for it in p["items"].as_array_mut().unwrap() {
+        if it["kind"] == "env" {
+            it["secret"] = false.into();
+        }
+    }
+    fs::write(&path, p.to_string()).unwrap();
+}
+
+/// S1: the secrets' pipe is the fd the script reads, whatever fds the caller holds; it is closed before the command,
+/// and no fd but 0, 1 and 2 is open in the command.
+#[test]
+fn podman_secrets_arrive_whatever_fds_the_caller_holds() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let script = r#"echo "token=$NOTES_TOKEN"; for i in 3 4 5 6 7 8 9 10 11 12; do [ -e /proc/$$/fd/$i ] && echo "open=$i"; done; true"#;
+    let (top, run) = world("podman-fds", "podman", &program, &["/bin/sh", "-c", script]);
+    prepare(&top, &run);
+    // the caller holds fds 3 and 4 (a file each)
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(r#"exec 3</etc/hostname 4</etc/hostname; exec "$@""#)
+        .arg("sh")
+        .arg(BIN)
+        .arg("--config")
+        .arg(top.join("config.json"))
+        .arg("run")
+        .arg(&run)
+        .env("NOTES_TOKEN", "s1-value")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "token=s1-value\n");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// S1: the script execs nothing unless fd 3 gives the complete record stream, ended by its sentinel.
+#[test]
+fn the_secrets_script_refuses_an_incomplete_stream() {
+    if !Path::new("/usr/bin/env").exists() {
+        eprintln!("no /usr/bin/env here: the script is not run");
+        return;
+    }
+    let (top, run) = world(
+        "secrets-script",
+        "podman",
+        "podman",
+        &["/bin/sh", "-c", "echo RAN"],
+    );
+    prepare(&top, &run);
+    let argv = fs::read(run.join("container.argv")).unwrap();
+    let words: Vec<String> = argv
+        .strip_suffix(&[0])
+        .unwrap()
+        .split(|b| *b == 0)
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    let at = words.iter().position(|w| w == "--noprofile").unwrap() - 1;
+    let entry = &words[at..];
+    for (name, stream, ran) in [
+        ("complete", &b"NOTES_TOKEN=v\0.\0"[..], true),
+        ("no sentinel", &b"NOTES_TOKEN=v\0"[..], false),
+        ("short", &b"NOTES_TOKEN=v"[..], false),
+        ("empty", &b""[..], false),
+        ("not a record", &b"NOTES_TOKEN\0.\0"[..], false),
+    ] {
+        let f = top.join("stream");
+        fs::write(&f, stream).unwrap();
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(r#"exec 3<"$0"; exec "$@""#)
+            .arg(&f)
+            .args(entry)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            said.contains("RAN"),
+            ran,
+            "{name}: {said} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.status.success(), ran, "{name}");
+    }
+}
+
+/// S3: the command's environment is exactly the planned one: pot's variables, env.set, the items passed by name and
+/// the secrets, and nothing the engine or the run's bash adds; with secrets and without.
+#[test]
+fn podman_the_commands_environment_is_the_plan() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let envp = coreutils("env");
+    for secret in [true, false] {
+        let (top, run) = world(
+            &format!("podman-env-{secret}"),
+            "podman",
+            &program,
+            &[&envp, "-0"],
+        );
+        if !secret {
+            secret_off(&run);
+        }
+        prepare(&top, &run);
+        let out = verb(&top, &run, "run")
+            .env("NOTES_TOKEN", "s3-value")
+            .env("TERM", "xterm")
+            .env_remove("COLORTERM")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        ok(&out);
+        let got: BTreeSet<String> = out
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|w| !w.is_empty())
+            .map(|w| String::from_utf8_lossy(w).into_owned())
+            .collect();
+        // the plan: --env NAME=VALUE as is, --env NAME with the caller's value when set, the secrets
+        let argv = fs::read(run.join("container.argv")).unwrap();
+        let words: Vec<String> = argv
+            .strip_suffix(&[0])
+            .unwrap()
+            .split(|b| *b == 0)
+            .map(|w| String::from_utf8_lossy(w).into_owned())
+            .collect();
+        let caller = |n: &str| match n {
+            "NOTES_TOKEN" => Some("s3-value".to_string()),
+            "TERM" => Some("xterm".to_string()),
+            _ => None,
+        };
+        let mut want = BTreeSet::new();
+        for w in words.windows(2).filter(|w| w[0] == "--env") {
+            if w[1].contains('=') {
+                want.insert(w[1].clone());
+            } else if let Some(v) = caller(&w[1]) {
+                want.insert(format!("{}={v}", w[1]));
+            }
+        }
+        // and, with a secret, what goes over the pipe: the secret and every variable passed by name
+        let cenv: serde_json::Value =
+            serde_json::from_slice(&fs::read(run.join("container.env")).unwrap()).unwrap();
+        for n in cenv["piped"].as_array().unwrap() {
+            if let Some(v) = caller(n.as_str().unwrap()) {
+                want.insert(format!("{}={v}", n.as_str().unwrap()));
+            }
+        }
+        assert_eq!(cenv["piped"].as_array().unwrap().is_empty(), !secret);
+        assert_eq!(got, want, "secret {secret}");
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+    }
+}
+
+/// S3: a secret named like one of bash's own variables arrives with its value, not bash's.
+#[test]
+fn podman_a_secret_named_like_a_bash_variable_keeps_its_value() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let envp = coreutils("env");
+    for name in ["RANDOM", "SECONDS", "UID", "SHELLOPTS", "SHLVL", "BASH_ARGV0"] {
+        let (top, run) = world("podman-bashvar", "podman", &program, &[&envp, "-0"]);
+        let path = run.join("policy.json");
+        let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for it in p["items"].as_array_mut().unwrap() {
+            if it["kind"] == "env" {
+                it["value"] = name.into();
+            }
+        }
+        fs::write(&path, p.to_string()).unwrap();
+        prepare(&top, &run);
+        let out = verb(&top, &run, "run")
+            .env(name, "s3-mine")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        ok(&out);
+        let want = format!("{name}=s3-mine");
+        assert!(
+            out.stdout.split(|b| *b == 0).any(|w| w == want.as_bytes()),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stdout).replace('\0', " ")
+        );
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+    }
+}
+
+/// S2: a store that is not a real folder is reported, and engineroot and enginetmp are kept while a process of the
+/// run lives; a cleanup once the store is back removes everything.
+#[test]
+fn podman_cleanup_keeps_the_state_of_a_live_run_with_a_linked_store() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let sleep = coreutils("sleep");
+    let (top, run) = world("podman-linked-store", "podman", &program, &[&sleep, "60"]);
+    prepare(&top, &run);
+    let mut child = verb(&top, &run, "run").stdin(Stdio::null()).spawn().unwrap();
+    wait_for("the container", || {
+        !String::from_utf8_lossy(&podman(&program, &run, &["ps", "--quiet"]).stdout)
+            .trim()
+            .is_empty()
+    });
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let real = top.join("store-moved");
+    fs::rename(run.join("enginestore"), &real).unwrap();
+    symlink(&real, run.join("enginestore")).unwrap();
+    let out = verb(&top, &run, "cleanup").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    let r = fs::canonicalize(&run).unwrap().display().to_string();
+    assert!(err.contains(&format!("{r}/enginestore")), "{err}");
+    assert!(
+        run.join("engineroot").is_dir() && run.join("enginetmp").is_dir(),
+        "{err}"
+    );
+    assert!(
+        !engine_processes(&run).is_empty(),
+        "the container should still run"
+    );
+    fs::remove_file(run.join("enginestore")).unwrap();
+    fs::rename(&real, run.join("enginestore")).unwrap();
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert_eq!(names(&run), set(LEFT));
+    assert_eq!(engine_processes(&run), Vec::<String>::new());
+}
+
+/// S5: with secrets, prepare refuses a shell that is not a real file under a path the plan binds.
+#[test]
+fn prepare_refuses_a_shell_the_run_cannot_see() {
+    let (top, run) = world("shell-unbound", "podman", "podman", &["/bin/sh", "-c", "true"]);
+    let outside = top.join("bash");
+    fs::copy(which("bash"), &outside).unwrap();
+    for shell in [outside.clone(), top.join("no-such-bash")] {
+        let path = top.join("config.json");
+        let mut c: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        c["shell"] = shell.display().to_string().into();
+        fs::write(&path, c.to_string()).unwrap();
+        let out = verb(&top, &run, "prepare").output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{}", shell.display());
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(&format!("the config's shell {}", shell.display())),
+            "{err}"
+        );
+    }
+    // without secrets the shell is not needed in the run
+    secret_off(&run);
+    prepare(&top, &run);
+}
+
+/// S6: a SIGTERM before the engine starts (here during docker's image check) ends run as a stopped run (143), with its
+/// status recorded and no engine command started.
+#[test]
+fn a_sigterm_before_the_engine_starts_records_the_status() {
+    let (top, run) = world("term-early", "docker", "docker", &["/bin/sh", "-c", "true"]);
+    let (fake, log) = (top.join("slow-docker"), top.join("slow-docker-ran"));
+    let empty = r#"{"RootFS":{"Layers":["sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"]},"Config":{}}"#;
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho \"$1\" >> {}\ncase \"$1\" in image) sleep 2; echo '{empty}';; esac\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&fake).status().unwrap();
+    set_engine_program(&top, "docker", &fake);
+    prepare(&top, &run);
+    let mut child = verb(&top, &run, "run").stdin(Stdio::null()).spawn().unwrap();
+    wait_for("the image check", || log.exists());
+    ok(&Command::new("kill")
+        .arg("-TERM")
+        .arg(child.id().to_string())
+        .output()
+        .unwrap());
+    assert_eq!(child.wait().unwrap().code(), Some(143));
+    assert_eq!(fs::read_to_string(run.join("status")).unwrap(), "143");
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(!calls.lines().any(|l| l == "run"), "the engine started: {calls}");
 }

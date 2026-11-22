@@ -27,6 +27,16 @@ v2.14.0's `sandbox` on).
   `prepare` left them (links). `cleanup` never hands the engine a linked path and keeps the store when the container
   could not be removed. docker's image must have no configuration (`--entrypoint ""`, `rm --volumes`). The wait is
   for this run's podman and conmon processes only. `podman unshare` removes whatever the user can't.
+- **The container backend's re-audit (S1-S7):**
+  - The secrets' pipe is read at its own fd, whatever fds the caller holds, and is closed before the command.
+  - The stream ends with a sentinel, and an incomplete one runs nothing.
+  - With a secret, the command starts from `env -i`, with exactly pot's planned environment.
+  - Without one, `env -u HOSTNAME`.
+  - `run` checks every file it binds, and an unexpected `status`, before the engine starts.
+  - `cleanup` keeps the engine's state while a process of the run lives or the store is not a real folder.
+  - `prepare` refuses, with a secret, a shell the run can't see.
+  - A SIGTERM before the engine starts records status 143.
+  - The engine processes are matched by the configured program's names.
 
 ## v0.2.0 - 2026-11-21
 

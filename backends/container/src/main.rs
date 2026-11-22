@@ -301,9 +301,28 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
         argv.push(0);
     }
     write_new(&rundir.join("container.argv"), &argv, 0o600)?;
+    // S4: every file and folder of the run's that the plan binds, by kind, for run to check again
+    let abs = fs::canonicalize(rundir).map_err(at(rundir))?;
+    let prefix = format!("{}/", abs.display());
+    let mut own = std::collections::BTreeMap::new();
+    for src in p.sources.iter().filter(|s| s.starts_with(&prefix)) {
+        let path = Path::new(src);
+        let kind = match path.symlink_metadata() {
+            Ok(m) if m.is_dir() => "dir",
+            Ok(m) if m.file_type().is_file() => "file",
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "a file the run binds is a link, or missing",
+                ))
+                .map_err(at(path));
+            }
+        };
+        own.insert(src[prefix.len()..].to_string(), kind);
+    }
     // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
-    let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "secrets": p.secrets });
+    let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -330,6 +349,13 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
             &p.context,
             format!("a bind's source does not exist: {}", missing.join(", ")),
         ));
+    }
+    if let Some(gap) = render::shell_gap(
+        &plan,
+        &cfg.paths().map_err(|m| Refusal::new(&p.context, m))?.shell,
+        &host::RealHost,
+    ) {
+        return Err(Refusal::new(&p.context, gap));
     }
     if host::euid() != Some(l.uid) {
         return Err(Refusal::new(
@@ -368,7 +394,7 @@ fn is_real_dir(p: &Path) -> bool {
 const ENGINE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The host's processes, but this one, whose arguments name the run folder's engine state.
-fn engine_processes(rundir: &str) -> Vec<String> {
+fn engine_processes(rundir: &str, names: &[String]) -> Vec<String> {
     let me = std::process::id().to_string();
     let Ok(entries) = fs::read_dir("/proc") else {
         return vec![];
@@ -378,7 +404,8 @@ fn engine_processes(rundir: &str) -> Vec<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|pid| pid.bytes().all(|b| b.is_ascii_digit()) && *pid != me)
         .filter(|pid| {
-            fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| lifecycle::names_engine_state(&c, rundir))
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|c| lifecycle::names_engine_state(&c, rundir, names))
         })
         .collect()
 }
@@ -404,9 +431,10 @@ fn remove_container(e: Engine, program: &str, rundir: &str, set: &[(String, Stri
     if e == Engine::Docker {
         return Ok(());
     }
+    let names = lifecycle::engine_names(program);
     let start = std::time::Instant::now();
     loop {
-        let left = engine_processes(rundir);
+        let left = engine_processes(rundir, &names);
         if left.is_empty() {
             return Ok(());
         }
@@ -478,12 +506,18 @@ struct EngineEnv {
     keep: Vec<String>,
     set: std::collections::BTreeMap<String, String>,
     #[serde(default)]
-    secrets: Vec<String>,
+    piped: Vec<String>,
+    #[serde(default)]
+    own: std::collections::BTreeMap<String, String>,
 }
 
 /// R2: the run folder's engine paths as `prepare` left them, checked just before the engine starts: the engine
 /// writes through a link (its runroot, temporary files, cidfile), and binds the run's files.
-fn engine_paths(abs: &Path, e: Engine) -> Result<(), String> {
+fn engine_paths(
+    abs: &Path,
+    e: Engine,
+    own: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
     let (dirs, maybe_dirs, maybe_files): (&[&str], &[&str], &[&str]) = match e {
         Engine::Podman => (
             &["enginestore", "enginehome", "rootfs"],
@@ -522,6 +556,26 @@ fn engine_paths(abs: &Path, e: Engine) -> Result<(), String> {
             Err(_) => {}
             _ => bad.push(format!("{} (not a file of the run's)", abs.join(n).display())),
         }
+    }
+    // S4: what the plan binds from the run folder, as prepare found it
+    for (n, kind) in own {
+        let ok = abs.join(n).symlink_metadata().is_ok_and(|m| match kind.as_str() {
+            "dir" => m.is_dir(),
+            _ => m.file_type().is_file(),
+        });
+        if !ok {
+            bad.push(format!("{} (not the {kind} prepare left)", abs.join(n).display()));
+        }
+    }
+    // the status run records: a file, or nothing; an empty folder in its place is removed
+    let status = abs.join("status");
+    match status.symlink_metadata() {
+        Ok(m) if m.is_dir() => {
+            if fs::remove_dir(&status).is_err() {
+                bad.push(format!("{} (a folder, not empty)", status.display()));
+            }
+        }
+        _ => {}
     }
     if abs.join("container.id").symlink_metadata().is_ok() {
         bad.push(format!(
@@ -618,6 +672,17 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     use std::sync::atomic::AtomicBool;
     let ctx = context_of(rundir);
     let refuse = |m: String| Refusal::new(&ctx, m);
+    // S6: the handlers first, so a SIGTERM before the engine starts ends the run as a stopped one, with its status
+    let stop = Arc::new(AtomicBool::new(false));
+    let int = Arc::new(AtomicBool::new(false));
+    for (sig, flag) in [
+        (signal_hook::consts::SIGTERM, &stop),
+        (signal_hook::consts::SIGHUP, &stop),
+        (signal_hook::consts::SIGINT, &int),
+    ] {
+        signal_hook::flag::register(sig, Arc::clone(flag))
+            .map_err(|err| refuse(format!("can't handle signal {sig}: {err}")))?;
+    }
     let abs = fs::canonicalize(rundir)
         .map_err(|e| refuse(format!("the run directory {}: {e}", rundir.display())))?;
     let r = abs.to_string_lossy().into_owned();
@@ -639,7 +704,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
             "container.argv was not prepared for {program}: run prepare again"
         )));
     }
-    if e == Engine::Docker && !env.secrets.is_empty() {
+    if e == Engine::Docker && !env.piped.is_empty() {
         return Err(refuse(
             "docker can't be handed a secret variable: run prepare again".into(),
         ));
@@ -654,8 +719,13 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         }
         docker_image(&program, &set, &image).map_err(refuse)?;
     }
-    engine_paths(&abs, e).map_err(refuse)?;
-    let pipe = if env.secrets.is_empty() {
+    engine_paths(&abs, e, &env.own).map_err(refuse)?;
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        write_new(&abs.join("status"), b"143", 0o644)
+            .map_err(|err| refuse(format!("can't record the status: {err}")))?;
+        return Ok(143);
+    }
+    let pipe = if env.piped.is_empty() {
         None
     } else {
         Some(secrets_pipe().map_err(|err| refuse(format!("can't make the secrets' pipe: {err}")))?)
@@ -666,23 +736,13 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         pipe.as_ref().map(|(rd, _)| rd.as_raw_fd()),
     );
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let int = Arc::new(AtomicBool::new(false));
-    for (sig, flag) in [
-        (signal_hook::consts::SIGTERM, &stop),
-        (signal_hook::consts::SIGHUP, &stop),
-        (signal_hook::consts::SIGINT, &int),
-    ] {
-        signal_hook::flag::register(sig, Arc::clone(flag))
-            .map_err(|err| refuse(format!("can't handle signal {sig}: {err}")))?;
-    }
     let mut child = engine::command(&argv[0], &env.keep, &set)
         .args(&argv[1..])
         .spawn()
         .map_err(|err| refuse(format!("can't run {program}: {err}")))?;
     if let Some((rd, wr)) = pipe {
         drop(rd);
-        let data = lifecycle::secret_records(&env.secrets, |n| std::env::var_os(n));
+        let data = lifecycle::secret_records(&env.piped, |n| std::env::var_os(n));
         // a thread: the container reads the pipe once it starts; a failed write is the run's own failure to start
         std::thread::spawn(move || {
             let mut f = fs::File::from(wr);
@@ -765,6 +825,23 @@ fn unshare_rm(program: &str, paths: &[PathBuf]) -> Result<(), String> {
     result.and(removed)
 }
 
+/// The engine environment cleanup gives podman: the run's configuration files when they are its own regular files,
+/// else none, and the run's engine home.
+fn podman_cleanup_set(abs: &Path, home: &Path) -> Vec<(String, String)> {
+    let own_file = |n: &str| {
+        let p = abs.join(n);
+        p.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_file())
+            .then(|| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/dev/null".into())
+    };
+    vec![
+        ("CONTAINERS_CONF".to_string(), own_file("containers.conf")),
+        ("CONTAINERS_STORAGE_CONF".to_string(), own_file("storage.conf")),
+        ("HOME".to_string(), home.to_string_lossy().into_owned()),
+    ]
+}
+
 /// cleanup's first part: the run's container, removed through the engine, then the engine's state (store, runroot,
 /// temporary files). The engine is never handed a linked path (R2); when the container could not be removed, or its
 /// processes outlive the wait, the engine's state is kept and named, never deleted under a live container. Returns
@@ -779,12 +856,6 @@ fn cleanup_engine(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
             Engine::Podman => c.podman.clone().unwrap_or_else(|| "podman".into()),
             Engine::Docker => c.docker.clone().unwrap_or_else(|| "docker".into()),
         })
-    };
-    let own_file = |n: &str| {
-        rd(n)
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_file())
-            .then(|| rd(n).to_string_lossy().into_owned())
     };
     let store = rd("enginestore");
     let mut keep = false;
@@ -802,17 +873,7 @@ fn cleanup_engine(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
             .map(|p| p.display().to_string())
             .collect();
         let removed = if linked.is_empty() {
-            let set = vec![
-                (
-                    "CONTAINERS_CONF".to_string(),
-                    own_file("containers.conf").unwrap_or_else(|| "/dev/null".into()),
-                ),
-                (
-                    "CONTAINERS_STORAGE_CONF".to_string(),
-                    own_file("storage.conf").unwrap_or_else(|| "/dev/null".into()),
-                ),
-                ("HOME".to_string(), home.to_string_lossy().into_owned()),
-            ];
+            let set = podman_cleanup_set(abs, &home);
             program(Engine::Podman).and_then(|p| remove_container(Engine::Podman, &p, &r, &set))
         } else {
             Err(format!(
@@ -824,6 +885,25 @@ fn cleanup_engine(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
             keep = true;
             failed.push(format!("{}, kept with its container: {m}", store.display()));
         }
+    }
+    // S2: a store that is not a real folder is named and kept, and so is the rest of the engine's state
+    if store.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+        keep = true;
+        failed.push(format!(
+            "{} (not a folder of the run's), kept with the engine's state: its container is not removed",
+            store.display()
+        ));
+    }
+    // S2: nothing of the engine's state goes while a process of this run's engine lives, whatever the store is
+    let names = lifecycle::engine_names(&program(Engine::Podman).unwrap_or_else(|_| "podman".into()));
+    let left = engine_processes(&r, &names);
+    if !keep && !left.is_empty() {
+        keep = true;
+        failed.push(format!(
+            "{}, kept with the engine's state: the engine's processes for the run still run (pids {})",
+            store.display(),
+            left.join(" ")
+        ));
     }
     // docker's, by the run's name
     if is_real_dir(&rd("dockercfg")) {
@@ -841,7 +921,7 @@ fn cleanup_engine(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
     let state: Vec<PathBuf> = ["enginestore", "engineroot", "enginetmp"]
         .iter()
         .map(|n| rd(n))
-        .filter(|p| !keep || !is_real_dir(p))
+        .filter(|_| !keep)
         .collect();
     let mut theirs = vec![];
     for p in &state {

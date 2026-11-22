@@ -23,6 +23,8 @@ fn world(name: &str) -> (PathBuf, PathBuf) {
     for f in ["sh", "bash", "env", "ca.crt", "base.txt"] {
         fs::write(store.join(f), "").unwrap();
     }
+    // the store folder is the base closure, so the shell (for the secret variable) is a file the run binds
+    fs::write(store.join("base.txt"), format!("{}\n", store.display())).unwrap();
     fs::create_dir_all(store.join("terminfo")).unwrap();
     fs::create_dir_all(store.join("zoneinfo")).unwrap();
     let s = |f: &str| store.join(f).display().to_string();

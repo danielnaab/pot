@@ -43,10 +43,39 @@ pub fn upholds(engine: Engine, g: &str) -> bool {
 
 pub const DOCKER_IMAGE: &str = "localhost/pot-empty:1";
 
-/// The run's bash, before the command: it reads the secret variables from fd 3 (`NAME=value` records, each ended by
-/// a NUL, from `run`'s pipe), closes it, sets them and execs the command (R3).
-pub const SECRETS_SCRIPT: &str =
-    r#"while IFS= read -r -d '' kv <&3; do export "$kv"; done; exec 3<&-; exec "$@""#;
+/// The run's bash, before the command (R3, S1, S3): it reads `NAME=value` records, each ended by a NUL, from the
+/// pipe's fd (its first argument; `run` gives the number), up to the sentinel record `.`, and closes the fd. Unless
+/// the stream was whole it refuses, and nothing runs. Then it execs the next N words (`env -i -C CWD -- pot's
+/// values`), the records and the command: bash only reads, so its own variables never reach the command.
+pub const SECRETS_SCRIPT: &str = concat!(
+    r#"fd=$1 n=$2; shift 2; pre=("${@:1:$n}"); shift "$n"; recs=(); whole=; "#,
+    r#"while IFS= read -r -d '' kv <&"$fd"; do if [ "$kv" = . ]; then whole=1; break; fi; "#,
+    r#"case $kv in [A-Za-z_]*=*) recs+=("$kv") ;; *) break ;; esac; done; exec {fd}<&-; "#,
+    r#"[ "$whole" = 1 ] || { echo "pot: the run's variables did not arrive whole: nothing runs" >&2; exit 125; }; "#,
+    r#"exec "${pre[@]}" "${recs[@]}" "$@""#
+);
+
+/// What the engines add to the command's environment that pot does not plan: `env -u` removes it (S3).
+pub const ENGINE_ADDS: &[&str] = &["HOSTNAME"];
+
+/// S5: with secrets, the config's shell reads them in the run, so it must be a real file (not a link) under a path
+/// the plan binds; otherwise the gap.
+pub fn shell_gap(plan: &Plan, shell: &str, host: &dyn Host) -> Option<String> {
+    if plan.piped.is_empty() {
+        return None;
+    }
+    let real =
+        host.realpath(shell).is_some_and(|r| r == shell) && !host.is_real_dir(shell) && host.lexists(shell);
+    let bound = plan
+        .sources
+        .iter()
+        .any(|s| shell == s || shell.starts_with(&format!("{}/", s.trim_end_matches('/'))));
+    (!(real && bound)).then(|| {
+        format!(
+            "the config's shell {shell} (to hand the secret variables over, it must be a real file under a path the run binds)"
+        )
+    })
+}
 
 /// podman's global options for a run: its store, its runtime state (runroot: the conmon sockets, the mount
 /// table) and its temporary files (exit codes), all in the run folder. `cleanup` names the same.
@@ -122,8 +151,9 @@ pub struct Plan {
     /// The engine's environment (audit F2): only these of the caller's variables, then `engine_set`.
     pub engine_keep: Vec<String>,
     pub engine_set: Vec<(String, String)>,
-    /// The secret variables `run` hands over its pipe (podman only), by name.
-    pub secrets: Vec<String>,
+    /// The variables `run` hands over its pipe (podman only), by name: the secret ones, and with them every one
+    /// passed by name.
+    pub piped: Vec<String>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -651,12 +681,13 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         .filter(|e| e.secret == Some(true))
         .map(|e| e.value.as_str())
         .collect();
-    let secrets: Vec<String> = pass
-        .iter()
-        .filter(|n| secret.contains(n.as_str()))
-        .cloned()
-        .collect();
-    pass.retain(|n| !secret.contains(n.as_str()));
+    // S3: with secrets, every variable passed by name goes over the pipe too, and the command starts from an empty
+    // environment (env -i) with pot's values and the pipe's: the run's bash and the engine add nothing to it
+    let piped: Vec<String> = if pass.iter().any(|n| secret.contains(n.as_str())) {
+        std::mem::take(&mut pass)
+    } else {
+        vec![]
+    };
     for (k, v) in &set {
         opts.push(o(&["--env", &format!("{k}={v}")]));
     }
@@ -713,20 +744,41 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     };
     // podman can't take -w with --rootfs (the spike): coreutils env changes directory, then execs the command
     let mut entry = vec![];
-    if !secrets.is_empty() {
+    if piped.is_empty() {
+        // what the engine adds to the command's environment, unless the plan sets it (S3)
+        entry.extend(["/usr/bin/env".to_string(), "-C".into(), cwd]);
+        for n in ENGINE_ADDS
+            .iter()
+            .filter(|n| !set.contains_key(**n) && !pass.iter().any(|x| x == *n))
+        {
+            entry.extend(["-u".to_string(), (*n).to_string()]);
+        }
+        entry.push("--".into());
+    } else {
+        // the script reads the pipe (fd 3, which run renumbers), then execs env -i with pot's values and the pipe's
+        let mut pre = vec![
+            "/usr/bin/env".to_string(),
+            "-i".into(),
+            "-C".into(),
+            cwd,
+            "--".into(),
+        ];
+        pre.extend(set.iter().map(|(k, v)| format!("{k}={v}")));
         entry.extend(
             [
-                &i.paths.shell,
+                i.paths.shell.as_str(),
                 "--noprofile",
                 "--norc",
                 "-c",
                 SECRETS_SCRIPT,
                 "pot-secrets",
+                "3",
             ]
             .map(String::from),
         );
+        entry.push(pre.len().to_string());
+        entry.extend(pre);
     }
-    entry.extend(["/usr/bin/env".to_string(), "-C".into(), cwd, "--".into()]);
     entry.extend(l.argv.iter().cloned());
     Ok(Plan {
         program: i.program.to_string(),
@@ -738,7 +790,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         sources,
         engine_keep,
         engine_set,
-        secrets,
+        piped,
     })
 }
 
@@ -980,7 +1032,11 @@ mod tests {
         assert!(!has(&plan, "--env NOTES_TOKEN"));
         assert!(!plan.argv().iter().any(|a| a.starts_with("NOTES_TOKEN=")));
         assert!(!plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
-        assert_eq!(plan.secrets, ["NOTES_TOKEN"]);
+        // S3: with a secret, every variable passed by name goes over the pipe, and the command starts from env -i
+        // with pot's values as operands: neither the run's bash nor the engine adds to its environment
+        assert_eq!(plan.piped, ["TERM", "COLORTERM", "NOTES_TOKEN"]);
+        assert!(!has(&plan, "--env TERM"));
+        let n: usize = plan.entry[7].parse().unwrap();
         assert_eq!(
             plan.entry[..7],
             [
@@ -990,22 +1046,23 @@ mod tests {
                 "-c",
                 SECRETS_SCRIPT,
                 "pot-secrets",
-                "/usr/bin/env"
+                "3"
             ]
         );
+        let pre = &plan.entry[8..8 + n];
+        assert_eq!(pre[..5], ["/usr/bin/env", "-i", "-C", "/home/u/src/notes", "--"]);
+        assert!(pre.contains(&"NOTES_CACHE=/home/u/.cache/notes".to_string()));
+        assert!(pre.contains(&"PS1=(pot:review) \\w \\$ ".to_string()), "{pre:?}");
+        assert_eq!(plan.entry[8 + n..], ["notes", "check", "--all"]);
         assert!(has(&plan, "--env NOTES_CACHE=/home/u/.cache/notes"));
         assert_eq!(plan.root, ["--rootfs", "/r/rootfs:O"]);
+        // without a secret: env -C, and what the engine adds (HOSTNAME) removed
+        let (p2, l2) = run_dir("access-none");
+        let plan2 = go(&p2, &l2, Engine::Podman, &nothing()).unwrap();
+        assert!(plan2.piped.is_empty() && has(&plan2, "--env TERM"));
         assert_eq!(
-            plan.entry[6..],
-            [
-                "/usr/bin/env",
-                "-C",
-                "/home/u/src/notes",
-                "--",
-                "notes",
-                "check",
-                "--all"
-            ]
+            plan2.entry[..6],
+            ["/usr/bin/env", "-C", "/home/u", "-u", "HOSTNAME", "--"]
         );
         assert_eq!(plan.host_dirs, ["/home/u/.local/state/pot/state/9f2e/notes"]);
         // closure-store: each store path of the closure and the base closure, read-only, and never the whole store
@@ -1483,6 +1540,30 @@ mod tests {
         assert_eq!(argv[..3], ["docker", "run", "--interactive"]);
     }
 
+    /// S5: with secrets the run's bash reads them, so it must be a real file under a path the plan binds.
+    #[test]
+    fn the_shell_for_secrets_is_a_real_file_the_run_sees() {
+        let (p, l) = run_dir("read-only");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        let bash = "/nix/store/b-bash/bin/bash";
+        let mut host = nothing();
+        host.files = vec![bash, "/opt/bash"];
+        assert_eq!(shell_gap(&plan, bash, &host), None);
+        let gap = |s: &str| {
+            Some(format!(
+                "the config's shell {s} (to hand the secret variables over, it must be a real file under a path the run binds)"
+            ))
+        };
+        assert_eq!(shell_gap(&plan, "/opt/bash", &host), gap("/opt/bash"));
+        assert_eq!(shell_gap(&plan, bash, &nothing()), gap(bash));
+        host.links = vec![(bash, "/opt/bash")];
+        assert_eq!(shell_gap(&plan, bash, &host), gap(bash));
+        // no secrets: no shell needed
+        let (p, l) = run_dir("access-none");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert_eq!(shell_gap(&plan, "/opt/bash", &nothing()), None);
+    }
+
     /// F2: the engine reads only pot's configuration: podman a containers.conf of the run's own (no default mounts,
     /// volumes, env or devices) with `CONTAINERS_CONF_OVERRIDE` and the user's files out of reach; docker an empty
     /// config folder. Only allowlisted variables reach the engine (no `CONTAINER_HOST`, `DOCKER_HOST`, …).
@@ -1583,7 +1664,7 @@ mod tests {
         let (p, l) = run_dir("access-none");
         let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
         assert!(plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
-        assert!(has(&plan, "--env NOTES_TOKEN") && plan.secrets.is_empty());
+        assert!(has(&plan, "--env NOTES_TOKEN") && plan.piped.is_empty());
         assert_eq!(
             plan.engine_set,
             [("DOCKER_CONFIG".to_string(), "/r/dockercfg".to_string())]

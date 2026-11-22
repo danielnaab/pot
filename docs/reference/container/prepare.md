@@ -70,10 +70,8 @@ podman
   --env TZ=America/Chicago
   --env TZDIR=/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo
   --env USER=u
-  --env TERM
-  --env COLORTERM
   --rootfs [CWD]/read-only/rootfs:O
-  /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-secrets /usr/bin/env -C /home/u/src/notes -- notes check --all
+  /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-secrets 3 22 /usr/bin/env -i -C /home/u/src/notes -- [..] notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
 
 ```
@@ -149,7 +147,7 @@ docker
   --env COLORTERM
   --env NOTES_TOKEN
   localhost/pot-empty:1
-  /usr/bin/env -C /home/u -- notes check --all
+  /usr/bin/env -C /home/u -u HOSTNAME -- notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
 
 ```

@@ -29,6 +29,12 @@ pub fn run_argv(argv: &[String], tty: bool, fd: Option<i32>) -> Vec<String> {
             v.insert(i + 1, a);
         }
     }
+    // S1: the script reads the fd it is given after `pot-secrets`: the pipe's own number, which --preserve-fd keeps
+    if let (Some(fd), Some(i)) = (fd, v.iter().position(|a| a == "pot-secrets")) {
+        if let Some(slot) = v.get_mut(i + 1) {
+            *slot = fd.to_string();
+        }
+    }
     v
 }
 
@@ -148,6 +154,8 @@ pub fn secret_records(names: &[String], get: impl Fn(&str) -> Option<std::ffi::O
             out.push(0);
         }
     }
+    // the sentinel: the script runs nothing unless the stream ends with it (S1)
+    out.extend_from_slice(b".\0");
     out
 }
 
@@ -168,10 +176,35 @@ pub fn after_event(p: &Policy, l: &Launch) -> Result<serde_json::Value, String> 
     )
 }
 
+/// The names the configured engine program runs under: its own name, its real file's, and nix's wrapped name
+/// (`.NAME-wrapped`, which conmon's exit command names).
+pub fn engine_names(program: &str) -> Vec<String> {
+    let base = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    let mut names = vec![base(program)];
+    let found = if program.contains('/') {
+        Some(std::path::PathBuf::from(program))
+    } else {
+        std::env::var_os("PATH").and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join(program))
+                .find(|p| p.is_file())
+        })
+    };
+    if let Some(real) = found.and_then(|p| std::fs::canonicalize(p).ok()) {
+        names.push(base(&real.to_string_lossy()));
+    }
+    for n in names.clone() {
+        names.push(format!(".{n}-wrapped"));
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Whether CMDLINE (a process's NUL-separated arguments) is one of the engine's processes for this run: podman (its
 /// `run`, `rm`, `stop`, conmon's exit command) with the exact `--root RUNDIR/enginestore`, or conmon with its bundle
 /// in the run's store or its exit folder in the run's. A process that merely names a path there is not.
-pub fn names_engine_state(cmdline: &[u8], rundir: &str) -> bool {
+pub fn names_engine_state(cmdline: &[u8], rundir: &str, names: &[String]) -> bool {
     let r = rundir.trim_end_matches('/');
     let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
     let name = args
@@ -181,7 +214,7 @@ pub fn names_engine_state(cmdline: &[u8], rundir: &str) -> bool {
     let is = |a: &[u8], s: &str| a == s.as_bytes();
     let under = |a: &[u8], d: &str| a.starts_with(format!("{r}/{d}/").as_bytes());
     let pair = |f: &dyn Fn(&[u8], &[u8]) -> bool| args.windows(2).any(|w| f(w[0], w[1]));
-    if name.windows(6).any(|w| w == b"podman") {
+    if names.iter().any(|n| n.as_bytes() == name) {
         pair(&|k, v| is(k, "--root") && is(v, &format!("{r}/enginestore")))
     } else if name == b"conmon" {
         pair(&|k, v| {
@@ -308,31 +341,43 @@ mod tests {
     #[test]
     fn engine_processes_are_the_engines_for_this_run() {
         let r = "/s/runs/abc";
+        let names = engine_names("/nix/store/p/bin/podman");
+        let is = |c: &[u8]| names_engine_state(c, r, &names);
         let conmon =
             b"/nix/store/x/bin/conmon\0-c\0id\0-b\0/s/runs/abc/enginestore/overlay-containers/x/userdata\0";
-        assert!(names_engine_state(conmon, r));
-        let exit = b"/nix/store/p/bin/.podman-wrapped\0--root\0/s/runs/abc/enginestore\0container\0cleanup\0";
-        assert!(names_engine_state(exit, "/s/runs/abc/"));
-        assert!(names_engine_state(
-            b"podman\0--root\0/s/runs/abc/enginestore\0run\0",
-            r
+        assert!(is(conmon));
+        // nix's wrapper runs .podman-wrapped, which conmon's exit command names
+        assert!(is(
+            b"/nix/store/p/bin/.podman-wrapped\0--root\0/s/runs/abc/enginestore\0container\0cleanup\0"
+        ));
+        assert!(is(
+            b"/nix/store/p/bin/podman\0--root\0/s/runs/abc/enginestore\0run\0"
         ));
         assert!(names_engine_state(
-            b"conmon\0--exit-dir\0/s/runs/abc/enginetmp/exits\0",
-            r
+            b"podman\0--root\0/s/runs/abc/enginestore\0",
+            "/s/runs/abc/",
+            &names
         ));
+        assert!(is(b"conmon\0--exit-dir\0/s/runs/abc/enginetmp/exits\0"));
         // a process that names a path there is not the engine's (R5), nor is another run's engine
-        assert!(!names_engine_state(b"tail\0-f\0/s/runs/abc/enginestore/x\0", r));
-        assert!(!names_engine_state(
-            b"sh\0-c\0sleep 20\0--root\0/s/runs/abc/enginestore\0",
-            r
+        assert!(!is(b"tail\0-f\0/s/runs/abc/enginestore/x\0"));
+        assert!(!is(b"sh\0-c\0sleep 20\0--root\0/s/runs/abc/enginestore\0"));
+        assert!(!is(b"podman\0ps\0/s/runs/abc/enginestore/x\0"));
+        assert!(!is(b"podman\0--root\0/s/runs/abcd/enginestore\0"));
+        assert!(!is(b"pot-container\0run\0/s/runs/abc\0"));
+        // S7: the configured program, not any name with podman in it
+        let renamed = engine_names("/opt/x/eng");
+        assert!(names_engine_state(
+            b"/opt/x/eng\0--root\0/s/runs/abc/enginestore\0",
+            r,
+            &renamed
         ));
-        assert!(!names_engine_state(b"podman\0ps\0/s/runs/abc/enginestore/x\0", r));
         assert!(!names_engine_state(
-            b"podman\0--root\0/s/runs/abcd/enginestore\0",
-            r
+            b"/usr/bin/podman-x\0--root\0/s/runs/abc/enginestore\0",
+            r,
+            &renamed
         ));
-        assert!(!names_engine_state(b"pot-container\0run\0/s/runs/abc\0", r));
+        assert!(names_engine_state(conmon, r, &renamed));
     }
 
     #[test]
@@ -382,7 +427,7 @@ mod tests {
         };
         assert_eq!(
             secret_records(&s(&["A", "C", "B"]), get),
-            b"A=one\ntwo=three\0B=\0".to_vec()
+            b"A=one\ntwo=three\0B=\0.\0".to_vec()
         );
     }
 
