@@ -367,6 +367,14 @@ fn main() -> ExitCode {
             // podman's home is an empty folder of pot's, so it reads none of the user's files (audit F2)
             let home = rundir.join("enginehome");
             let ready = cfg.and_then(|c| engine(&c)).and_then(|(e, program)| {
+                let found = if program.contains('/') {
+                    Path::new(&program).is_file()
+                } else {
+                    on_path(&program)
+                };
+                if !found {
+                    return Err(format!("{}: can't run {program}: not found", e.name()));
+                }
                 if e == Engine::Podman {
                     dir_new(&home).map_err(|err| err.to_string())?;
                 }

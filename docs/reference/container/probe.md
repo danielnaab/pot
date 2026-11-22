@@ -31,7 +31,7 @@ An engine that is not there, or one this backend does not know:
 
 ```console
 $ pot-container --config missing.json probe .
-{"error":"podman: can't run ./no-such-podman: No such file or directory (os error 2)","guarantees":[]}
+{"error":"podman: can't run ./no-such-podman: not found","guarantees":[]}
 
 $ pot-container --config lxc.json probe .
 {"error":"the backend's --config names engine [..]
