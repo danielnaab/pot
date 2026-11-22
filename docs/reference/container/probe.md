@@ -14,7 +14,16 @@ and pids controllers and its default seccomp profile:
 
 ```console
 $ pot-container --config docker.json probe .
-{"guarantees":["closure-store","own-netns","own-pidns","no-tiocsti","local-listen","in-place","root-files","resource-limits"]}
+{"guarantees":["closure-store","own-netns","own-pidns","no-tiocsti","local-listen","in-place","root-files"]}
+
+```
+
+docker never lists `resource-limits`: a docker container is not in pot's scope, so `prepare` refuses it there. A
+daemon whose seccomp profile is `unconfined` proves nothing:
+
+```console
+$ pot-container --config unconfined.json probe .
+{"error":"docker has no seccomp filter here","guarantees":[]}
 
 ```
 

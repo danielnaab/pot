@@ -73,13 +73,31 @@ pub fn assess(engine: Engine, f: &Facts) -> Result<Vec<&'static str>, String> {
         return Err(format!("{name} has no seccomp filter here"));
     }
     let mut g = GUARANTEES.to_vec();
-    if ["memory", "pids"]
-        .iter()
-        .all(|c| f.controllers.iter().any(|x| x == c))
+    // resource-limits only under podman, whose --cgroups=split keeps the container in pot's scope; prepare
+    // refuses it under docker, so docker never claims it
+    if engine == Engine::Podman
+        && ["memory", "pids"]
+            .iter()
+            .all(|c| f.controllers.iter().any(|x| x == c))
     {
         g.push("resource-limits");
     }
     Ok(g)
+}
+
+/// docker's `.SecurityOptions` (a JSON list such as `["name=seccomp,profile=builtin", …]`) names a seccomp profile
+/// that confines: present, and not `unconfined`.
+fn docker_seccomp(options: &str) -> bool {
+    let Ok(list) = serde_json::from_str::<Vec<String>>(options) else {
+        return false;
+    };
+    list.iter().any(|o| {
+        let kv: Vec<(&str, &str)> = o.split(',').filter_map(|p| p.split_once('=')).collect();
+        kv.contains(&("name", "seccomp"))
+            && kv
+                .iter()
+                .any(|(k, v)| *k == "profile" && !v.is_empty() && *v != "unconfined")
+    })
 }
 
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
@@ -158,7 +176,7 @@ pub fn facts(engine: Engine, program: &str) -> Facts {
                     if w.next() == Some("true") {
                         f.controllers.push("pids".into());
                     }
-                    f.seccomp = w.next().is_some_and(|o| o.contains("name=seccomp"));
+                    f.seccomp = w.next().is_some_and(docker_seccomp);
                 }
                 Err(e) => f.version = Err(e),
             }
@@ -252,5 +270,30 @@ mod tests {
         assert!(assess(Engine::Docker, &f).is_ok());
         assert_eq!(version_of("v28.0.4"), Some((28, 0)));
         assert_eq!(version_of("4.9.3-dev"), Some((4, 9)));
+    }
+
+    /// F4: docker's seccomp option must name a profile, and not `unconfined`.
+    #[test]
+    fn docker_seccomp_needs_a_confining_profile() {
+        assert!(docker_seccomp(
+            r#"["name=seccomp,profile=builtin","name=cgroupns"]"#
+        ));
+        assert!(docker_seccomp(r#"["name=seccomp,profile=default"]"#));
+        assert!(!docker_seccomp(
+            r#"["name=seccomp,profile=unconfined","name=cgroupns"]"#
+        ));
+        assert!(!docker_seccomp(r#"["name=apparmor","name=cgroupns"]"#));
+        assert!(!docker_seccomp(r#"["name=seccomp"]"#));
+        assert!(!docker_seccomp("not json"));
+    }
+
+    /// F8: docker never lists resource-limits, which prepare refuses under docker.
+    #[test]
+    fn docker_never_lists_resource_limits() {
+        let f = Facts {
+            version: Ok("27.5.1".into()),
+            ..ok_podman()
+        };
+        assert!(!assess(Engine::Docker, &f).unwrap().contains(&"resource-limits"));
     }
 }

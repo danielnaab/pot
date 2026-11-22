@@ -1,0 +1,8 @@
+#!/bin/sh
+# A stand-in for docker in probe's transcript: what `docker version` and `docker info` print on a host with the
+# memory and pids controllers and seccomp unconfined (the daemon's seccomp-profile).
+case "$1" in
+  version) echo "27.5.1" ;;
+  info) echo 'true true ["name=seccomp,profile=unconfined","name=cgroupns"]' ;;
+  *) echo "fake-docker: $*" >&2; exit 1 ;;
+esac
