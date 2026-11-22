@@ -1876,8 +1876,9 @@ A commit of the run that holds it empty is named on the exit line
 (`pot: WARNING: the run committed pot/grants.json empty: …`) and in `pot runs` as `hidden committed empty: PATH`.
 pot's default list:
 
-- `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.netrc`,
-  `~/.git-credentials`, `~/.config/gh`, `~/.config/sops`;
+- `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`,
+  `~/.config/containers` (podman's configuration; unreleased), `~/.netrc`, `~/.git-credentials`, `~/.config/gh`,
+  `~/.config/sops`;
 - the agents' credential and configuration homes: `~/.claude`, `~/.claude.json`, `~/.pi/agent/auth.json`,
   `~/.pi/agent/mcp-auth.json` (v2.19.0), `~/.codex/auth.json`, `~/.local/share/opencode/auth.json`;
 - `~/.local/share/keyrings`; the browser profiles `~/.mozilla`, `~/.config/google-chrome`, `~/.config/chromium`,

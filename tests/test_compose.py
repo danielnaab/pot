@@ -301,6 +301,10 @@ class Compose(unittest.TestCase):
         hid = [i["value"] for i in p["items"] if i["kind"] == "hidden"]
         for x in ("~/.ssh", "~/.claude", "/state/grants.json", "/state/pot"):
             self.assertIn(x, hid)
+        # podman's own configuration (containers.conf, mounts.conf, storage.conf): a run that could change it
+        # could widen a later container run
+        for x in ("~/.docker/config.json", "~/.config/containers"):
+            self.assertIn(x, hid)
 
     def test_repo_kit_reach_needs_grant(self):
         kit = {"requests": {"network": ["pypi.org"]}, "packages": ["/nix/store/p-x"], "env": {"set": {"A": "1"}}}

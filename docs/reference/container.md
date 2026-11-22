@@ -140,10 +140,8 @@ change. Plain variables already take the same pipe when a secret is there; with 
 
 `prepare` writes these as `container.env` for `run`: the names kept, the values set, the names that go over the
 pipe, and the kind (file or folder) of every file of the run's that the plan binds. It holds no secret's value.
-`prepare --print` shows them, and
-A root that offers this backend should also hide `~/.config/containers` (and
-`~/.docker/config.json`, which pot hides already) from its runs; adding `~/.config/containers` to pot's default
-hidden list is a change to pot's core, listed in [What's next](#whats-next).
+`prepare --print` shows them. pot's default hidden list holds `~/.config/containers` and
+`~/.docker/config.json` (unreleased): no run can read or change the configuration of a later container run.
 
 ## Policy to flags
 
@@ -294,8 +292,7 @@ is).
    (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
 3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
 4. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
-5. pot choosing the backend from a root, probing it for every run; `~/.config/containers` in pot's default hidden
-   list (a core change).
+5. pot choosing the backend from a root, probing it for every run.
 
 ## Sources
 

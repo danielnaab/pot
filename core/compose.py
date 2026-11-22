@@ -57,7 +57,7 @@ def owned(name):
 # pot's default hidden list (Appendix B); the root adds its own. Globs are expanded at start.
 DEFAULT_HIDDEN = [
     "~/.ssh", "~/.gnupg", "~/.aws", "~/.azure", "~/.config/gcloud", "~/.kube", "~/.docker/config.json",
-    "~/.netrc", "~/.git-credentials", "~/.config/gh", "~/.config/sops",
+    "~/.config/containers", "~/.netrc", "~/.git-credentials", "~/.config/gh", "~/.config/sops",
     "~/.local/share/keyrings", "~/.mozilla", "~/.config/google-chrome", "~/.config/chromium",
     "~/.config/BraveSoftware", "~/.config/vivaldi", "~/snap/firefox",
     "/etc/ssh/*_key",

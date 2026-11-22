@@ -26,7 +26,7 @@ limits     protect: **/flake.nix **/flake.lock **/.gitmodules **/.envrc **/justf
                     **/.mcp.json **/.claude (pot, claude-code@personal)
                     nix/agent-tools/ensure.sh .local AGENTS.md **/graft.nix
                     nix/agent-tools/.scions (repo)
-           hidden: 23 paths (pot explain --json lists them)
+           hidden: 24 paths (pot explain --json lists them)
 
 reach                                                                granted by
   network    api.anthropic.com:443                                      claude-code@personal: not granted

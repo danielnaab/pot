@@ -465,6 +465,20 @@
   },
   {
    "kind": "hidden",
+   "value": "~/.config/containers",
+   "class": "limits",
+   "sources": [
+    {
+     "root": "default"
+    }
+   ],
+   "effective": true,
+   "paths": [
+    "/home/u/.config/containers"
+   ]
+  },
+  {
+   "kind": "hidden",
    "value": "~/.netrc",
    "class": "limits",
    "sources": [

@@ -46,6 +46,12 @@ v2.14.0's `sandbox` on).
   as a run's variable. An env item named like one of pot's values (`TZ` from env.set, `LANG`) takes the host's
   value when the host has it set and pot's value when not, as under bubblewrap.
 
+### Changed
+
+- **`~/.config/containers` is in pot's default hidden list**, next to `~/.docker/config.json`. podman reads
+  `containers.conf`, `mounts.conf` and `storage.conf` there. A run that could read or change them could widen a
+  later container run. policy.json/1's fixtures hold the new item.
+
 ## v0.2.0 - 2026-11-21
 
 ### Added

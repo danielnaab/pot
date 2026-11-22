@@ -26,7 +26,7 @@ limits     protect: **/flake.nix **/flake.lock **/.gitmodules **/.envrc **/justf
                     **/.mcp.json **/.claude (pot, claude-code@flexion-bedrock)
                     nix/agent-tools/ensure.sh .local AGENTS.md **/graft.nix
                     nix/agent-tools/.scions (repo)
-           hidden: 23 paths (pot explain --json lists them)
+           hidden: 24 paths (pot explain --json lists them)
 
 reach                                                                    granted by
   network    bedrock-runtime.us-east-2.amazonaws.com:443                    claude-code@flexion-bedrock
