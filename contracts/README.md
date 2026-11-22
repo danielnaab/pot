@@ -54,8 +54,10 @@ own kits and protections are not applied` ([pot-kits/1](pot-kits-1.md#finding-th
 
 - **Reader first.** A reader accepts a new version in a release before any producer writes it.
 - **Values, not fields.** Within one version, a release may add values: a capability name, a guarantee, a verb,
-  a source in `policy.json`. A new field, or a changed meaning, is a new version. One exception so far: launch.json/1's optional `pins`,
-  added in 0.3.0, which no existing reader could run wider for not knowing ([launch.json/1](launch-1.md#versioning)).
+  a source in `policy.json`. A changed meaning is a new version, and so is a new field, but for one kind: an optional
+  field that a reader ignoring it could only run narrower for, never wider (decided 2026-11-22: launch.json/1's
+  `pins`, in 0.3.0; [launch.json/1](launch-1.md#versioning)). Such a field is still a contract change: below 1.0, a
+  `0.(y+1)` release.
 - **A compatibility shim is deprecated in the release that adds it and removed in the next.** v2.16.0 added six;
   v2.17.0 removed them. Each old form now fails with an error that names its replacement:
 

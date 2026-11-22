@@ -282,6 +282,11 @@ implementation, no port of `Pins` here):
   there and made mount points in it; nothing ran`. Tested under both engines with the QA's swaps
   (`a_pin_swapped_for_a_link_while_run_starts_is_never_used`, `a_mask_swapped_away_while_run_starts_never_shows_the_hidden_path`,
   read and write): no try read or wrote the outside folder or read the hidden path; most were stopped by this check.
+- **By path, in a workspace others can write.** A hidden path is hidden where it is named: a writer of the workspace
+  that renames its parent before the run (or moves a mounted mask's folder into its place in the last instant) shows
+  its contents under another name, under bwrap too. The check compares the device the container's `stat` reports
+  with the host's; a filesystem whose binds show another device (some overlay or btrfs subvolume setups) would fail
+  every run with 125, closed (only ext4 is tested).
 - **What the check leaves** (Y2). It detects, and does not prevent, the engine making a mount point (an empty file or
   folder named like the pin below it) in a folder it was handed by the swap: podman left some in 9 of the QA's 220
   tries. The run never writes there, and `cleanup` does not remove them, since they are in a folder that is not the

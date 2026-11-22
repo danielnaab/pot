@@ -141,9 +141,10 @@ built with pot. A backend built apart adds only `notes`; it keeps its own state 
 - **No version field.** pot writes the file and the backend reads it in the same run, and the policy beside it
   carries the version (`policy.json`'s `version: 1`). A pot that writes launch.json/1 writes policy.json/1; a later
   pair names both.
-- **Fields, not values, need a version.** A new field, or a changed meaning, is launch.json/2. A new host tool in
-  `hostTools` is a new field. One exception, in 0.3.0 (a contract change below 1.0, so a `0.(y+1)` release): `pins`,
-  added within version 1. It is optional, and no reader runs wider for not knowing it: bubblewrap and Seatbelt are
+- **Fields, not values, need a version.** A changed meaning is launch.json/2, and so is a new field, but for an
+  optional one that a reader ignoring it could only run narrower for ([contracts](README.md)). A new host tool in
+  `hostTools` is a new field. `pins` (0.3.0, a contract change below 1.0, so a `0.(y+1)` release) is the first such
+  field: no reader runs wider for not knowing it: bubblewrap and Seatbelt are
   built with the pot that writes it, and a container backend before 0.3.0 refuses `access: write`, the only runs
   that carry it (it reads launch.json leniently, so the field is ignored, never refused).
 - **Strict schema.** Every object pot builds is closed. Objects copied as written stay open: `root.contexts`' values
