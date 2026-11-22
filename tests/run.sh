@@ -1182,7 +1182,8 @@ EOF
   refuse "it never names graft" grep -qi graft "$i/flake.nix"
   local i2=$work/sbinit2
   ran "pot: init with no POT_INIT_URL" env -u POT_INIT_URL "$work/sbr/bin/pot" init "$i2"
-  expect "pins this pot's release" grep -qF 'inputs.pot.url = "github:danielnaab/pot/v0.1.0";' "$i2/flake.nix"
+  local release; release=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$pot/core/pot.py")
+  expect "pins this pot's release" grep -qF "inputs.pot.url = \"github:danielnaab/pot/v$release\";" "$i2/flake.nix"
   (cd "$i" && quiet nix flake lock)
   ran "pot: the init flake builds" nix build --no-link "path:$i#packages.$sys.pot"
   expect "pot: runs/1, every log line and record this section's runs wrote validates" runs_valid "$work/sbstate" sb_
