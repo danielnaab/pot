@@ -676,10 +676,22 @@ does not know is an error.
   run's stderr and the denials file:
   `pot (work): the run tried ssh HOST git-receive-pack '…': only git-upload-pack (fetch) is brokered; push from the host`,
   and `pot (work): the run tried git fetch URL (not a bound git.fetch remote): pot why HOST`.
-- **`credential`:** `pot` reads the value on the host when the run starts, and sets it as the request's `env`
-  variables. It is never in policy.json, the run's files or logs; `pot explain` shows `(the run holds it)`.
+- **`credential`:** `pot` reads the value on the host when the run starts. With `via = "env"` (the default) it
+  sets the value as the request's `env` variables. With `via = "file"` (since 0.1.1) it writes the value to
+  `/run/pot/secrets/NAME`, a file of the run's own (mode 400, your user's, read-only to the run and seen by no
+  other run), sets `NAME` to that path, and removes the file when the run ends (and at cleanup, also when the run
+  stopped before it started). Use `via = "file"` for a program that takes a key's path; a program that reads the
+  key from its variable, such as Claude's `CLAUDE_CODE_OAUTH_TOKEN` or pi's keys, needs `via = "env"`, whatever
+  `from` is. Either way the value is never in policy.json, launch.json, logs or arguments; `pot explain` shows
+  `(the run holds it)`, and `--backend-command` the file's path. A value read at start: a host credential that
+  `refresh` renews reaches the next run.
 - **`mcp`:** `pot` writes `/run/pot/mcp.json`, one HTTP server per granted `mcp` request, with an
-  `Authorization: Bearer ${VAR}` header, and sets the key in the run's environment. The server's host and port
+  `Authorization: Bearer ${VAR}` header, and sets the key in the run's environment. With `via = "file"` the
+  variable names the key's file in `/run/pot/secrets` (as for a credential), and the server gets a
+  `headersHelper` in place of `headers`: a shell command, run by Claude Code, that reads the key from that file
+  with shell builtins and prints the header. A key with a quote, a backslash or a control character cannot go
+  that way: `pot (work): the mcp binding NAME: its key holds a quote, a backslash or a control character, which its
+  header helper cannot carry: use via = "env"`. The server's host and port
   are network reach of the run (`pot explain` shows `HOST:443 (mcp)`). The claude-code kit passes
   `--mcp-config /run/pot/mcp.json --strict-mcp-config`, so Claude reads no other MCP configuration.
   `inspect` has no MCP.
@@ -704,7 +716,7 @@ programs.pot.bindings = {
   "git.fetch"."ssh://forgejo@platform-vm:2222/*" = { broker = "git"; key.agent = true; };
   nix."*" = { via = "daemon-untrusted"; };
   credential."api.anthropic.com kit=claude-code@personal" = {
-    via = "file"; from.file = "~/.config/pot/claude-token-personal"; };
+    via = "env"; from.file = "~/.config/pot/claude-token-personal"; };
   mcp.metamcp = { url = "https://mcp.example.com/mcp"; via = "env"; env = "METAMCP_API_KEY";
                   from.file = "~/.config/metamcp/key.env"; };
 };
@@ -715,8 +727,8 @@ programs.pot.bindings = {
 | `status.relay` | `workmux = true` |
 | `git.fetch` | `broker = "git"`; `key.agent = true` or `key.file = "~/…"` |
 | `nix` | `via = "daemon-untrusted"` |
-| `credential` | `via = "env"` or `"file"`; `from.file = "~/…"` or `from.envFile = "~/…"` (a [key file](#key-files)), or `from.env = "NAME"` (the host's variable); `refresh`, the host command that the startup line names when the variables are unset or expired. `via = "proxy"` is refused: `… 1a carries env and file (proxy comes in a later release)` (the message's `1a` is this release). |
-| `mcp` | `url`; `via = "env"`; `env`, the variable that holds the key; `from.file` (a [key file](#key-files)) and the other `from` forms; `header` (default `"Authorization"`) and `scheme` (default `"Bearer"`; `""` sends the bare key) |
+| `credential` | `via = "env"` (the default: the variables hold the value) or `"file"` (each variable names a file that holds it, in `/run/pot/secrets`); `from.file = "~/…"` or `from.envFile = "~/…"` (a [key file](#key-files)), or `from.env = "NAME"` (the host's variable); `refresh`, the host command that the startup line names when the variables are unset or expired. `via = "proxy"` is refused: `… 1a carries env and file (proxy comes in a later release)` (the message's `1a` is this release). |
+| `mcp` | `url`; `via = "env"` or `"file"`, as for `credential`; `env`, the variable that holds the key; `from.file` (a [key file](#key-files)) and the other `from` forms; `header` (default `"Authorization"`) and `scheme` (default `"Bearer"`; `""` sends the bare key) |
 
 #### Key files
 
@@ -1088,7 +1100,8 @@ pot explain [CONTEXT] [FLAGS] [CMD] [--json] [--backend-command]
 
 Prints the run's policy without running it: every item with the kit, file or grant that it came from, and the
 [children table](#siblings-and-the-children-table). `--json` prints [policy.json](#policyjson).
-`--backend-command` prints bubblewrap's command line, with each secret variable shown as `(the run holds it)`;
+`--backend-command` prints bubblewrap's command line, with each secret variable shown as `(the run holds it)` (a
+`via = "file"` binding's variable as its file's path, `/run/pot/secrets/NAME`);
 with `host`, it prints `argv       CMD` (and `(+ the transcript of run ID, as data)` with `--resume`).
 Inside a run, `pot explain` prints the same text as on the host; `--json` prints the run's policy.json.
 
@@ -1224,7 +1237,7 @@ every repository, and leaves that part out when the context includes none.
 | A word that reads as a file name and names no path | `flake.nix: no such path here (pot why PATH answers paths; for a host, pot why flake.nix:443)`; for a relative path with `/`, `nix/agent-tools/flake.nix: no such path here (pot why PATH answers paths)`. Never a `--net` fix. A word reads as a file name when its last label is `.nix`, `.md`, `.json`, `.yaml`, `.yml`, `.toml`, `.txt`, `.lock`, `.sh`, `.py`, `.ts` or `.js`, with no `:`. |
 | A program not in the run | `pot (work): no-such-tool-x is not in this run.` (on the host, `… is not in a run here, nor on the host's PATH.` when the host lacks it too, then `  install it (for a repository's own tools, its package manager), then:`), then the `one run:` and `permanent:` lines ([below](#pot-why-answers)) |
 | A kit command | `claude is claude-code@personal's command: pot claude`. A name that is also a workspace path (`nix`) gets both answers, command first. |
-| A variable that a binding carries | `CLAUDE_CODE_OAUTH_TOKEN is carried by claude-code@personal's credential (file ~/.config/pot/claude-token-personal (the run holds it)), in pot claude runs`. It never suggests `--env`. |
+| A variable that a binding carries | `CLAUDE_CODE_OAUTH_TOKEN is carried by claude-code@personal's credential (env ~/.config/pot/claude-token-personal (the run holds it)), in pot claude runs`. It never suggests `--env`. |
 | `nix`, in a run with the `nix` capability | `nix is in this run: the host's nix, through the nix capability's relay` |
 | A file `pot` generates | `/etc/passwd is readable: pot generates it for each run` |
 | A store path | `… is readable: in the store, which this run sees as its closure (another path is absent)`; in a run with `nix`, `… which this run sees whole` |
@@ -1390,8 +1403,9 @@ wrote ~/.config/pot/grants.json. Commit it with your root's next change.
 ```
 
 Other `bound:` descriptions: `workmux relay`, `ssh broker (fetch only), the host's ssh agent`,
-`file ~/.config/pot/claude-token-personal (the run holds it)`,
-`env METAMCP_API_KEY from ~/.config/metamcp/key.env (the run holds it)`.
+`env ~/.config/pot/claude-token-personal (the run holds it)`,
+`env METAMCP_API_KEY from ~/.config/metamcp/key.env (the run holds it)`, and for `via = "file"`
+`file ~/.config/x/key, as a file in /run/pot/secrets that its variable names (the run holds it)`.
 
 It is a speed bump, not a guarantee: an unrestricted agent on the host can edit the file or script a terminal.
 
@@ -1734,8 +1748,8 @@ pot: --net pypi.org:443 was for this run.
 | Granted `env` requests | Each name that the caller has set, with the caller's value. |
 | `NIX_REMOTE`, `NIX_CONFIG` | With the `nix` capability: `unix:///run/pot/nix.sock`, and `experimental-features = nix-command flakes`. |
 | `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT` | With `git.fetch`: `/run/pot/bin/pot-ssh`, and `ssh`. |
-| A `credential`'s variables | The bound value, such as `CLAUDE_CODE_OAUTH_TOKEN`, read on the host at start. |
-| An `mcp` binding's `env` | The MCP key, such as `METAMCP_API_KEY`. |
+| A `credential`'s variables | The bound value, such as `CLAUDE_CODE_OAUTH_TOKEN`, read on the host at start; with `via = "file"`, the path of the file in `/run/pot/secrets` that holds it. |
+| An `mcp` binding's `env` | The MCP key, such as `METAMCP_API_KEY`; with `via = "file"`, its file's path. |
 
 A program that is not in the run fails with exit 127 and (the start check's fix, for this root and repository):
 
@@ -2170,8 +2184,8 @@ programs.pot.kits.pi = inputs.pot.kits.pi {
   skillSources = [ "~/src/agent-skills" ];   # checkouts that skill links point into
   skillDirs = [ ];                      # the default: real directories in skills/ to bind
 };
-bindings.credential."openrouter.ai kit=pi" = { via = "file"; from.file = "~/.config/openrouter/key.env"; };
-bindings.credential."llm.example.org kit=pi" = { via = "file"; from.file = "~/.config/llm-gateway/key"; };
+bindings.credential."openrouter.ai kit=pi" = { via = "env"; from.file = "~/.config/openrouter/key.env"; };
+bindings.credential."llm.example.org kit=pi" = { via = "env"; from.file = "~/.config/llm-gateway/key"; };
 ```
 
 A narrower kit is the same call with fewer `providers`.

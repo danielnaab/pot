@@ -1907,7 +1907,11 @@ def binding_desc(cap, cfg, root_name=None):
         return "untrusted daemon relay: exposes the whole store read-only, drops closure-store"
     if cap in ("credential", "mcp"):
         where = src.get("file") or src.get("envFile") or (f"host ${src['env']}" if isinstance(src.get("env"), str) else "the host's environment")
-        how = f"{cfg.get('via', 'env')} {where}" if cap == "credential" else f"env {cfg.get('env', '')} from {where}"
+        via = cfg.get("via", "env")
+        how = f"{via} {where}" if cap == "credential" else f"{via} {cfg.get('env', '')} from {where}"
+        if via == "file":
+            # 0.1.1: the value in a file of the run's own; its variable holds the file's path
+            how += f", as a file in /run/pot/secrets that {'its variable' if cap == 'credential' else cfg.get('env', '')} names"
         return how + " (the run holds it)"
     return "bound"
 

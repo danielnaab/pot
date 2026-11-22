@@ -38,7 +38,7 @@ A root is a flake that builds your `pot` with `pot.lib.mkRoot`. `pot init DIR` w
       kits."claude-code@personal" = pot.kits.claude-code { pkgs = nixpkgs.legacyPackages.x86_64-linux; binary = "host"; };
       defaultInstance.claude-code = "personal";
       bindings.credential."api.anthropic.com kit=claude-code@personal" = {
-        via = "file"; from.file = "~/.config/pot/claude-token-personal"; refresh = "claude setup-token"; };
+        via = "env"; from.file = "~/.config/pot/claude-token-personal"; refresh = "claude setup-token"; };
     };
   };
 }

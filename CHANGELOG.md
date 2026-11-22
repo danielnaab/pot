@@ -31,6 +31,12 @@ v2.14.0's `sandbox` on).
   in the run's home. 0.1.0 treated `none` as `read`, so a context with `access = "none"` saw its workspace
   read-only. A clone context with `access = "none"` is refused, and `pot explain` and `pot why` say there is no
   workspace. Siblings: a run with `none` covers no read inside the workspace.
+- **A `credential` or `mcp` binding with `via = "file"` is honoured.** The value goes to `/run/pot/secrets/NAME`,
+  a file of the run's own (mode 400, read-only to the run, removed when it ends and at cleanup), and the variable
+  holds that path; an `mcp` server's header comes from a `headersHelper` that reads the file. 0.1.0 passed the
+  value as the variable whatever `via` said. **Breaking for a binding that says `via = "file"` for a program that
+  reads the key from its variable** (Claude's `CLAUDE_CODE_OAUTH_TOKEN`, pi's keys, a gateway key, as earlier
+  examples did): set `via = "env"` (or drop `via`), keeping `from.file`. The examples now do.
 
 ## v0.1.0 - 2026-11-21
 

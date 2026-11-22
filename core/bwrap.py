@@ -601,16 +601,81 @@ def write_own(cfg, rundir, policy, launch):
     with open(os.path.join(rundir, "bash_env"), "w") as f:
         f.write("# pot: what a run's bash says for a program that is not in the run\n"
                 f"command_not_found_handle() {not_found_body(ctx, launch)}\n")
+    with open(os.path.join(rundir, "mcp.json"), "w") as f:
+        json.dump({"mcpServers": mcp_servers(policy)}, f, indent=2)
+
+
+def mcp_servers(policy):
+    """The MCP configuration's servers (/run/pot/mcp.json, the format Claude Code reads). The key never in it: with
+    via env the header names its variable (${NAME}, expanded by the client); with via file (0.1.1) the variable names
+    a file, so a header helper (headersHelper, a shell command the client runs) reads the key from that file and
+    prints the header, with shell builtins alone (the value never reaches an argument)."""
     servers = {}
     for m in binding(policy, "mcp"):
         env = (m.get("env") or [None])[0]
         srv = {"type": "http", "url": m["url"]}
         if env:
             scheme = m.get("scheme", "Bearer")
-            srv["headers"] = {m.get("header") or "Authorization": f"{scheme} ${{{env}}}" if scheme else f"${{{env}}}"}
+            header = m.get("header") or "Authorization"
+            if m.get("via") == "file":
+                left, right = json.dumps({header: (scheme + " " if scheme else "") + "\0"}).split("\\u0000")
+                srv["headersHelper"] = f'read -r v < "${env}"; printf \'%s%s%s\' {shlex.quote(left)} "$v" {shlex.quote(right)}'
+            else:
+                srv["headers"] = {header: f"{scheme} ${{{env}}}" if scheme else f"${{{env}}}"}
         servers[m["server"]] = srv
-    with open(os.path.join(rundir, "mcp.json"), "w") as f:
-        json.dump({"mcpServers": servers}, f, indent=2)
+    return servers
+
+
+SECRETS = "secrets"     # 0.1.1: <run dir>/secrets, the run's /run/pot/secrets: via file bindings' values
+
+
+def secret_names(policy):
+    """The variables of credential and mcp bindings with via file: each gets a file, its variable that file's path."""
+    return {n: b for b in binding(policy, "credential") + binding(policy, "mcp") if b.get("via") == "file"
+            for n in b.get("env") or []}
+
+
+def make_secrets(policy, rundir):
+    """prepare: the run's secrets folder (mode 700), empty, when a binding has via file; run() fills it."""
+    d = os.path.join(rundir, SECRETS)
+    remove_secrets(rundir)
+    if secret_names(policy):
+        os.mkdir(d, 0o700)
+    return d
+
+
+def deliver(policy, rundir, at, vals):
+    """What credentials() read, for the run's environment: a via file binding's value written to a file of
+    <run dir>/secrets (mode 400, this user's, never through a link) and its variable set to that file's path in the
+    run (AT/NAME); every other value as it is."""
+    files = secret_names(policy)
+    env = {}
+    for n, v in vals.items():
+        b = files.get(n)
+        if b is None:
+            env[n] = v
+            continue
+        if b["capability"] == "mcp" and re.search(r'["\\\x00-\x1f\x7f]', v):
+            raise Stop(f"the mcp binding {b['selector']}: its key holds a quote, a backslash or a control character, which "
+                       "its header helper cannot carry: use via = \"env\"")
+        p = os.path.join(rundir, SECRETS, n)
+        if os.path.lexists(p):
+            os.unlink(p)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        with os.fdopen(fd, "w") as f:
+            f.write(v)
+        env[n] = f"{at}/{n}"
+    return env
+
+
+def remove_secrets(rundir):
+    """The run's secrets folder, at the run's end and at cleanup (also when prepare stopped): removed, never through
+    a link."""
+    d = os.path.join(rundir, SECRETS)
+    if os.path.islink(d):
+        os.unlink(d)
+    elif os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def key_file(path):
@@ -685,6 +750,9 @@ def readme(policy, launch):
     ctx = policy["context"]
     no_workspace = ("- There is no workspace (access `none`): the repository is not in this run, and the command\n"
                     "  started in HOME.\n") if policy["access"] == "none" else ""
+    names = sorted(secret_names(policy))
+    via_file = (f"- {', '.join(names)}: each names a file in /run/pot/secrets that holds its value (read-only,\n"
+                "  this run's alone, removed when it ends).\n") if names else ""
     return f"""# pot: this run ({ctx})
 
 You are inside a pot run, context `{ctx}`, access `{policy['access']}`.
@@ -699,7 +767,7 @@ The policy is /run/pot/policy.json; `pot why PATH|HOST|CMD|VAR` explains one ite
 - Protected files (what decides the sandbox, what the host runs, agent configuration) are
   read-only, and their folders cannot be renamed or removed. Edit them on the host.
 - Commits made here are unsigned; the host signs them afterwards.
-{no_workspace}{mirrors_text(policy)}- Every denial message starts `pot ({ctx}):`.
+{no_workspace}{via_file}{mirrors_text(policy)}- Every denial message starts `pot ({ctx}):`.
 """
 
 
@@ -977,6 +1045,9 @@ def prepare(cfg, rundir, print_cmd=False):
                 f.write("{}" if n.endswith(".json") else "")
     for n in ("bin", "notfound", "bash_env", "mcp.json", "explain.txt", "why.json"):
         mount(f"{run_mnt}/{n}", 1, ["--ro-bind", os.path.join(rundir, n), f"{run_mnt}/{n}"])
+    if secret_names(policy):
+        # 0.1.1: via file bindings' values, written at run start (run), removed at its end
+        mount(f"{run_mnt}/{SECRETS}", 1, ["--ro-bind", make_secrets(policy, rundir), f"{run_mnt}/{SECRETS}"])
     for b in {b["socket"]: b for b in policy.get("bindings") or [] if b.get("socket")}.values():
         if b.get("socket"):
             sock = os.path.basename(b["socket"])
@@ -1113,9 +1184,10 @@ def run_env(cfg, policy, launch):
 def print_command(cfg, rundir, policy, launch, args):
     import shlex
     env = run_env(cfg, policy, launch)
+    files = secret_names(policy)
     for b in binding(policy, "credential") + binding(policy, "mcp"):
         for n in b.get("env") or []:
-            env[n] = "(the run holds it)"
+            env[n] = f"{policy['mounts']['run']}/{SECRETS}/{n}" if n in files else "(the run holds it)"
     print("# the bubblewrap command for this run (pot explain --backend-command)")
     print(f"env -i {cfg['bwrap']} --args 3 \\")
     for a in args:
@@ -1225,7 +1297,7 @@ def run(cfg, rundir):
                 raise Stop("the network proxy did not start: " + f.read())
     helpers = start_bindings(cfg, rundir, policy, launch)
     env = run_env(cfg, policy, launch)
-    env.update(credentials(policy))
+    env.update(deliver(policy, rundir, f"{policy['mounts']['run']}/{SECRETS}", credentials(policy)))
     env.update(launch.get("hookEnv") or {})
     with open(os.path.join(rundir, "bwrap.args"), "rb") as f:
         argbytes = f.read()
@@ -1263,6 +1335,7 @@ def run(cfg, rundir):
             subprocess.run([tools["workmux"], "set-window-status", "clear"], env={**os.environ, "TMUX_PANE": launch["pane"]},
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         stop_helpers(([proxy] if proxy else []) + helpers)
+        remove_secrets(rundir)
     if status < 0:
         status = 128 - status
     with open(os.path.join(rundir, "status"), "w") as f:
@@ -1689,6 +1762,7 @@ def cleanup(rundir):
         except OSError:
             pass
     remove_sealed(rundir)
+    remove_secrets(rundir)
 
 
 def main(argv):

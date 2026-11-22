@@ -680,16 +680,26 @@ while True:
   printf 'tok-value\n' > "$work/sbtok" && printf 'MCPKEY=mcp-value\n' > "$work/sbmcp.env"
   ran "pot: pot grant relay, at a terminal" tty_ $'y\ny\ny\n' "$work/sbr/bin/pot" grant relay
   expect "ordinary items together" holds "+ capability status.relay  bound: workmux relay"
-  expect "a powerful item alone" holds "powerful: + capability credential api.example env=TESTTOK  bound: file $work/sbtok (the run holds it)"
+  expect "a powerful item alone" holds "powerful: + capability credential api.example env=TESTTOK  bound: file $work/sbtok, as a file in /run/pot/secrets that its variable names (the run holds it)"
   ran "pot: explain --backend-command relaytest" sb_ explain --backend-command relaytest
-  expect "the credential is held, not shown" holds "--setenv TESTTOK '(the run holds it)'"
+  # 0.1.1: via file, the variable names the run's file
+  expect "the credential's variable names its file" holds "--setenv TESTTOK /run/pot/secrets/TESTTOK"
+  expect "an MCP key by env is held, not shown" holds "--setenv MCPKEY '(the run holds it)'"
   refuse "its value never shows" holds "tok-value"
   # shellcheck disable=SC2016 # the run's shell expands them
   ran "pot: a run with bindings" env PATH="$fb:$PATH" TMUX=/tmp/fake,1,0 TMUX_PANE=%9 POT_QUIET=1 "$work/sbr/bin/pot" relaytest -c \
-    'echo "tok=$TESTTOK"; jq -c . /run/pot/mcp.json; workmux set-window-status working; workmux rm x; jq -c . ~/.st/conf.json;
+    'echo "tok=$TESTTOK value=$(cat "$TESTTOK") mode=$(stat -c %a "$TESTTOK") mine=$(stat -c %u "$TESTTOK")=$(id -u)";
+     echo "secrets=[$(ls -A /run/pot/secrets)] mcp=$MCPKEY"; echo x > "$TESTTOK" 2>/dev/null || echo "file read-only";
+     jq -c . /run/pot/mcp.json; workmux set-window-status working; workmux rm x; jq -c . ~/.st/conf.json;
      mkdir -p ~/.st/projects/p && echo "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello from the run\"}}" > ~/.st/projects/p/t.jsonl;
      exec 3<>/dev/tcp/127.0.0.1/3128 && printf "CONNECT live.example:443 HTTP/1.1\r\n\r\n" >&3 && head -1 <&3' 2>&1
-  expect "the credential, by file" holds "tok=tok-value"
+  # 0.1.1: via file is honoured: the value in a file of the run's own (mode 400, the run's user), its variable that
+  # file's path; via env (the MCP key) by value, never a file; the file is gone when the run ends
+  expect "the credential, via file: a file the variable names" grep -qE "^tok=/run/pot/secrets/TESTTOK value=tok-value mode=400 mine=([0-9]+)=\\1$" <<<"$out"
+  expect "and only it is a file; the MCP key, via env, a value" has "secrets=[TESTTOK] mcp=mcp-value"
+  expect "the run cannot write it" has "file read-only"
+  expect "the file is removed at the run's end" test -z "$(find "$work/sbstate/runs" -name secrets)"
+  refuse "and the value is nowhere in the run folders (policy, launch, logs)" grep -rqF tok-value "$work/sbstate/runs"
   expect "the exit line says how to resume (agent.resume)" holdsj "pot: resume this session with: pot relaytest --resume t"
   # shellcheck disable=SC2016 # literal text
   expect "the MCP configuration names the key's variable, not its value" holds '{"mcpServers":{"s":{"type":"http","url":"https://mcp.example/mcp","headers":{"Authorization":"Bearer ${MCPKEY}"}}}}'
@@ -901,7 +911,7 @@ while True:
   ran "pot: explain --backend-command" sb_ explain --backend-command true
   expect "prints bwrap's" holds "--disable-userns"
   ran "pot: why a credential's variable" sb_ why TESTTOK
-  expect "names its kit and binding" has "TESTTOK is carried by relay's credential (file $work/sbtok (the run holds it)), in pot relaytest runs"
+  expect "names its kit and binding" has "TESTTOK is carried by relay's credential (file $work/sbtok, as a file in /run/pot/secrets that its variable names (the run holds it)), in pot relaytest runs"
   ran "pot: explain --backend-command host" sb_ explain --backend-command host echo hi
   expect "prints its argv" holds "argv       echo hi"
   ran "pot: a port-80 denial" sb_ bash -c "$ask; cat /run/pot/denials" _ denied.example:80
@@ -2608,7 +2618,7 @@ EOF
           providers.lan = { baseUrl = "http://lan.pi-test.example:11434/v1"; apiKey = "literal"; models = [ { id = "q"; } ]; };
         };
         bindings."status.relay"."*" = { workmux = true; };
-        bindings.credential."api.pi-test.example kit=pi" = { via = "file"; from.file = "$work/pikey"; };
+        bindings.credential."api.pi-test.example kit=pi" = { via = "env"; from.file = "$work/pikey"; };
         contexts.readonly = { extends = "work"; access = "read"; };
         # v2.19.1: hidden paths under the workspace (untracked, tracked, inside a sealed folder, a hidden .pi)
         hidden = [ "$work/piws/secret.txt" "$work/piws/tracked.txt" "$work/piws/sfile/.pi/secret.json" "$work/piws/hp/.pi" ];

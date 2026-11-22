@@ -119,8 +119,8 @@ A binding never holds a secret value: `from` and `key` are references to the hos
 | `status.relay` | MUST | `socket` `/run/pot/relay.sock`: the broker's relay, with the `workmux` shim on `PATH`. `see`, `allow` (the relayed verbs) are Info. |
 | `git.fetch` | MUST | `socket` `/run/pot/git.sock`: the broker fetches over ssh for the run, only from `remotes` (patterns), with `key` (`{ agent: true }`, or `{ file }` on the host); the run's `GIT_SSH_COMMAND` is the `pot-ssh` shim. |
 | `nix` | MUST | `socket` `/run/pot/nix.sock`: an untrusted relay to the host's daemon (`via` `daemon-untrusted`), the whole store read-only, `NIX_REMOTE` set. `notes` are Info. |
-| `credential` | MUST | The variables `env`, read on the host at run time from `from` (`file` or `envFile`, a key file; `env`, a host variable; nothing: the host's variables of the same names) and passed to the run's environment, never written to a file, a log or the arguments. `via` (`env`, `file`), `holds` and `refresh` are Info: both backends pass the values as variables whatever `via` says. |
-| `mcp` | MUST | As `credential` for its key, and the MCP configuration at `config` (`/run/pot/mcp.json`): `server` at `url`, the key in `header` with `scheme`. |
+| `credential` | MUST | The variables `env`, read on the host at run time from `from` (`file` or `envFile`, a key file; `env`, a host variable; nothing: the host's variables of the same names). `via` says how the run gets each value. `env`: as the variable's value. `file` (since 0.1.1; before it, both backends passed the value as with `env`): written to `secrets/NAME` in the run folder, the run's `/run/pot/secrets/NAME`, mode 0400 and owned by the run's user, readable by that run alone and never writable by it; the variable is that file's path in the run. The backend removes the file when the command ends and at `cleanup` (also when `prepare` stopped). Never written anywhere else: not to policy.json, launch.json, a log or the arguments. `holds` and `refresh` are Info. |
+| `mcp` | MUST | As `credential` for its key (`via` included), and the MCP configuration at `config` (`/run/pot/mcp.json`): `server` at `url`. With `via` `env`, `headers` holds `header`: `scheme ${NAME}` (the client expands the variable). With `via` `file`, no `headers`: a `headersHelper`, a shell command the client runs, reads the key from the file the variable names, with shell builtins, and prints `{"header": "scheme KEY"}`; a backend refuses a key with a quote, a backslash or a control character, which that JSON could not carry. |
 
 A backend refuses a binding whose `capability` it does not carry out (`git.push`, `git.sign`, `ops.read` and
 `delegate` are reserved; compose never binds them in this release).
@@ -173,8 +173,8 @@ backends, never weaker in silence):
 4. Refuse a binding whose capability it does not carry out, and an effective `unsandboxed` item.
 5. Never widen: nothing outside the effective items, `workspace`, `mounts` and `bindings` is visible, writable or
    reachable. Hidden paths stay hidden even under a bound folder; the network is the proxy's allowlist or nothing.
-6. Never write a secret value to policy.json, launch.json, a log, the run's files or its arguments; never show a
-   `secret` env item's value.
+6. Never write a secret value to policy.json, launch.json, a log, the run's files or its arguments (the one file
+   is a `via` `file` binding's own, in `/run/pot/secrets`); never show a `secret` env item's value.
 7. Leave the host as it found it: `cleanup` removes what `prepare` placed, even when `prepare` stopped.
 
 bubblewrap and Seatbelt are built with the pot that writes the policy and trust its composition: they do not make
@@ -188,7 +188,7 @@ name as `test-host` and the tests' work folder as `/tmp/pot-test`. Readers test 
 
 | Fixture | What it shows |
 |---|---|
-| `work-bindings.json` | `work`, in place, write: `status.relay`, `credential` and `mcp` bindings (`from.file`), an MCP server's host as network reach, a `reassert` file, a state mount, an included root kit, an `exec` row and a refused one |
+| `work-bindings.json` | `work`, in place, write: `status.relay`, `credential` (`via` `file`) and `mcp` (`via` `env`) bindings (`from.file`), an MCP server's host as network reach, a `reassert` file, a state mount, an included root kit, an `exec` row and a refused one |
 | `pi-agent.json` | the pi kit's run: `dir` items and `fixed` `file` items, `status.relay` and `credential` bindings |
 | `work-siblings.json` | a children table with `sibling` rows (one a pre-commit `hook`), an `exec` row and a refused one |
 | `sibling.json` | a sibling's own policy: read access, the network its kit asked for |

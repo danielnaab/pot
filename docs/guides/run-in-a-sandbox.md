@@ -278,7 +278,7 @@ A home-manager root:
       "status.relay"."*" = { workmux = true; };
       nix."*" = { via = "daemon-untrusted"; };
       credential."api.anthropic.com kit=claude-code@personal" = {
-        via = "file"; from.file = "~/.config/pot/claude-token-personal"; };
+        via = "env"; from.file = "~/.config/pot/claude-token-personal"; };
     };
   };
 }
@@ -308,7 +308,7 @@ kits."claude-code@gateway" = inputs.pot.kits.claude-code {
   api = inputs.pot.apis.gateway { url = "https://llm.example.org"; };
 };
 bindings.credential."llm.example.org kit=claude-code@gateway" = {
-  via = "file"; from.file = "~/.config/llm-gateway/key"; };   # the key alone, mode 600
+  via = "env"; from.file = "~/.config/llm-gateway/key"; };   # the key alone, mode 600
 ```
 
 The run reaches only the gateway's host, and Claude reads `ANTHROPIC_BASE_URL=https://llm.example.org/anthropic`.
@@ -350,7 +350,7 @@ kits.pi = inputs.pot.kits.pi {
   skillSources = [ "~/src/agent-skills" ];
 };
 bindings.credential."openrouter.ai kit=pi" = {
-  via = "file"; from.file = "~/.config/openrouter/key.env"; };   # export OPENROUTER_API_KEY=…, mode 600
+  via = "env"; from.file = "~/.config/openrouter/key.env"; };   # export OPENROUTER_API_KEY=…, mode 600
 ```
 
 The run reaches only the providers' hosts, with one credential per key (`pot explain pi` lists them; bind each).

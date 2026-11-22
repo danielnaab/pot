@@ -459,6 +459,8 @@ def prepare(cfg, rundir, print_cmd=False):
     for n in OWN_FILES:
         own_reads.append(os.path.join(rundir, n))
     own_dirs = [os.path.join(rundir, n) for n in OWN_DIRS]
+    # 0.1.1: via file bindings' values, in <run dir>/secrets: written at run start (run), removed at its end
+    secrets_dir = [B.make_secrets(policy, rundir)] if B.secret_names(policy) else []
 
     # the rules, in order: Seatbelt applies the last rule that matches
     prof.note("the run's reads and writes")
@@ -471,6 +473,7 @@ def prepare(cfg, rundir, print_cmd=False):
     prof.paths("allow file-read* file-write* process-exec", "subpath", writes[:2] + own_writes)
     prof.paths("allow file-read*", "literal", [p for p in own_reads if not os.path.isdir(p)])
     prof.paths("allow file-read* process-exec", "subpath", [p for p in own_reads if os.path.isdir(p)] + own_dirs)
+    prof.paths("allow file-read*", "subpath", secrets_dir)
     # what realpath(3) and getcwd(3) stat on the way to each of them
     prof.paths("allow file-read-metadata", "literal",
                ancestors(reads + writes + own_writes + own_reads + own_dirs + [runhome]))
@@ -560,9 +563,10 @@ def print_command(cfg, rundir, policy, launch, prof):
     with open(os.path.join(rundir, "sb.json")) as f:
         sb = json.load(f)
     env = run_env(cfg, policy, launch, sb)
+    files = B.secret_names(policy)
     for b in B.binding(policy, "credential") + B.binding(policy, "mcp"):
         for n in b.get("env") or []:
-            env[n] = "(the run holds it)"
+            env[n] = os.path.join(rundir, B.SECRETS, n) if n in files else "(the run holds it)"
     print("# the Seatbelt command for this run (pot explain --backend-command)")
     print("cd " + shlex.quote(sb["cwd"]) + " && env -i \\")
     for k in sorted(env):
@@ -757,7 +761,7 @@ def run(cfg, rundir):
         f.write(text.replace(RUN_RULES + "\n", "\n".join(extra.lines + [RUN_RULES]) + "\n", 1))
     params = extra.params
     helpers = B.start_bindings(cfg, rundir, policy, launch)
-    env.update(B.credentials(policy))
+    env.update(B.deliver(policy, rundir, os.path.join(rundir, B.SECRETS), B.credentials(policy)))
     cmd = [SANDBOX_EXEC, "-f", prof] + params + [cfg["env"], "--default-signal=INT"] + run_argv(policy, launch)
     fg = False
     try:
@@ -816,6 +820,7 @@ def run(cfg, rundir):
             subprocess.run([tools["workmux"], "set-window-status", "clear"], env={**os.environ, "TMUX_PANE": launch["pane"]},
                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         B.stop_helpers(([proxy] if proxy else []) + helpers)
+        B.remove_secrets(rundir)
     if status < 0:
         status = 128 - status
     with open(os.path.join(rundir, "status"), "w") as f:
