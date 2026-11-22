@@ -401,7 +401,7 @@ EOF
         defaultInstance.sel = "a";
         contexts.work.include = [ "daniel" ];
         contexts.readonly = { extends = "work"; access = "read"; };
-        # 0.1.1: access none, no workspace
+        # 0.2.0: access none, no workspace
         contexts.blind = { extends = "work"; access = "none"; };
         contexts.blindclone = { extends = "dispatch"; access = "none"; };
         contexts.blindview = { extends = "inspect"; access = "none"; };
@@ -612,7 +612,7 @@ while True:
   refuse "pot: F1, nothing reached the listener" grep -q CONNECTED "$work/lo-port"
   ran "pot: the readonly context" sb_loud readonly bash -c 'echo z >> notes.md 2>&1; true'
   expect "has no write" holds "Read-only file system"
-  # 0.1.1: access none is no workspace at all: neither the repository nor its git directory is in the run, which
+  # 0.2.0: access none is no workspace at all: neither the repository nor its git directory is in the run, which
   # starts in its home; a folder a read request binds above the workspace shows it empty
   # shellcheck disable=SC2016 # the run's shell expands them
   ran "pot: access none" sb_ blind bash -c 'echo "pwd=$PWD"; test -e "$1" && echo "workspace seen"; test -e "$1/.git" && echo "git seen"
@@ -682,7 +682,7 @@ while True:
   expect "ordinary items together" holds "+ capability status.relay  bound: workmux relay"
   expect "a powerful item alone" holds "powerful: + capability credential api.example env=TESTTOK  bound: file $work/sbtok, as a file in /run/pot/secrets that its variable names (the run holds it)"
   ran "pot: explain --backend-command relaytest" sb_ explain --backend-command relaytest
-  # 0.1.1: via file, the variable names the run's file
+  # 0.2.0: via file, the variable names the run's file
   expect "the credential's variable names its file" holds "--setenv TESTTOK /run/pot/secrets/TESTTOK"
   expect "an MCP key by env is held, not shown" holds "--setenv MCPKEY '(the run holds it)'"
   refuse "its value never shows" holds "tok-value"
@@ -693,7 +693,7 @@ while True:
      jq -c . /run/pot/mcp.json; workmux set-window-status working; workmux rm x; jq -c . ~/.st/conf.json;
      mkdir -p ~/.st/projects/p && echo "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello from the run\"}}" > ~/.st/projects/p/t.jsonl;
      exec 3<>/dev/tcp/127.0.0.1/3128 && printf "CONNECT live.example:443 HTTP/1.1\r\n\r\n" >&3 && head -1 <&3' 2>&1
-  # 0.1.1: via file is honoured: the value in a file of the run's own (mode 400, the run's user), its variable that
+  # 0.2.0: via file is honoured: the value in a file of the run's own (mode 400, the run's user), its variable that
   # file's path; via env (the MCP key) by value, never a file; the file is gone when the run ends
   expect "the credential, via file: a file the variable names" grep -qE "^tok=/run/pot/secrets/TESTTOK value=tok-value mode=400 mine=([0-9]+)=\\1$" <<<"$out"
   expect "and only it is a file; the MCP key, via env, a value" has "secrets=[TESTTOK] mcp=mcp-value"
@@ -1230,7 +1230,7 @@ pot_seatbelt() {
   expect "the README beside it" has "# pot: this run (work)"
   ran "pot (seatbelt): the caller's variables" env SB_DECOY=decoy-secret POT_QUIET=1 "$work/sbr/bin/pot" bash -c 'env | grep -c decoy-secret || true'
   expect "none of them" has "0"
-  # 0.1.1: access none, no workspace: denied, and the run starts in its own HOME
+  # 0.2.0: access none, no workspace: denied, and the run starts in its own HOME
   # shellcheck disable=SC2016 # the run's shell expands them
   ran "pot (seatbelt): access none" sb_ blind bash -c 'echo "pwd=$PWD home=$HOME"; cat "$1/notes.md" >/dev/null 2>&1 && echo "workspace seen"
     cat "$1/.git/HEAD" >/dev/null 2>&1 && echo "git seen"; true' _ "$c"

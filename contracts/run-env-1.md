@@ -33,7 +33,7 @@ The rest of a run's environment is described in pot's reference
 | `/run/pot/launcher` | The root's in-run pot, read-only; a wrapper inside the run execs it (under Seatbelt, `launcher` beside `POT_POLICY`). `~/.config/pot/launcher` is a link to it, in a read-only folder. Since v2.18.0. |
 | `/run/pot/children.sock` | The run's broker for its [siblings](../docs/reference/pot.md#siblings-and-the-children-table), in a run whose table has a `sibling` row (under Seatbelt, `children.sock` beside `POT_POLICY`). Only the run's own pot speaks to it; its requests are not part of this contract. Since v2.20.0. |
 | `/run/pot/table/<digest>/`, `/run/pot/children/` | v2.18.0 to v2.19.2 only: the nested children's table and folders. Not bound since v2.20.0 (only pot's own in-run pot read them). |
-| `/run/pot/secrets/NAME` | The value of a `credential` or `mcp` binding with `via = "file"`, in a file of its own, mode 0400, read-only to the run; the variable `NAME` holds this path. Removed when the run's command ends. Since 0.1.1 (under Seatbelt, `secrets/` beside `POT_POLICY`); before, such a variable held the value. |
+| `/run/pot/secrets/NAME` | The value of a `credential` or `mcp` binding with `via = "file"`, in a file of its own, mode 0400, read-only to the run; the variable `NAME` holds this path. Removed when the run's command ends. Since 0.2.0 (under Seatbelt, `secrets/` beside `POT_POLICY`); before, such a variable held the value. |
 | `/run/pot/denials` | One entry for each refused host and port, appended as it happens, read-only to the run: a line `pot (<context>): the run tried HOST:PORT (not in this run).`, then indented lines `  one run:   pot --net HOST …` and `  permanent: <fix>` (one more `             or <fix>` line for each other fix). Since v2.16.1; v2.16.0 wrote one line per entry. Read it as text: its layout is not part of this contract's shape. |
 
 ### policy.json, version 1
@@ -62,7 +62,7 @@ policy.json/1, this section let a release add an optional key to an item).
 |---|---|---|
 | `version` | number | `1` |
 | `run` | string | the run's id, four hex digits |
-| `context`, `mode`, `access` | strings | the context; `in-place` or `clone`; `write`, `read` or `none` (no workspace in the run, which starts in its home; since 0.1.1) |
+| `context`, `mode`, `access` | strings | the context; `in-place` or `clone`; `write`, `read` or `none` (no workspace in the run, which starts in its home; since 0.2.0) |
 | `backend` | object | its `name`, the guarantees the context `requires`, and those it `proved` for this run (`resource-limits` only for a run that gets the resource scope; `nest` never since v2.20.0) |
 | `workspace` | list | each repository: `id` (a [kit identity](kit-1.md#identity)), `path` (the original path, where the run sees it), `common`, `protected`, `sealed` (since v2.19.1: the protected patterns whose folders are sealed under bubblewrap; `[ ]` in a clone), `proposal` (since v2.19.1: in a clone, the agent-configuration patterns that are writable there, flagged in review), `clone` (`null` in place; in clone mode, the clone's host path in pot's state, and `common` is the clone's `.git`) |
 | `items` | list | every see, limits and reach item: `kind`, `value`, `class` (`see`, `limits` or `reach`), `sources`, `effective`; a file a mirror dir binds also has `memory: true` (as in v2.15.0) and, from v2.16.0, `mirror` (the dir's label, such as `"memory"`) |

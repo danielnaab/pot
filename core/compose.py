@@ -1048,7 +1048,7 @@ def compose(inp):
         if ca and ACCESS_RANK[ca] < ACCESS_RANK[access]:
             access = ca
     if access == "none" and clone_mode:
-        # 0.1.1: access none is no workspace at all, so a clone would be made for nothing
+        # 0.2.0: access none is no workspace at all, so a clone would be made for nothing
         raise Refusal(f"pot ({ctx['name']}): access none: the run sees no workspace, so it has no clone to work in; "
                       "a context with access none runs in place", 2)
     item("access", access, "limits", [{"context": ctx["name"]}])
@@ -1910,7 +1910,7 @@ def binding_desc(cap, cfg, root_name=None):
         via = cfg.get("via", "env")
         how = f"{via} {where}" if cap == "credential" else f"{via} {cfg.get('env', '')} from {where}"
         if via == "file":
-            # 0.1.1: the value in a file of the run's own; its variable holds the file's path
+            # 0.2.0: the value in a file of the run's own; its variable holds the file's path
             how += f", as a file in /run/pot/secrets that {'its variable' if cap == 'credential' else cfg.get('env', '')} names"
         return how + " (the run holds it)"
     return "bound"

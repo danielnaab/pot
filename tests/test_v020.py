@@ -1,4 +1,4 @@
-"""0.1.1: `access: none` is no workspace at all (compose, explain, why, siblings' narrowing, both backends' start
+"""0.2.0: `access: none` is no workspace at all (compose, explain, why, siblings' narrowing, both backends' start
 folder and what they leave unseen); a credential or mcp binding with `via: file` gets its value in a file of the
 run's /run/pot/secrets, which its variable names. Run with the other unit tests (pot-unit), on any system: the
 backends' runs are tests/run.sh's (Seatbelt's on macOS)."""

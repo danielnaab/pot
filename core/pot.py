@@ -32,7 +32,7 @@ import runs as R  # noqa: E402
 
 # pot's version, set here alone (CHANGELOG.md names it; pot doctor prints it; pot init pins it), and the flake
 # reference pot init's root takes pot from (POT_INIT_URL replaces the whole reference, tag included)
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 URL = "github:danielnaab/pot"
 INSIDE_POLICY = "/run/pot/policy.json"
 FLAG_ARGS = {"--package", "--read", "--write", "--net", "--env", "--access", "--mode", "--repo", "--from",
@@ -1561,7 +1561,7 @@ def clone_mode_checks(host, root, ctx, flags, clone):
             form = "--from REF" if f == "from" else "--detach"
             raise C.Refusal(f"pot ({name}): --{f} is clone mode: pot dispatch {form} CMD, or pot --clone {form} CMD", 2)
     if clone and ctx.get("access") == "none":
-        # 0.1.1: before the clone is made (compose refuses it too)
+        # 0.2.0: before the clone is made (compose refuses it too)
         raise C.Refusal(f"pot ({name}): access none: the run sees no workspace, so it has no clone to work in; "
                         "a context with access none runs in place", 2)
     if clone and flags.get("repo") and flags.get("access") != "read":

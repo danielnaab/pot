@@ -77,7 +77,7 @@ A root is where the person's authority lives. A run never writes a root in place
 | Root | Where | For |
 |---|---|---|
 | A home-manager root | `programs.pot` in your home-manager configuration, from `inputs.pot.homeManagerModules.pot` | Your own machine. Its source repository is a [root repository](#root-repositories). |
-| pot's default root | `nix run github:danielnaab/pot/v0.1.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
+| pot's default root | `nix run github:danielnaab/pot/v0.2.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
 | A minimal root of your own | `pot init DIR` writes `DIR/flake.nix`, built with `pot.lib.mkRoot` | A start for a root that you then edit and commit. |
 
 pot's default root and the root that `pot init` writes have pot's default contexts, hidden list and standard tools,
@@ -677,7 +677,7 @@ does not know is an error.
   `pot (work): the run tried ssh HOST git-receive-pack '…': only git-upload-pack (fetch) is brokered; push from the host`,
   and `pot (work): the run tried git fetch URL (not a bound git.fetch remote): pot why HOST`.
 - **`credential`:** `pot` reads the value on the host when the run starts. With `via = "env"` (the default) it
-  sets the value as the request's `env` variables. With `via = "file"` (since 0.1.1) it writes the value to
+  sets the value as the request's `env` variables. With `via = "file"` (since 0.2.0) it writes the value to
   `/run/pot/secrets/NAME`, a file of the run's own (mode 400, your user's, read-only to the run and seen by no
   other run), sets `NAME` to that path, and removes the file when the run ends (and at cleanup, also when the run
   stopped before it started). Use `via = "file"` for a program that takes a key's path; a program that reads the

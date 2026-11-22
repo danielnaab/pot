@@ -393,7 +393,7 @@ def masked(p):
 
 
 def unseen(policy):
-    """0.1.1: with access none the run has no workspace: each repository's top and its git common directory, which
+    """0.2.0: with access none the run has no workspace: each repository's top and its git common directory, which
     nothing binds and which are masked where a bound folder (or inspect's view) would show them."""
     out = []
     if policy["access"] == "none":
@@ -607,7 +607,7 @@ def write_own(cfg, rundir, policy, launch):
 
 def mcp_servers(policy):
     """The MCP configuration's servers (/run/pot/mcp.json, the format Claude Code reads). The key never in it: with
-    via env the header names its variable (${NAME}, expanded by the client); with via file (0.1.1) the variable names
+    via env the header names its variable (${NAME}, expanded by the client); with via file (0.2.0) the variable names
     a file, so a header helper (headersHelper, a shell command the client runs) reads the key from that file and
     prints the header, with shell builtins alone (the value never reaches an argument)."""
     servers = {}
@@ -626,7 +626,7 @@ def mcp_servers(policy):
     return servers
 
 
-SECRETS = "secrets"     # 0.1.1: <run dir>/secrets, the run's /run/pot/secrets: via file bindings' values
+SECRETS = "secrets"     # 0.2.0: <run dir>/secrets, the run's /run/pot/secrets: via file bindings' values
 
 
 def secret_names(policy):
@@ -897,7 +897,7 @@ def prepare(cfg, rundir, print_cmd=False):
         if s not in named_socks and not in_hidden(s):
             mount(s, 2, ["--ro-bind", EMPTY, s])
 
-    # 0.1.1: access none, no workspace: masked where a bound folder, or inspect's view, would show it (a view hides
+    # 0.2.0: access none, no workspace: masked where a bound folder, or inspect's view, would show it (a view hides
     # what is under the home, /tmp and /run unless it shows that folder)
     xdg = launch.get("xdgRuntime") or "/run"
     for p in unseen(policy):
@@ -1046,7 +1046,7 @@ def prepare(cfg, rundir, print_cmd=False):
     for n in ("bin", "notfound", "bash_env", "mcp.json", "explain.txt", "why.json"):
         mount(f"{run_mnt}/{n}", 1, ["--ro-bind", os.path.join(rundir, n), f"{run_mnt}/{n}"])
     if secret_names(policy):
-        # 0.1.1: via file bindings' values, written at run start (run), removed at its end
+        # 0.2.0: via file bindings' values, written at run start (run), removed at its end
         mount(f"{run_mnt}/{SECRETS}", 1, ["--ro-bind", make_secrets(policy, rundir), f"{run_mnt}/{SECRETS}"])
     for b in {b["socket"]: b for b in policy.get("bindings") or [] if b.get("socket")}.values():
         if b.get("socket"):

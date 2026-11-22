@@ -356,7 +356,7 @@ def prepare(cfg, rundir, print_cmd=False):
             keep.append(real(i["path"]))
             home_link(i.get("value", ""), i["path"])
 
-    # the workspace; 0.1.1: with access none there is none, denied over every allow (a read request's folder, inspect's
+    # the workspace; 0.2.0: with access none there is none, denied over every allow (a read request's folder, inspect's
     # view), and the run starts in its HOME
     pinsets, clones = [], []
     cwd = start_dir(policy, launch, runhome)
@@ -459,7 +459,7 @@ def prepare(cfg, rundir, print_cmd=False):
     for n in OWN_FILES:
         own_reads.append(os.path.join(rundir, n))
     own_dirs = [os.path.join(rundir, n) for n in OWN_DIRS]
-    # 0.1.1: via file bindings' values, in <run dir>/secrets: written at run start (run), removed at its end
+    # 0.2.0: via file bindings' values, in <run dir>/secrets: written at run start (run), removed at its end
     secrets_dir = [B.make_secrets(policy, rundir)] if B.secret_names(policy) else []
 
     # the rules, in order: Seatbelt applies the last rule that matches
@@ -521,7 +521,7 @@ def prepare(cfg, rundir, print_cmd=False):
 
 
 def unseen(policy):
-    """0.1.1: access none: the workspace's paths (each top and git common directory), as the profile names them."""
+    """0.2.0: access none: the workspace's paths (each top and git common directory), as the profile names them."""
     return [real(p) for p in B.unseen(policy)]
 
 
