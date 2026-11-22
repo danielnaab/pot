@@ -609,7 +609,13 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 text: crate::engine::containers_conf(&rd("empty")),
                 mode: 0o444,
             });
-            vec![("CONTAINERS_CONF".to_string(), rd("containers.conf"))]
+            files.push(RunFile::Dir {
+                name: "enginehome".into(),
+            });
+            vec![
+                ("CONTAINERS_CONF".to_string(), rd("containers.conf")),
+                ("HOME".to_string(), rd("enginehome")),
+            ]
         }
         Engine::Docker => {
             files.push(RunFile::Dir {
@@ -1300,10 +1306,17 @@ mod tests {
     fn the_engine_reads_only_pots_configuration() {
         let (p, l) = run_dir("read-only");
         let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        // podman reads the user's mounts.conf from $HOME whatever containers.conf says: the engine's home is the run's
         assert_eq!(
             plan.engine_set,
-            [("CONTAINERS_CONF".to_string(), "/r/containers.conf".to_string())]
+            [
+                ("CONTAINERS_CONF".to_string(), "/r/containers.conf".to_string()),
+                ("HOME".to_string(), "/r/enginehome".to_string()),
+            ]
         );
+        assert!(plan.files.contains(&RunFile::Dir {
+            name: "enginehome".into()
+        }));
         let conf = plan.files.iter().find_map(|f| match f {
             RunFile::File { name, text, .. } if name == "containers.conf" => Some(text.clone()),
             _ => None,

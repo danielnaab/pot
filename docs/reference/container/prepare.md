@@ -18,7 +18,7 @@ backend binds into every run. None of the host paths exist here, so no read path
 ```console
 $ pot-container --config config-podman.json prepare --print read-only
 # the podman command for this run, an option a line (pot explain --backend-command)
-# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR XDG_DATA_HOME DBUS_SESSION_BUS_ADDRESS CONTAINERS_STORAGE_CONF TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/read-only/containers.conf
+# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR XDG_DATA_HOME DBUS_SESSION_BUS_ADDRESS CONTAINERS_STORAGE_CONF TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/read-only/containers.conf HOME=[CWD]/read-only/enginehome
 podman
   run --rm --interactive
   --log-driver none

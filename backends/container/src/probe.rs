@@ -100,9 +100,8 @@ fn docker_seccomp(options: &str) -> bool {
 }
 
 /// The engine as probe runs it: only pot's variables, and none of the user's configuration (audit F2).
-fn run(engine: Engine, program: &str, args: &[&str]) -> Result<String, String> {
-    let (k, v) = engine::probe_set(engine);
-    let out = engine::command(program, &[], &[(k.to_string(), v.to_string())])
+fn run(set: &[(String, String)], program: &str, args: &[&str]) -> Result<String, String> {
+    let out = engine::command(program, &[], set)
         .args(args)
         .output()
         .map_err(|e| format!("can't run {program}: {e}"))?;
@@ -124,7 +123,8 @@ fn no_new_privs() -> bool {
 }
 
 /// What the engine says of itself, and the caller's `NoNewPrivs`.
-pub fn facts(engine: Engine, program: &str) -> Facts {
+/// SET is the engine's configuration ([`engine::probe_set`]).
+pub fn facts(engine: Engine, program: &str, set: &[(String, String)]) -> Facts {
     let mut f = Facts {
         version: Err("not read".into()),
         rootless: false,
@@ -134,9 +134,9 @@ pub fn facts(engine: Engine, program: &str) -> Facts {
     };
     match engine {
         Engine::Podman => {
-            f.version = run(engine, program, &["version", "--format", "{{.Client.Version}}"]);
+            f.version = run(set, program, &["version", "--format", "{{.Client.Version}}"]);
             let info = run(
-                engine,
+                set,
                 program,
                 &[
                     "info",
@@ -161,9 +161,9 @@ pub fn facts(engine: Engine, program: &str) -> Facts {
             }
         }
         Engine::Docker => {
-            f.version = run(engine, program, &["version", "--format", "{{.Server.Version}}"]);
+            f.version = run(set, program, &["version", "--format", "{{.Server.Version}}"]);
             match run(
-                engine,
+                set,
                 program,
                 &[
                     "info",

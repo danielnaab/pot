@@ -345,6 +345,8 @@ fn cleanup(rundir: &Path) {
     for d in ["potcfg", "rootfs", "emptydir", "dockercfg"] {
         let _ = fs::remove_dir(rundir.join(d));
     }
+    // the engine's home: what podman wrote there (its .config), never the run
+    let _ = fs::remove_dir_all(rundir.join("enginehome"));
 }
 
 fn main() -> ExitCode {
@@ -361,9 +363,20 @@ fn main() -> ExitCode {
     };
     let cfg = read_config(cli.config.as_deref());
     let result = match &cli.verb {
-        Verb::Probe { .. } => {
-            let doc = match cfg.and_then(|c| engine(&c)) {
-                Ok((e, program)) => match probe::assess(e, &probe::facts(e, &program)) {
+        Verb::Probe { rundir } => {
+            // podman's home is an empty folder of pot's, so it reads none of the user's files (audit F2)
+            let home = rundir.join("enginehome");
+            let ready = cfg.and_then(|c| engine(&c)).and_then(|(e, program)| {
+                if e == Engine::Podman {
+                    dir_new(&home).map_err(|err| err.to_string())?;
+                }
+                Ok((e, program))
+            });
+            let doc = match ready {
+                Ok((e, program)) => match probe::assess(
+                    e,
+                    &probe::facts(e, &program, &engine::probe_set(e, &home.to_string_lossy())),
+                ) {
                     Ok(g) => serde_json::json!({ "guarantees": g }),
                     Err(err) => serde_json::json!({ "guarantees": [], "error": err }),
                 },

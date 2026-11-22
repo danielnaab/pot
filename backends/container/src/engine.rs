@@ -25,11 +25,18 @@ pub const KEEP: &[&str] = &[
     "COLORTERM",
 ];
 
-/// probe's configuration: podman reads no containers.conf at all; docker a config folder that does not exist.
-pub fn probe_set(engine: Engine) -> (&'static str, &'static str) {
+/// probe's configuration: podman reads no containers.conf at all, and no user file under HOME, an empty folder of
+/// pot's; docker a config folder that does not exist.
+pub fn probe_set(engine: Engine, home: &str) -> Vec<(String, String)> {
+    let v = |pairs: &[(&str, &str)]| {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    };
     match engine {
-        Engine::Podman => ("CONTAINERS_CONF", "/dev/null"),
-        Engine::Docker => ("DOCKER_CONFIG", "/nonexistent/pot-container"),
+        Engine::Podman => v(&[("CONTAINERS_CONF", "/dev/null"), ("HOME", home)]),
+        Engine::Docker => v(&[("DOCKER_CONFIG", "/nonexistent/pot-container")]),
     }
 }
 
@@ -46,13 +53,24 @@ pub fn containers_conf(empty_file: &str) -> String {
     )
 }
 
-/// The engine's command: the caller's environment cleared, then KEEP (and EXTRA) from it, then SET.
+/// The engine's command: the caller's environment cleared, then KEEP (and EXTRA) from it, then SET. SET may move
+/// `HOME` (podman reads `~/.config/containers/mounts.conf` from it whatever containers.conf says), so the caller's
+/// storage is named first: `XDG_DATA_HOME` (rootless podman's storage is under it) and the user's storage.conf.
 pub fn command(program: &str, extra: &[String], set: &[(String, String)]) -> Command {
     let mut c = Command::new(program);
     c.env_clear();
     for k in KEEP.iter().copied().chain(extra.iter().map(String::as_str)) {
         if let Some(v) = std::env::var_os(k) {
             c.env(k, v);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        if std::env::var_os("XDG_DATA_HOME").is_none() {
+            c.env("XDG_DATA_HOME", home.join(".local/share"));
+        }
+        let storage = home.join(".config/containers/storage.conf");
+        if std::env::var_os("CONTAINERS_STORAGE_CONF").is_none() && storage.is_file() {
+            c.env("CONTAINERS_STORAGE_CONF", storage);
         }
     }
     for (k, v) in set {
