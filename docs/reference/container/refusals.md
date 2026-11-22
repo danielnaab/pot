@@ -68,7 +68,7 @@ pot (work): policy.json/1: children: row root:relay:relaytest is neither admitte
 
 ## run, after and cleanup
 
-`run` runs only what `prepare` wrote. `after` reads the policy as `prepare` does, and refuses write access and clone
+`run` runs only what `prepare` wrote. `after` reads the policy as `prepare` does, and refuses clone
 mode. `cleanup` succeeds on a run directory it never prepared.
 
 ```console

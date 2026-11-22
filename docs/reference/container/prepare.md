@@ -309,13 +309,14 @@ podman
 
 ## What this slice refuses
 
-Write access needs the workspace's pins (git directories, hooks, protected paths as read-only mounts), which this
-slice does not compute yet:
+Write access in place binds the pins pot's core resolved (launch.json's `pins`) and runs pot's `pins.py` for the
+host's look before and after the run, so it needs the config's `python`, `pins` and `git`, each a file. This
+config names none of them (the run that binds the pins is tested with real engines, `tests/run.rs`):
 
 ```console
 $ pot-container --config config-podman.json prepare --print write
 ? 1
-pot (review): the container backend does not carry out yet: write access (the workspace's pins: git directories, hooks, protected paths)
+pot (review): the container backend does not carry out yet: write access: the backend's --config names no python, pins and git (the host's look before and after the run)
 
 ```
 

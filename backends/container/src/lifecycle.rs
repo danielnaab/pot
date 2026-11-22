@@ -145,23 +145,50 @@ pub fn secret_records(names: &[String], get: impl Fn(&str) -> Option<std::ffi::O
     out
 }
 
-/// The `after` event for what this backend carries out, in place with read access or none: nothing the run can
-/// leave (bwrap's event, empty: no commits, no host-run files, no sealed leftovers, no proxy). Clone mode and write
-/// access are refused, as `prepare` refuses them.
-pub fn after_event(p: &Policy, l: &Launch, proxy_log: &str) -> Result<serde_json::Value, String> {
+/// The `after` event for what this backend carries out, in place: bwrap's event. With read access or none the run
+/// can leave nothing (no commits, no host-run files, no sealed leftovers). With write access (0.3.0), LOOKED is the
+/// host's look after the run (core's pins.py, bwrap's own code): its commits, unsigned count, base, changed host-run
+/// files, repo-kit changes, new git metadata, hidden paths committed empty and sealed leftovers. Clone mode is
+/// refused, as `prepare` refuses it.
+pub fn after_event(
+    p: &Policy,
+    l: &Launch,
+    proxy_log: &str,
+    looked: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     if p.mode == "clone" {
         return Err("clone mode is not in this slice".into());
     }
-    if p.access == "write" {
-        return Err("write access is not in this slice".into());
-    }
     let (denials, loopback) = proxy_refusals(proxy_log);
-    Ok(
-        serde_json::json!({ "ev": "after", "by": "host", "commits": [], "unsigned": 0, "touches_host_run": [],
+    let mut ev = serde_json::json!({ "ev": "after", "by": "host", "commits": [], "unsigned": 0, "touches_host_run": [],
         "repo_kit_change": [], "root_repo_change": false, "new_git_metadata": [], "denials": denials,
-        "loopback": loopback, "agent_config": [], "signs": l.host_signs, "sealed_left": [] }),
-    )
+        "loopback": loopback, "agent_config": [], "signs": l.host_signs, "sealed_left": [] });
+    match looked {
+        None if p.access == "write" => return Err("write access needs the host's look".into()),
+        None => {}
+        Some(serde_json::Value::Object(m)) => {
+            for k in LOOKED {
+                if let Some(v) = m.get(*k) {
+                    ev[*k] = v.clone();
+                }
+            }
+        }
+        Some(_) => return Err("the host's look printed no event".into()),
+    }
+    Ok(ev)
 }
+
+/// What the host's look reports of a write run (bwrap's after event's keys for an in-place run).
+const LOOKED: &[&str] = &[
+    "commits",
+    "unsigned",
+    "base",
+    "touches_host_run",
+    "repo_kit_change",
+    "new_git_metadata",
+    "hidden_blanked",
+    "sealed_left",
+];
 
 /// What the proxy refused, from its log (bwrap's `after`): each `DENY host:port` (or `DENY (malformed)`) counted, and
 /// each `LOOPBACK host:port address` (a host that resolved to the host's own loopback), sorted. Run-chosen text is
@@ -497,9 +524,9 @@ mod tests {
     }
 
     #[test]
-    fn after_is_bwraps_empty_event_and_refuses_what_prepare_refuses() {
+    fn after_is_bwraps_event_with_the_hosts_look_and_refuses_clone_mode() {
         let (p, mut l) = fixture("read-only");
-        let ev = after_event(&p, &l, "").unwrap();
+        let ev = after_event(&p, &l, "", None).unwrap();
         assert_eq!(
             ev,
             serde_json::json!({ "ev": "after", "by": "host", "commits": [], "unsigned": 0, "touches_host_run": [],
@@ -507,8 +534,8 @@ mod tests {
                 "agent_config": [], "signs": false, "sealed_left": [] })
         );
         l.host_signs = true;
-        assert_eq!(after_event(&p, &l, "").unwrap()["signs"], true);
-        let ev = after_event(&p, &l, "DENY example.org:443\nLOOPBACK localhost:1 ::1\n").unwrap();
+        assert_eq!(after_event(&p, &l, "", None).unwrap()["signs"], true);
+        let ev = after_event(&p, &l, "DENY example.org:443\nLOOPBACK localhost:1 ::1\n", None).unwrap();
         assert_eq!(
             ev["denials"],
             serde_json::json!([{ "host": "example.org:443", "count": 1 }])
@@ -518,15 +545,27 @@ mod tests {
             serde_json::json!([{ "host": "localhost:1", "address": "::1", "count": 1 }])
         );
         let (p, l) = fixture("access-none");
-        assert!(after_event(&p, &l, "").is_ok());
+        assert!(after_event(&p, &l, "", None).is_ok());
         let (mut p, l) = fixture("write");
         assert_eq!(
-            after_event(&p, &l, "").unwrap_err(),
-            "write access is not in this slice"
+            after_event(&p, &l, "", None).unwrap_err(),
+            "write access needs the host's look"
+        );
+        // the look's keys, and only those, over bwrap's event
+        let looked = serde_json::json!({ "commits": ["0123456789ab"], "unsigned": 1, "base": "ba5e", "touches_host_run":
+            ["flake.nix"], "repo_kit_change": ["flake.nix"], "new_git_metadata": ["x/.git"], "hidden_blanked": ["h"],
+            "sealed_left": [{ "path": ".pi/n", "type": "file", "size": 1 }], "signs": true, "denials": ["no"] });
+        let ev = after_event(&p, &l, "", Some(looked)).unwrap();
+        assert_eq!(
+            ev,
+            serde_json::json!({ "ev": "after", "by": "host", "commits": ["0123456789ab"], "unsigned": 1, "base": "ba5e",
+                "touches_host_run": ["flake.nix"], "repo_kit_change": ["flake.nix"], "root_repo_change": false,
+                "new_git_metadata": ["x/.git"], "hidden_blanked": ["h"], "denials": [], "loopback": [],
+                "agent_config": [], "signs": false, "sealed_left": [{ "path": ".pi/n", "type": "file", "size": 1 }] })
         );
         p.mode = "clone".into();
         assert_eq!(
-            after_event(&p, &l, "").unwrap_err(),
+            after_event(&p, &l, "", None).unwrap_err(),
             "clone mode is not in this slice"
         );
     }

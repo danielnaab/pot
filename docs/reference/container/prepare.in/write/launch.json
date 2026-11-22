@@ -16,5 +16,81 @@
   "potBin": "/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin",
   "resolve": {},
   "pane": null,
-  "hostTools": {}
+  "hostTools": {},
+  "pins": [
+    {
+      "top": "/home/u/src/notes",
+      "common": "/home/u/src/notes/.git",
+      "dirs": [
+        "/home/u/src/notes/.git",
+        "/home/u/src/notes/sub"
+      ],
+      "ro": [
+        {
+          "path": "/home/u/src/notes/.git/config",
+          "kind": "file"
+        },
+        {
+          "path": "/home/u/src/notes/.git/config.worktree",
+          "kind": "file"
+        },
+        {
+          "path": "/home/u/src/notes/.git/hooks",
+          "kind": "folder"
+        },
+        {
+          "path": "/home/u/src/notes/.git/info",
+          "kind": "folder"
+        },
+        {
+          "path": "/home/u/src/notes/.git/commondir",
+          "kind": "file"
+        },
+        {
+          "path": "/home/u/src/notes/.git/gitdir",
+          "kind": "file"
+        },
+        {
+          "path": "/home/u/src/notes/.envrc",
+          "kind": "file"
+        },
+        {
+          "path": "/home/u/src/notes/flake.nix",
+          "kind": "file"
+        },
+        {
+          "path": "/home/u/src/notes/sub/flake.nix",
+          "kind": "file"
+        }
+      ],
+      "placeholders": [
+        {
+          "path": "/home/u/src/notes/.git/commondir",
+          "kind": "file",
+          "text": ".\n"
+        },
+        {
+          "path": "/home/u/src/notes/.git/config.worktree",
+          "kind": "file",
+          "text": ""
+        },
+        {
+          "path": "/home/u/src/notes/.git/gitdir",
+          "kind": "file",
+          "text": ""
+        }
+      ],
+      "dotgits": [
+        "/home/u/src/notes/.git"
+      ],
+      "named": [
+        "/home/u/src/notes/.envrc",
+        "/home/u/src/notes/flake.nix",
+        "/home/u/src/notes/sub/flake.nix"
+      ],
+      "sealed": [
+        "/home/u/src/notes/.pi"
+      ]
+    }
+  ]
 }

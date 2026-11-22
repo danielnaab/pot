@@ -43,6 +43,67 @@ pub struct Launch {
     /// A sibling's caller's run id: its proxy shows no one-run fix (`--sibling`).
     #[serde(default)]
     pub sibling_of: Option<serde_json::Value>,
+    /// 0.3.0, with write access in place: each workspace's pins, as pot's core resolved them at the run's start.
+    #[serde(default)]
+    pub pins: Option<Vec<WsPins>>,
+}
+
+/// One workspace's pins (launch.json/1 `pins`): read strictly, since a key this backend does not know could narrow
+/// the run.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WsPins {
+    pub top: String,
+    pub common: String,
+    /// Folders bound writable onto themselves (mount points: not renamed or removed).
+    pub dirs: Vec<String>,
+    /// Paths bound read-only onto themselves.
+    pub ro: Vec<Pin>,
+    /// What `prepare` creates before it binds (each also in `ro`).
+    pub placeholders: Vec<Placeholder>,
+    /// The before look's start (read by core's pins.py, not here).
+    #[allow(dead_code)]
+    pub dotgits: Vec<String>,
+    #[allow(dead_code)]
+    pub named: Vec<String>,
+    /// The outermost sealed folders.
+    pub sealed: Vec<String>,
+    /// A pin the sandbox can't make: the run stops with `message`.
+    #[serde(default)]
+    pub refused: Option<PinRefusal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    File,
+    Folder,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pin {
+    pub path: String,
+    pub kind: Kind,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placeholder {
+    pub path: String,
+    pub kind: Kind,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+// why and path are Info beside the message, which is what the run stops with
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinRefusal {
+    pub why: String,
+    pub path: String,
+    pub message: String,
 }
 
 /// launch.json's `hostTools`, of which the backend reads `tmux` (the proxy's notices).
@@ -78,6 +139,18 @@ pub struct Config {
     pub proxy: Option<String>,
     pub socat: Option<String>,
     pub net_closure: Option<String>,
+    /// Write access (0.3.0): pot's `pins.py` (core/), which `python` runs for the host's look before and after an
+    /// in-place run (bwrap's before.json and after event), with host `git`.
+    pub pins: Option<String>,
+    pub git: Option<String>,
+}
+
+/// The config's programs for the host's look at a write run: `python -I -S PINS before|after GIT RUNDIR`.
+#[derive(Debug, Clone)]
+pub struct LookTools {
+    pub python: String,
+    pub pins: String,
+    pub git: String,
 }
 
 /// The config's programs for the network, all present.
@@ -124,6 +197,19 @@ impl Config {
             socat: socat.clone(),
             closure,
         }))
+    }
+
+    /// The look's programs, when the config names `python`, `pins` and `git`, each a file.
+    pub fn look_tools(&self) -> Option<LookTools> {
+        let (Some(python), Some(pins), Some(git)) = (&self.python, &self.pins, &self.git) else {
+            return None;
+        };
+        let file = |f: &str| std::fs::metadata(f).is_ok_and(|m| m.is_file());
+        (file(python) && file(pins) && file(git)).then(|| LookTools {
+            python: python.clone(),
+            pins: pins.clone(),
+            git: git.clone(),
+        })
     }
 
     pub fn paths(&self) -> Result<Paths, String> {

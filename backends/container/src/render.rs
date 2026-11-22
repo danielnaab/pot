@@ -6,8 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::host::Host;
-use crate::launch::{Launch, NetTools, Paths};
+use crate::host::{Entry, Host};
+use crate::launch::{Kind, Launch, LookTools, NetTools, Paths, Placeholder, WsPins};
 use crate::policy::{Policy, known_kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +29,8 @@ impl Engine {
 /// under podman: `--cgroups=split` keeps the container in the cgroup of the pot that started it, the user systemd
 /// scope pot proves resource-limits by (pot.py `scope_for`). private-proxy only when the config names the network's
 /// programs (`NET`): the proxy's socket is in the run folder, served in the run's own network namespace.
-pub fn upholds(engine: Engine, net: bool, g: &str) -> bool {
+/// protected-as-mounts when it names the look's (`LOOK`: write access in place, its pins as read-only mounts).
+pub fn upholds(engine: Engine, net: bool, look: bool, g: &str) -> bool {
     matches!(
         g,
         "closure-store"
@@ -41,7 +42,11 @@ pub fn upholds(engine: Engine, net: bool, g: &str) -> bool {
             | "root-files"
     ) || (g == "resource-limits" && engine == Engine::Podman)
         || (g == "private-proxy" && net)
+        || (g == "protected-as-mounts" && look)
 }
+
+/// Entries a sealed folder takes (bwrap's `SEAL_MAX`): one bind each; a folder with more stays plainly read-only.
+pub const SEAL_MAX: usize = 256;
 
 pub const DOCKER_IMAGE: &str = "localhost/pot-empty:1";
 
@@ -170,7 +175,21 @@ pub struct Inputs<'a> {
     pub base_closure: &'a [String],
     /// The config's programs for the network, when it names them.
     pub net: Option<&'a NetTools>,
+    /// The config's programs for the host's look at a write run, when it names them.
+    pub look: Option<&'a LookTools>,
     pub host: &'a dyn Host,
+}
+
+/// A sealed folder (bwrap's `seal`): BASE, a folder of the run folder's, bound writable at DEST, with each of ENTRIES
+/// (the host folder's) bound read-only into it, a link as the same link. `after` lists what else BASE holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seal {
+    pub dest: String,
+    /// Relative to the run folder.
+    pub base: String,
+    pub entries: Vec<String>,
+    /// DEST relative to the workspace's top.
+    pub rel: String,
 }
 
 /// One option and its values; `closure` marks a closure bind (`--print` folds those into a count).
@@ -237,6 +256,15 @@ pub struct Plan {
     pub hostless: Vec<String>,
     /// Where the run sees a via-file binding's file: `/run/pot/secrets` (policy `mounts.run`'s `secrets`).
     pub secrets_at: String,
+    /// Write access: the placeholders `prepare` creates before anything else binds them (launch.json's pins).
+    pub placeholders: Vec<Placeholder>,
+    /// Write access: the sealed folders.
+    pub seals: Vec<Seal>,
+    /// Write access: every host path of the workspace the plan binds (a pin, the top, a sealed entry) and its kind,
+    /// which `prepare` records and `run` checks again just before the engine starts.
+    pub pins: Vec<(String, Kind)>,
+    /// Start notes (launch.json `notes`): a sealed folder over the cap.
+    pub notes: Vec<String>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -244,7 +272,12 @@ pub struct Plan {
 pub fn missing_sources(plan: &Plan, rundir: &str, host: &dyn Host) -> Vec<String> {
     plan.sources
         .iter()
-        .filter(|s| !under(s, rundir) && !plan.host_dirs.contains(s) && !host.lexists(s))
+        .filter(|s| {
+            !under(s, rundir)
+                && !plan.host_dirs.contains(s)
+                && !plan.placeholders.iter().any(|p| &p.path == *s)
+                && !host.lexists(s)
+        })
         .cloned()
         .collect()
 }
@@ -312,13 +345,29 @@ fn in_home(home: &str, v: &str) -> String {
     }
 }
 
+/// launch.json's pins for the workspace TOP (with COMMON), when pot's core resolved them.
+pub fn pins_of<'a>(l: &'a Launch, top: &str, common: &str) -> Option<&'a WsPins> {
+    l.pins
+        .as_ref()?
+        .iter()
+        .find(|w| w.top == top && w.common == common)
+}
+
+/// P as the run's home shows it (bwrap's `tilde`).
+fn tilde(p: &str, home: &str) -> String {
+    match p.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+        _ => p.to_string(),
+    }
+}
+
 /// The gaps this slice refuses, in the policy's order: each a short phrase.
 #[allow(clippy::too_many_lines)] // one check per policy feature, listed in the reference page's order
 fn gaps(i: &Inputs) -> Vec<String> {
     let p = i.policy;
     let mut out = vec![];
     for g in &p.backend.proved {
-        if !upholds(i.engine, i.net.is_some(), g) {
+        if !upholds(i.engine, i.net.is_some(), i.look.is_some(), g) {
             out.push(match g.as_str() {
                 "resource-limits" => {
                     "resource-limits under docker (a container is not in pot's scope)".to_string()
@@ -333,7 +382,18 @@ fn gaps(i: &Inputs) -> Vec<String> {
     if p.mode == "clone" {
         out.push("clone mode (the clone at its original path, its pins, the staging fetch)".into());
     } else if p.access == "write" {
-        out.push("write access (the workspace's pins: git directories, hooks, protected paths)".into());
+        // 0.3.0: carried out from the pins pot's core resolved, with the host's look before and after (pins.py)
+        if i.look.is_none() {
+            out.push("write access: the backend's --config names no python, pins and git (the host's look before and after the run)".into());
+        }
+        for w in &p.workspace {
+            if pins_of(i.launch, &w.path, &w.common).is_none() {
+                out.push(format!(
+                    "write access without launch.json's pins for {} (pot 0.3.0 or later resolves them)",
+                    w.path
+                ));
+            }
+        }
     }
     if p.effective("view").next().is_some() {
         out.push("inspect's view".into());
@@ -580,32 +640,119 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     }
 
     // the workspace (in place): read access binds it read-only at its path, its top and (a worktree's) common
-    // directory each with their sockets and hidden paths masked; write access and clones need the pins and are
-    // refused above. access none: no workspace at all (pot 0.2.0), masked where a bound folder would show it
-    // (bwrap's `unseen`), and the command starts in the home
-    if p.access == "read" && p.mode == "in-place" {
+    // directory each with their sockets and hidden paths masked. Write access (0.3.0) binds them writable, then the
+    // pins pot's core resolved (launch.json's pins): DIRS writable and RO read-only, each onto itself, so a pin is a
+    // mount point that can't be written, renamed, removed or replaced, nor moved away with its folder. The engines
+    // mount by destination depth, so a pin lands over the workspace. Clones are refused above. access none: no
+    // workspace at all (pot 0.2.0), masked where a bound folder would show it (bwrap's `unseen`), and the command
+    // starts in the home
+    let mut kinds: BTreeMap<String, Kind> = BTreeMap::new();
+    let mut placeholders: Vec<Placeholder> = vec![];
+    let write = p.access == "write";
+    if (p.access == "read" || write) && p.mode == "in-place" {
         for w in &p.workspace {
             let mut tops = vec![w.path.as_str()];
             if !under(&w.common, &w.path) {
                 tops.push(w.common.as_str());
             }
-            for top in tops {
-                if !real(top, &mut unreal) {
-                    continue;
+            for top in &tops {
+                if real(top, &mut unreal) {
+                    m.bind(top, top, if write { WRITE } else { READ }, !write);
+                    kinds.insert((*top).to_string(), Kind::Folder);
                 }
-                m.bind(top, top, READ, true);
+            }
+            if let Some(wp) = pins_of(l, &w.path, &w.common).filter(|_| write) {
+                for d in &wp.dirs {
+                    if real(d, &mut unreal) {
+                        m.bind(d, d, WRITE, false);
+                        kinds.insert(d.clone(), Kind::Folder);
+                    }
+                }
+                for r in &wp.ro {
+                    if real(&r.path, &mut unreal) {
+                        m.bind(&r.path, &r.path, READ, true);
+                        kinds.insert(r.path.clone(), r.kind);
+                    }
+                }
+                placeholders.extend(wp.placeholders.iter().cloned());
+            }
+            for top in tops {
                 for s in host.sockets_under(top) {
                     if !in_hidden(&s) {
                         m.bind(&rd("empty"), &s, HIDE, true);
                     }
                 }
-                // a hidden path there is masked, and nothing is bound inside a hidden folder there
+                // a hidden path there is masked, and nothing is bound inside a hidden folder there (a pin neither)
                 for h in hidden.iter().filter(|h| under(h, top) && host.lexists(h)) {
                     if host.is_real_dir(h) {
                         m.by_dest.retain(|d, _| !under(d, h));
                     }
                     mask(&mut m, h);
                 }
+            }
+        }
+    }
+    // v2.19.1, as bwrap's `seal`: each sealed folder (launch.json's pins' `sealed`, sealed_dirs) a folder of the run's,
+    // bound writable at its path, with each entry of the host's bound read-only into it (a link as the same link),
+    // so no entry can be written, replaced, renamed or removed and a new one lands in the run folder (after's
+    // sealed_left). A hidden one stays hidden; one with more than SEAL_MAX entries stays as it is, with a note.
+    let mut seals: Vec<Seal> = vec![];
+    let mut notes: Vec<String> = vec![];
+    if write && p.mode == "in-place" {
+        for w in &p.workspace {
+            for d in pins_of(l, &w.path, &w.common)
+                .map(|wp| wp.sealed.as_slice())
+                .unwrap_or_default()
+            {
+                if hidden_or_below(d) || !real(d, &mut unreal) {
+                    continue;
+                }
+                let entries = host.entries(d);
+                if entries.len() > SEAL_MAX {
+                    notes.push(format!(
+                        "pot: {} has {} entries, more than a sealed folder takes ({SEAL_MAX}): it is read-only in this run, so pi cannot take its settings lock there",
+                        tilde(d, home),
+                        entries.len()
+                    ));
+                    continue;
+                }
+                if seals.is_empty() {
+                    files.push(RunFile::FreshDir {
+                        name: "sealed".into(),
+                    });
+                }
+                let base = format!("sealed/{}", seals.len());
+                files.push(RunFile::Dir { name: base.clone() });
+                m.bind(&rd(&base), d, READ, false);
+                for (name, kind) in &entries {
+                    let (src, at) = (format!("{d}/{name}"), format!("{base}/{name}"));
+                    match kind {
+                        Entry::Link(target) => files.push(RunFile::Link {
+                            name: at,
+                            target: target.clone(),
+                        }),
+                        Entry::Folder => {
+                            files.push(RunFile::Dir { name: at });
+                            m.bind(&src, &src, READ, true);
+                            kinds.insert(src, Kind::Folder);
+                        }
+                        Entry::File => {
+                            files.push(RunFile::File {
+                                name: at,
+                                text: String::new(),
+                                mode: 0o444,
+                            });
+                            m.bind(&src, &src, READ, true);
+                            kinds.insert(src, Kind::File);
+                        }
+                    }
+                }
+                seals.push(Seal {
+                    dest: d.clone(),
+                    base,
+                    entries: entries.into_iter().map(|e| e.0).collect(),
+                    rel: d.strip_prefix(&format!("{}/", w.path)).unwrap_or(d).to_string(),
+                });
             }
         }
     }
@@ -732,6 +879,14 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     };
 
     let mut mounts: Vec<(String, Mount)> = m.by_dest.into_iter().map(|(d, (_, mt))| (d, mt)).collect();
+    // every workspace path still bound onto itself, by kind, for prepare to record and run to check again
+    let pins: Vec<(String, Kind)> = mounts
+        .iter()
+        .filter_map(|(dest, mt)| match mt {
+            Mount::Bind { src, .. } if src == dest => kinds.get(src).map(|k| (src.clone(), *k)),
+            _ => None,
+        })
+        .collect();
     // podman and docker order mounts by destination themselves; this order is for people
     mounts.sort_by(|a, b| (a.0.matches('/').count(), &a.0).cmp(&(b.0.matches('/').count(), &b.0)));
     let bad = unsayable(&mounts, &closure);
@@ -933,6 +1088,10 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         creds,
         hostless,
         secrets_at: format!("{run}/secrets"),
+        placeholders,
+        seals,
+        pins,
+        notes,
     })
 }
 
@@ -1146,6 +1305,32 @@ mod tests {
             }
             self.lexists(p).then(|| p.to_string())
         }
+        /// A folder's entries: a link (in LINKS, what it says), a folder (in DIRS) or a file.
+        fn entries(&self, d: &str) -> Vec<(String, Entry)> {
+            let mut out: Vec<(String, Entry)> = vec![];
+            let child = |p: &str| {
+                p.strip_prefix(&format!("{d}/"))
+                    .filter(|r| !r.contains('/'))
+                    .map(String::from)
+            };
+            for (from, to) in &self.links {
+                if let Some(n) = child(from) {
+                    out.push((n, Entry::Link((*to).to_string())));
+                }
+            }
+            for p in &self.dirs {
+                if let Some(n) = child(p) {
+                    out.push((n, Entry::Folder));
+                }
+            }
+            for p in &self.files {
+                if let Some(n) = child(p) {
+                    out.push((n, Entry::File));
+                }
+            }
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        }
     }
 
     fn nothing() -> Fake {
@@ -1224,8 +1409,18 @@ mod tests {
             rundir: "/r",
             base_closure: &base,
             net,
+            look: Some(&look_tools()),
             host,
         })
+    }
+
+    /// The config's programs for the host's look at a write run, as a test names them.
+    fn look_tools() -> LookTools {
+        LookTools {
+            python: "/nix/store/p-python/bin/python3".into(),
+            pins: "/nix/store/q-pot/pins.py".into(),
+            git: "/nix/store/g-git/bin/git".into(),
+        }
     }
 
     /// The argv as one line per option, for assertions.
@@ -1439,13 +1634,7 @@ mod tests {
     }
 
     #[test]
-    fn write_access_and_unsayable_paths_are_refused() {
-        let (p, l) = run_dir("write");
-        let gaps = go(&p, &l, Engine::Podman, &nothing()).unwrap_err();
-        assert_eq!(
-            gaps,
-            ["write access (the workspace's pins: git directories, hooks, protected paths)"]
-        );
+    fn unsayable_paths_are_refused() {
         let (mut p, l) = run_dir("read-only");
         p.workspace[0].path = "/home/u/src/a:b".into();
         p.workspace[0].common = "/home/u/src/a:b/.git".into();
@@ -1459,9 +1648,9 @@ mod tests {
     #[test]
     fn a_guarantee_this_slice_does_not_uphold_is_refused() {
         let (mut p, l) = run_dir("access-none");
-        p.backend.proved.push("protected-as-mounts".into());
+        p.backend.proved.push("same-path-clone".into());
         let gaps = go(&p, &l, Engine::Podman, &nothing()).unwrap_err();
-        assert_eq!(gaps, ["the protected-as-mounts guarantee"]);
+        assert_eq!(gaps, ["the same-path-clone guarantee"]);
     }
 
     /// Every policy-1 fixture, as if pot had written it for this backend (its name, and the guarantees this
@@ -1480,7 +1669,7 @@ mod tests {
             (
                 "git-fetch",
                 &[
-                    "write access (the workspace's pins: git directories, hooks, protected paths)",
+                    "write access without launch.json's pins for /tmp/pot-test/sbc (pot 0.3.0 or later resolves them)",
                     "the git.fetch binding",
                 ],
             ),
@@ -1488,14 +1677,14 @@ mod tests {
             (
                 "nix",
                 &[
-                    "write access (the workspace's pins: git directories, hooks, protected paths)",
+                    "write access without launch.json's pins for /tmp/pot-test/sbc (pot 0.3.0 or later resolves them)",
                     "the nix binding",
                 ],
             ),
             (
                 "pi-agent",
                 &[
-                    "write access (the workspace's pins: git directories, hooks, protected paths)",
+                    "write access without launch.json's pins for /tmp/pot-test/piws (pot 0.3.0 or later resolves them)",
                     "the status.relay binding",
                     "dir ~/.pi/agent/extensions (a folder of links)",
                     "dir ~/.pi/agent/git (a folder of links)",
@@ -1516,7 +1705,7 @@ mod tests {
             (
                 "work-bindings",
                 &[
-                    "write access (the workspace's pins: git directories, hooks, protected paths)",
+                    "write access without launch.json's pins for /tmp/pot-test/sbc (pot 0.3.0 or later resolves them)",
                     "the status.relay binding",
                     "file ~/.st/conf.json (mode reassert)",
                 ],
@@ -1524,7 +1713,7 @@ mod tests {
             (
                 "work-siblings",
                 &[
-                    "write access (the workspace's pins: git directories, hooks, protected paths)",
+                    "write access without launch.json's pins for /tmp/pot-test/nc (pot 0.3.0 or later resolves them)",
                     "sibling children (the run's children broker)",
                 ],
             ),
@@ -2375,5 +2564,284 @@ mod tests {
         assert!(plan.files.contains(&RunFile::Dir {
             name: "dockercfg".into()
         }));
+    }
+
+    const NOTES: &str = "/home/u/src/notes";
+
+    /// The write fixture's workspace: the pins launch.json lists (the placeholders not there yet), a sealed `.pi`
+    /// with a file, a folder and a link, and a socket.
+    fn notes_host() -> Fake {
+        Fake {
+            dirs: vec![
+                "/home/u/src/notes",
+                "/home/u/src/notes/.git",
+                "/home/u/src/notes/.git/hooks",
+                "/home/u/src/notes/.git/info",
+                "/home/u/src/notes/sub",
+                "/home/u/src/notes/.pi",
+                "/home/u/src/notes/.pi/skills",
+                "/home/u/docs",
+            ],
+            files: vec![
+                "/home/u/src/notes/.git/config",
+                "/home/u/src/notes/.envrc",
+                "/home/u/src/notes/flake.nix",
+                "/home/u/src/notes/sub/flake.nix",
+                "/home/u/src/notes/.pi/settings.json",
+            ],
+            socks: vec!["/home/u/src/notes/.direnv/s.sock"],
+            links: vec![("/home/u/src/notes/.pi/current", "settings.json")],
+        }
+    }
+
+    fn at(lines: &[String], line: &str) -> usize {
+        lines
+            .iter()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("no line {line}"))
+    }
+
+    /// Write access in place (0.3.0): the workspace writable, then every pin pot's core resolved bound onto itself
+    /// over it, deeper after shallower (the engines mount by destination depth); the placeholders and the seal
+    /// planned for prepare.
+    #[test]
+    fn write_access_binds_the_workspace_then_the_pins_over_it() {
+        let (p, l) = run_dir("write");
+        let plan = go(&p, &l, Engine::Podman, &notes_host()).unwrap();
+        let v = |src: &str, how: &str| format!("--volume {src}:{src}:{how}");
+        let n = |rel: &str| format!("{NOTES}/{rel}");
+        let ls = lines(&plan);
+        let top = at(&ls, &v(NOTES, "rw"));
+        for d in [".git", "sub"] {
+            assert!(at(&ls, &v(&n(d), "rw")) > top, "{d}");
+        }
+        for r in [
+            ".git/config",
+            ".git/config.worktree",
+            ".git/hooks",
+            ".git/info",
+            ".git/commondir",
+            ".git/gitdir",
+            ".envrc",
+            "flake.nix",
+        ] {
+            assert!(at(&ls, &v(&n(r), "ro")) > top, "{r}");
+        }
+        assert!(at(&ls, &v(&n("sub/flake.nix"), "ro")) > at(&ls, &v(&n("sub"), "rw")));
+        assert!(at(&ls, &v(&n(".git/config"), "ro")) > at(&ls, &v(&n(".git"), "rw")));
+        // a socket in the workspace is masked, as under read access
+        assert!(has(
+            &plan,
+            "--volume /r/empty:/home/u/src/notes/.direnv/s.sock:ro"
+        ));
+        // the placeholders, for prepare to create first (they are sources that do not exist yet)
+        assert_eq!(
+            plan.placeholders
+                .iter()
+                .map(|p| (p.path.as_str(), p.kind, p.text.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                (n(".git/commondir").as_str(), Kind::File, Some(".\n")),
+                (n(".git/config.worktree").as_str(), Kind::File, Some("")),
+                (n(".git/gitdir").as_str(), Kind::File, Some("")),
+            ]
+        );
+        // what prepare and run check again before the engine binds it: every pin, by kind
+        for (path, kind) in [
+            (NOTES.to_string(), Kind::Folder),
+            (n(".git"), Kind::Folder),
+            (n(".git/commondir"), Kind::File),
+            (n("sub/flake.nix"), Kind::File),
+            (n(".git/hooks"), Kind::Folder),
+            (n(".pi/settings.json"), Kind::File),
+            (n(".pi/skills"), Kind::Folder),
+        ] {
+            assert!(plan.pins.contains(&(path.clone(), kind)), "{path}");
+        }
+        // the command starts where it was asked to, in the writable workspace
+        assert!(plan.entry.windows(2).any(|w| w == ["-C", NOTES]));
+    }
+
+    /// A sealed folder, as bwrap's `seal`: a folder of the run's bound writable at its path, each entry of the
+    /// host's bound read-only into it (a link as the same link), so a new entry lands in the run folder.
+    #[test]
+    fn write_access_seals_a_sealed_folder() {
+        let (p, l) = run_dir("write");
+        let plan = go(&p, &l, Engine::Podman, &notes_host()).unwrap();
+        assert!(has(&plan, "--volume /r/sealed/0:/home/u/src/notes/.pi:rw"));
+        assert!(has(
+            &plan,
+            "--volume /home/u/src/notes/.pi/settings.json:/home/u/src/notes/.pi/settings.json:ro"
+        ));
+        assert!(has(
+            &plan,
+            "--volume /home/u/src/notes/.pi/skills:/home/u/src/notes/.pi/skills:ro"
+        ));
+        assert!(!lines(&plan).iter().any(|x| x.contains(".pi/current")));
+        for f in [
+            RunFile::FreshDir {
+                name: "sealed".into(),
+            },
+            RunFile::Dir {
+                name: "sealed/0".into(),
+            },
+            RunFile::File {
+                name: "sealed/0/settings.json".into(),
+                text: String::new(),
+                mode: 0o444,
+            },
+            RunFile::Dir {
+                name: "sealed/0/skills".into(),
+            },
+            RunFile::Link {
+                name: "sealed/0/current".into(),
+                target: "settings.json".into(),
+            },
+        ] {
+            assert!(plan.files.contains(&f), "{f:?}");
+        }
+        assert_eq!(plan.seals.len(), 1);
+        assert_eq!(plan.seals[0].dest, "/home/u/src/notes/.pi");
+        assert_eq!(plan.seals[0].base, "sealed/0");
+        assert_eq!(plan.seals[0].rel, ".pi");
+        assert_eq!(plan.seals[0].entries, ["current", "settings.json", "skills"]);
+        assert!(plan.notes.is_empty());
+    }
+
+    #[test]
+    fn write_access_under_docker_binds_with_mount() {
+        let (mut p, l) = run_dir("write");
+        p.backend.proved.retain(|g| g != "resource-limits");
+        let plan = go(&p, &l, Engine::Docker, &notes_host()).unwrap();
+        assert!(has(
+            &plan,
+            "--mount type=bind,source=/home/u/src/notes,target=/home/u/src/notes"
+        ));
+        assert!(has(
+            &plan,
+            "--mount type=bind,source=/home/u/src/notes/.git/config,target=/home/u/src/notes/.git/config,readonly"
+        ));
+        assert!(has(
+            &plan,
+            "--mount type=bind,source=/home/u/src/notes/.git,target=/home/u/src/notes/.git"
+        ));
+    }
+
+    /// A worktree: its common directory is outside its top, bound writable too, with its pins over it.
+    #[test]
+    fn a_worktrees_common_directory_is_bound_with_its_pins() {
+        let (mut p, mut l) = run_dir("write");
+        p.workspace[0].common = "/home/u/src/main/.git".into();
+        let w = &mut l.pins.as_mut().unwrap()[0];
+        w.common = "/home/u/src/main/.git".into();
+        w.dirs = vec![
+            "/home/u/src/main/.git".into(),
+            "/home/u/src/main/.git/worktrees/notes".into(),
+        ];
+        w.ro = vec![crate::launch::Pin {
+            path: "/home/u/src/main/.git/config".into(),
+            kind: Kind::File,
+        }];
+        w.placeholders = vec![];
+        w.sealed = vec![];
+        let mut host = notes_host();
+        host.dirs
+            .extend(["/home/u/src/main/.git", "/home/u/src/main/.git/worktrees/notes"]);
+        host.files.push("/home/u/src/main/.git/config");
+        let plan = go(&p, &l, Engine::Podman, &host).unwrap();
+        let ls = lines(&plan);
+        let common = at(&ls, "--volume /home/u/src/main/.git:/home/u/src/main/.git:rw");
+        assert!(
+            at(
+                &ls,
+                "--volume /home/u/src/main/.git/config:/home/u/src/main/.git/config:ro"
+            ) > common
+        );
+        assert!(has(
+            &plan,
+            "--volume /home/u/src/main/.git/worktrees/notes:/home/u/src/main/.git/worktrees/notes:rw"
+        ));
+    }
+
+    /// K4, as bwrap: nothing is bound inside a hidden folder in the workspace, not even a pin; the folder is masked.
+    #[test]
+    fn a_hidden_folder_in_the_workspace_takes_its_pins_with_it() {
+        let (mut p, l) = run_dir("write");
+        for it in p.items.iter_mut().filter(|i| i.kind == "hidden") {
+            it.paths = Some(vec!["/home/u/src/notes/sub".into()]);
+        }
+        let plan = go(&p, &l, Engine::Podman, &notes_host()).unwrap();
+        assert!(has(&plan, "--volume /r/emptydir:/home/u/src/notes/sub:ro"));
+        assert!(!lines(&plan).iter().any(|x| x.contains("sub/flake.nix")));
+    }
+
+    #[test]
+    fn write_access_needs_the_pins_and_the_look() {
+        let (p, mut l) = run_dir("write");
+        let paths = paths();
+        let inputs = |l: &Launch, look: Option<&LookTools>| {
+            render(&Inputs {
+                policy: &p,
+                launch: l,
+                paths: &paths,
+                engine: Engine::Podman,
+                program: "podman",
+                image: DOCKER_IMAGE,
+                rundir: "/r",
+                base_closure: &[],
+                net: None,
+                look,
+                host: &notes_host(),
+            })
+        };
+        assert_eq!(
+            inputs(&l, None).unwrap_err(),
+            [
+                "write access: the backend's --config names no python, pins and git (the host's look before and after the run)"
+            ]
+        );
+        let mut other = l.pins.clone().unwrap();
+        other[0].top = "/home/u/src/other".into();
+        l.pins = Some(other);
+        assert_eq!(
+            inputs(&l, Some(&look_tools())).unwrap_err(),
+            [
+                "write access without launch.json's pins for /home/u/src/notes (pot 0.3.0 or later resolves them)"
+            ]
+        );
+        l.pins = None;
+        assert_eq!(
+            inputs(&l, Some(&look_tools())).unwrap_err(),
+            [
+                "write access without launch.json's pins for /home/u/src/notes (pot 0.3.0 or later resolves them)"
+            ]
+        );
+    }
+
+    /// More entries than a sealed folder takes (bwrap's `SEAL_MAX`): not sealed, a start note instead.
+    #[test]
+    fn a_sealed_folder_over_the_cap_gets_a_note() {
+        let (p, l) = run_dir("write");
+        let mut host = notes_host();
+        let many: Vec<&'static str> = (0..=SEAL_MAX)
+            .map(|k| &*Box::leak(format!("/home/u/src/notes/.pi/e{k}").into_boxed_str()))
+            .collect();
+        host.files.extend(many);
+        let plan = go(&p, &l, Engine::Podman, &host).unwrap();
+        assert!(plan.seals.is_empty());
+        assert!(!lines(&plan).iter().any(|x| x.contains("/r/sealed")));
+        assert_eq!(
+            plan.notes,
+            [
+                "pot: ~/src/notes/.pi has 260 entries, more than a sealed folder takes (256): it is read-only in this run, so pi cannot take its settings lock there"
+            ]
+        );
+    }
+
+    #[test]
+    fn protected_as_mounts_is_upheld_with_the_look() {
+        assert!(upholds(Engine::Podman, false, true, "protected-as-mounts"));
+        assert!(upholds(Engine::Docker, false, true, "protected-as-mounts"));
+        assert!(!upholds(Engine::Podman, false, false, "protected-as-mounts"));
     }
 }

@@ -14,6 +14,17 @@ pub trait Host {
     fn sockets_under(&self, dir: &str) -> Vec<String>;
     /// The path with every link and `..` resolved, when it exists.
     fn realpath(&self, p: &str) -> Option<String>;
+    /// The entries of the folder DIR, sorted by name, each a folder, a link (with what it says) or a file; never
+    /// through a link. Empty when DIR can't be read.
+    fn entries(&self, dir: &str) -> Vec<(String, Entry)>;
+}
+
+/// One entry of a folder, as [`Host::entries`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    Folder,
+    File,
+    Link(String),
 }
 
 pub struct RealHost;
@@ -31,6 +42,28 @@ impl Host for RealHost {
 
     fn is_real_dir(&self, p: &str) -> bool {
         Path::new(p).symlink_metadata().is_ok_and(|m| m.is_dir())
+    }
+
+    fn entries(&self, dir: &str) -> Vec<(String, Entry)> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return vec![];
+        };
+        let mut out: Vec<(String, Entry)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let m = e.path().symlink_metadata().ok()?;
+                let kind = if m.file_type().is_symlink() {
+                    Entry::Link(std::fs::read_link(e.path()).ok()?.to_string_lossy().into_owned())
+                } else if m.is_dir() {
+                    Entry::Folder
+                } else {
+                    Entry::File
+                };
+                Some((e.file_name().to_string_lossy().into_owned(), kind))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     fn sockets_under(&self, dir: &str) -> Vec<String> {

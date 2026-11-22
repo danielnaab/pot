@@ -2907,3 +2907,490 @@ fn a_link_planted_in_secrets_is_never_followed() {
     ok(&verb(&top, &run, "cleanup").output().unwrap());
     assert!(outside.join("E_TOKFILE").exists(), "cleanup followed the link");
 }
+
+// ---------------------------------------------------------------- write access in place (0.3.0)
+
+/// pot's core, the repository's (core/pins.py: the pins and the host's look).
+fn core_dir() -> PathBuf {
+    fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core")).unwrap()
+}
+
+/// Host git for the tests' own repositories: no user or system configuration (no signing, no hooks).
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@e")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@e")
+        .output()
+        .unwrap();
+    ok(&out);
+}
+
+fn put(dir: &Path, files: &[(&str, &str)]) {
+    for (rel, text) in files {
+        let p = dir.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    }
+}
+
+/// A write world: `world`'s run folder with a real repository in its workspace (or, with WORKTREE, a worktree of a
+/// repository beside it, its common directory outside the workspace), `access: write`, protected paths and a sealed
+/// `.pi`, the backend's config naming the look's programs (python, core's pins.py, git), git's closure in the run, and
+/// launch.json's pins as pot's core resolves them (`pins.resolve_workspace`, run here as pot runs it). BEFORE runs on
+/// the workspace before the pins are resolved. Returns (top, run, workspace, common).
+fn write_world(
+    name: &str,
+    engine: &str,
+    program: &str,
+    worktree: bool,
+    before: impl FnOnce(&Path),
+) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+    let python = find("python3")?;
+    let gitbin = find("git")?;
+    let (top, run) = world(name, engine, program, &["true"]);
+    let files: &[(&str, &str)] = &[
+        ("flake.nix", "{ }\n"),
+        ("sub/flake.nix", "{ }\n"),
+        ("AGENTS.md", "# agents\n"),
+        ("notes.md", "notes\n"),
+        (".pi/settings.json", "{}\n"),
+    ];
+    let mut ws = top.join("ws");
+    fs::remove_dir_all(&ws).unwrap();
+    let common = if worktree {
+        let main = top.join("main");
+        fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        put(&main, files);
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-qm", "init"]);
+        git(
+            &main,
+            &["worktree", "add", "-q", &ws.display().to_string(), "-b", "w"],
+        );
+        main.join(".git")
+    } else {
+        fs::create_dir_all(&ws).unwrap();
+        git(&ws, &["init", "-q", "-b", "main"]);
+        put(&ws, files);
+        git(&ws, &["add", "-A"]);
+        git(&ws, &["commit", "-qm", "init"]);
+        ws.join(".git")
+    };
+    ws = fs::canonicalize(&ws).unwrap();
+    let common = fs::canonicalize(common).unwrap();
+    before(&ws);
+    let (w, c) = (ws.display().to_string(), common.display().to_string());
+    let mut p: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("policy.json")).unwrap()).unwrap();
+    p["access"] = "write".into();
+    for it in p["items"].as_array_mut().unwrap() {
+        if it["kind"] == "access" {
+            it["value"] = "write".into();
+        }
+    }
+    p["workspace"][0]["path"] = w.clone().into();
+    p["workspace"][0]["common"] = c.clone().into();
+    p["workspace"][0]["protected"] =
+        serde_json::json!(["**/flake.nix", "**/.pi", "AGENTS.md", "missing.md", ".git/hooks"]);
+    p["workspace"][0]["sealed"] = serde_json::json!(["**/.pi"]);
+    p["backend"]["proved"]
+        .as_array_mut()
+        .unwrap()
+        .push("protected-as-mounts".into());
+    fs::write(run.join("policy.json"), p.to_string()).unwrap();
+    // pot's core: the pins, resolved once (core/pot.py workspace_pins)
+    let resolved = Command::new(&python)
+        .args([
+            "-I",
+            "-c",
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import pins; \
+             print(json.dumps([pins.resolve_workspace(sys.argv[2], json.loads(sys.argv[3]))]))",
+        ])
+        .arg(core_dir())
+        .arg(&gitbin)
+        .arg(p["workspace"][0].to_string())
+        .output()
+        .unwrap();
+    ok(&resolved);
+    let mut l: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("launch.json")).unwrap()).unwrap();
+    l["pins"] = serde_json::from_slice(&resolved.stdout).unwrap();
+    l["repoKitPaths"] = serde_json::json!({ w.clone(): ["flake.nix", "flake.lock"] });
+    l["cwd"] = w.into();
+    // git in the run (its closure, bound read-only with the rest under closure-store)
+    l["closure"] = String::from_utf8(closure_of(&[&gitbin]))
+        .unwrap()
+        .lines()
+        .collect::<Vec<_>>()
+        .into();
+    fs::write(run.join("launch.json"), l.to_string()).unwrap();
+    let path = top.join("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    cfg["python"] = python.display().to_string().into();
+    cfg["pins"] = core_dir().join("pins.py").display().to_string().into();
+    cfg["git"] = gitbin.display().to_string().into();
+    fs::write(&path, cfg.to_string()).unwrap();
+    Some((top, run, ws, common))
+}
+
+/// Set the run's command: bash's sh with SCRIPT, then ARGS ($1...).
+fn set_script(run: &Path, script: &str, args: &[&str]) {
+    let mut l: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("launch.json")).unwrap()).unwrap();
+    let mut words = vec![
+        which("sh").display().to_string(),
+        "-c".into(),
+        script.to_string(),
+        "_".into(),
+    ];
+    words.extend(args.iter().map(|a| (*a).to_string()));
+    l["argv"] = words.into();
+    fs::write(run.join("launch.json"), l.to_string()).unwrap();
+}
+
+/// What the run prints for each try: `NAME: ok` or `NAME: refused`.
+const TRY: &str = r#"t() { n=$1; shift; if "$@" >/dev/null 2>&1; then echo "$n: ok"; else echo "$n: refused"; fi; }
+w() { if (echo x >> "$2") 2>/dev/null; then echo "$1: ok"; else echo "$1: refused"; fi; }
+c=$1 g=$2
+"#;
+
+fn after_event(top: &Path, run: &Path) -> serde_json::Value {
+    let out = verb(top, run, "after").output().unwrap();
+    ok(&out);
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+fn gitbin() -> String {
+    find("git").unwrap().display().to_string()
+}
+
+/// Write access in place, under each engine: the workspace is writable and a commit works; every pin pot's core
+/// resolved holds against a write, a rename, a removal and a replacement (`**/flake.nix`, a protected file, `.git/config`,
+/// `.git/hooks`, the git directory itself, the placeholders, a sealed folder's entry), the folder above a pin can't be
+/// moved, `git config` can't write, and nothing outside the workspace is reached. The engines mount by destination depth,
+/// so a read-only pin lands over the writable workspace: this run is the proof. `after` reports what bwrap's does.
+#[test]
+#[allow(clippy::too_many_lines)] // one script of tries, its expected lines, and the host's view after
+fn write_access_in_place_holds_every_pin() {
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some((top, run, ws, _)) =
+            write_world(&format!("{engine}-write"), engine, &program, false, |_| {})
+        else {
+            eprintln!("python3 or git is not on PATH: no write run");
+            continue;
+        };
+        let script = format!(
+            "{TRY}{}",
+            r#"w "new file" new.txt
+w "flake.nix" flake.nix
+t "rm flake.nix" $c/rm -f flake.nix
+t "mv flake.nix" $c/mv flake.nix f2
+echo y > other; t "rename over flake.nix" $c/mv -f other flake.nix
+w "sub/flake.nix" sub/flake.nix
+t "mv sub" $c/mv sub sub2
+t "rm -r sub" $c/rm -rf sub
+w "AGENTS.md" AGENTS.md
+t "replace AGENTS.md" $c/ln -sf /etc/passwd AGENTS.md
+w ".git/config" .git/config
+t "mv .git/config" $c/mv .git/config .git/c2
+t "rm .git/config" $c/rm -f .git/config
+w ".git/hooks/pre-commit" .git/hooks/pre-commit
+t "mv .git/hooks" $c/mv .git/hooks .git/h2
+t "mv .git" $c/mv .git .git2
+t "git config" $g config user.name intruder
+t "git config --global" $g config --file .git/config core.hooksPath /tmp
+w ".git/commondir" .git/commondir
+t "rm .git/commondir" $c/rm -f .git/commondir
+w ".git/config.worktree" .git/config.worktree
+w ".git/gitdir" .git/gitdir
+w ".pi/settings.json" .pi/settings.json
+t "rm .pi/settings.json" $c/rm -f .pi/settings.json
+w ".pi/new.json" .pi/new.json
+t "mv .pi" $c/mv .pi pi2
+w "outside" ../outside
+t "mkdir outside" $c/mkdir ../outside-dir
+w "missing.md" missing.md
+echo more >> notes.md
+t "git commit" $g -c user.name=t -c user.email=t@e commit -qam run
+echo "commondir: $($c/cat .git/commondir)"
+"#
+        );
+        let cbin = Path::new(&coreutils("cat"))
+            .parent()
+            .unwrap()
+            .display()
+            .to_string();
+        set_script(&run, &script, &[&cbin, &gitbin()]);
+        let config_before = fs::read(ws.join(".git/config")).unwrap();
+        prepare(&top, &run);
+        // the placeholders are there for the run, read-only in it
+        assert_eq!(fs::read_to_string(ws.join(".git/commondir")).unwrap(), ".\n");
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        ok(&out);
+        let got: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(String::from)
+            .collect();
+        let want = [
+            "new file: ok",
+            "flake.nix: refused",
+            "rm flake.nix: refused",
+            "mv flake.nix: refused",
+            "rename over flake.nix: refused",
+            "sub/flake.nix: refused",
+            "mv sub: refused",
+            "rm -r sub: refused",
+            "AGENTS.md: refused",
+            "replace AGENTS.md: refused",
+            ".git/config: refused",
+            "mv .git/config: refused",
+            "rm .git/config: refused",
+            ".git/hooks/pre-commit: refused",
+            "mv .git/hooks: refused",
+            "mv .git: refused",
+            "git config: refused",
+            "git config --global: refused",
+            ".git/commondir: refused",
+            "rm .git/commondir: refused",
+            ".git/config.worktree: refused",
+            ".git/gitdir: refused",
+            ".pi/settings.json: refused",
+            "rm .pi/settings.json: refused",
+            ".pi/new.json: ok",
+            "mv .pi: refused",
+            "outside: refused",
+            "mkdir outside: refused",
+            "missing.md: ok",
+            "git commit: ok",
+            "commondir: .",
+        ];
+        assert_eq!(got, want, "{engine}: {}", String::from_utf8_lossy(&out.stderr));
+        // on the host: what the run wrote in the workspace is there; every pin is as it was; nothing outside
+        assert_eq!(fs::read_to_string(ws.join("new.txt")).unwrap(), "x\n");
+        assert_eq!(fs::read_to_string(ws.join("flake.nix")).unwrap(), "{ }\n");
+        assert_eq!(fs::read_to_string(ws.join("sub/flake.nix")).unwrap(), "{ }\n");
+        assert_eq!(fs::read_to_string(ws.join("AGENTS.md")).unwrap(), "# agents\n");
+        assert_eq!(fs::read(ws.join(".git/config")).unwrap(), config_before);
+        assert!(!ws.join(".git/hooks/pre-commit").exists());
+        assert!(
+            !ws.join(".pi/new.json").exists(),
+            "{engine}: a sealed folder's new entry reached the host"
+        );
+        assert!(!top.join("outside").exists() && !top.join("outside-dir").exists());
+        // the after event: bwrap's, from the host's look (pins.py)
+        let ev = after_event(&top, &run);
+        assert_eq!(ev["commits"].as_array().unwrap().len(), 1, "{engine}: {ev}");
+        assert_eq!(
+            ev["touches_host_run"],
+            serde_json::json!(["missing.md"]),
+            "{engine}: {ev}"
+        );
+        assert_eq!(ev["new_git_metadata"], serde_json::json!([]), "{engine}: {ev}");
+        assert_eq!(ev["repo_kit_change"], serde_json::json!([]), "{engine}: {ev}");
+        assert_eq!(
+            ev["sealed_left"],
+            serde_json::json!([{ "path": ".pi/new.json", "type": "file", "size": 2 }]),
+            "{engine}: {ev}"
+        );
+        assert_eq!(ev["unsigned"], 1);
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+        // cleanup: the placeholders that still hold what prepare wrote, and the sealed folders' bases, are gone
+        for n in ["commondir", "config.worktree", "gitdir"] {
+            assert!(!ws.join(".git").join(n).exists(), "{engine}: .git/{n} is left");
+        }
+        assert!(!run.join("sealed").exists());
+        assert_eq!(engine_processes(&run), Vec::<String>::new());
+    }
+}
+
+/// A worktree: its common directory (outside the workspace) is bound writable with its pins over it, so the run commits
+/// but can't write the common config or hooks, or move the worktree's git directory.
+#[test]
+fn write_access_in_a_worktree_pins_its_common_directory() {
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some((top, run, ws, common)) =
+            write_world(&format!("{engine}-worktree"), engine, &program, true, |_| {})
+        else {
+            continue;
+        };
+        let k = common.display().to_string();
+        let script = format!(
+            "{TRY}k=$3\n{}",
+            r#"w "common config" $k/config
+w "common hooks" $k/hooks/pre-commit
+t "mv common hooks" $c/mv $k/hooks $k/h2
+t "mv the worktree's git directory" $c/mv $k/worktrees/ws $k/worktrees/x
+w "the worktree's commondir" $k/worktrees/ws/commondir
+w ".git file" .git
+w "flake.nix" flake.nix
+echo more >> notes.md
+t "git commit" $g -c user.name=t -c user.email=t@e commit -qam run
+"#
+        );
+        let cbin = Path::new(&coreutils("cat"))
+            .parent()
+            .unwrap()
+            .display()
+            .to_string();
+        set_script(&run, &script, &[&cbin, &gitbin(), &k]);
+        prepare(&top, &run);
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        ok(&out);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).lines().collect::<Vec<_>>(),
+            [
+                "common config: refused",
+                "common hooks: refused",
+                "mv common hooks: refused",
+                "mv the worktree's git directory: refused",
+                "the worktree's commondir: refused",
+                ".git file: refused",
+                "flake.nix: refused",
+                "git commit: ok",
+            ],
+            "{engine}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!common.join("hooks/pre-commit").exists());
+        assert_eq!(after_event(&top, &run)["commits"].as_array().unwrap().len(), 1);
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+        assert!(ws.join("notes.md").exists());
+    }
+}
+
+/// A link on a protected path, a link above one, and a protected file with a second hard link stop the run in
+/// prepare, with the message pot's core gave (bwrap's), and no container starts.
+#[test]
+fn a_link_or_a_hard_link_on_a_pin_stops_the_run() {
+    type Plant = fn(&Path);
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let cases: [(&str, Plant, &str); 3] = [
+            (
+                "link",
+                |ws| {
+                    fs::remove_file(ws.join("sub/flake.nix")).unwrap();
+                    symlink("../flake.nix", ws.join("sub/flake.nix")).unwrap();
+                },
+                "sub/flake.nix is a symbolic link, so the sandbox can't make it read-only",
+            ),
+            (
+                "above",
+                |ws| {
+                    fs::rename(ws.join(".pi"), ws.join("pi-real")).unwrap();
+                    symlink("pi-real", ws.join(".pi")).unwrap();
+                },
+                ".pi is a symbolic link, so the sandbox can't make it read-only",
+            ),
+            (
+                "hard",
+                |ws| fs::hard_link(ws.join("AGENTS.md"), ws.join("agents-link")).unwrap(),
+                "AGENTS.md has another hard link, so a run could write it through that link",
+            ),
+        ];
+        for (case, plant, said) in cases {
+            let Some((top, run, ws, _)) = write_world(
+                &format!("{engine}-refused-{case}"),
+                engine,
+                &program,
+                false,
+                plant,
+            ) else {
+                continue;
+            };
+            let out = verb(&top, &run, "prepare").output().unwrap();
+            assert_eq!(out.status.code(), Some(1), "{engine} {case}");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                err.starts_with(&format!("pot (review): {said}")),
+                "{engine} {case}: {err}"
+            );
+            assert!(!run.join("container.argv").exists());
+            assert!(
+                !ws.join(".git/commondir").exists(),
+                "{engine} {case}: a placeholder was made"
+            );
+            let refused_run = verb(&top, &run, "run").output().unwrap();
+            assert_eq!(refused_run.status.code(), Some(1));
+            ok(&verb(&top, &run, "cleanup").output().unwrap());
+        }
+    }
+}
+
+/// A pin that changed after prepare (replaced, so another inode; or made a link) stops `run` before the engine
+/// starts: run checks each pin again, by inode, just before it.
+#[test]
+fn run_refuses_a_pin_changed_after_prepare() {
+    type Change = fn(&Path);
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let cases: [(&str, Change, &str); 3] = [
+            (
+                "replaced",
+                |ws| {
+                    fs::copy(ws.join("flake.nix"), ws.join("f2")).unwrap();
+                    fs::rename(ws.join("f2"), ws.join("flake.nix")).unwrap();
+                },
+                "flake.nix",
+            ),
+            (
+                "linked",
+                |ws| {
+                    fs::remove_file(ws.join("AGENTS.md")).unwrap();
+                    symlink("/etc/passwd", ws.join("AGENTS.md")).unwrap();
+                },
+                "AGENTS.md",
+            ),
+            (
+                "hard-linked",
+                |ws| fs::hard_link(ws.join(".git/config"), ws.join("config-link")).unwrap(),
+                ".git/config",
+            ),
+        ];
+        for (case, change, path) in cases {
+            let Some((top, run, ws, _)) = write_world(
+                &format!("{engine}-changed-{case}"),
+                engine,
+                &program,
+                false,
+                |_| {},
+            ) else {
+                continue;
+            };
+            set_script(&run, "echo ran", &[]);
+            prepare(&top, &run);
+            change(&ws);
+            let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(1), "{engine} {case}: {err}");
+            assert!(
+                err.contains("changed since prepare") && err.contains(&format!("{}/{path}", ws.display())),
+                "{engine} {case}: {err}"
+            );
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("ran"));
+            assert!(
+                !run.join("container.id").exists(),
+                "{engine} {case}: the engine started"
+            );
+            ok(&verb(&top, &run, "cleanup").output().unwrap());
+        }
+    }
+}

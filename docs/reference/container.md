@@ -6,9 +6,9 @@ status: draft
 pot's third backend, beside bubblewrap and Seatbelt: it carries out a run's [policy.json/1](../../contracts/policy-1.md)
 as one `podman run` or `docker run`, a fresh container per run, on any host or CI that has either. It is pot's
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
-`packages.pot-container`). This page is its fourth slice (pot phase 2, plan step 3): it probes, renders the
-command and runs it, for runs in place with read access or none, with the network through pot's proxy and the
-`credential` and `mcp` bindings; no root offers the backend yet. The transcripts
+`packages.pot-container`). This page is its fifth slice (pot phase 2, plan step 3): it probes, renders the
+command and runs it, for runs in place with read access, write access or none, with the network through pot's proxy
+and the `credential` and `mcp` bindings; no root offers the backend yet. The transcripts
 that test it are the pages under [container/](container/probe.md).
 
 ```
@@ -20,8 +20,8 @@ pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
 | `probe` | Prints `{ "guarantees": [ … ] }`, or none beside an `error` ([transcript](container/probe.md)) |
 | `prepare` | Checks the policy and refuses what it can't carry out; places the run's files and `container.argv` (the command, NUL-separated). `--print` prints the command and writes nothing ([transcript](container/prepare.md)) |
 | `run` | Reads the bindings' values on the host, then runs `container.argv` with the engine environment `prepare` recorded; exits with the command's status once the container is gone ([Run and cleanup](#run-and-cleanup), [Bindings](#bindings)) |
-| `after` | Prints the run's `after` event: bwrap's, with the proxy's `denials` and `loopback` and nothing else (nothing a read-only run can leave) |
-| `cleanup` | Stops the run's proxy if it still runs, removes the run's container and store through the engine, then what `prepare` and `run` placed (a via-file binding's values among them); names every removal it could not make (exit 1) |
+| `after` | Prints the run's `after` event: bwrap's, with the proxy's `denials` and `loopback`; with write access, the host's look after the run (commits, changed host-run files, new git metadata, sealed leftovers: [Write access](#write-access)) |
+| `cleanup` | Stops the run's proxy if it still runs, removes the run's container and store through the engine, then what `prepare` and `run` placed (a via-file binding's values, the placeholders, the sealed folders' bases among them); names every removal it could not make (exit 1) |
 
 A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 
@@ -36,7 +36,9 @@ programs, also named as bwrap's config names them: `python` and `proxy` (pot's `
 network under `closure-store`). Unless `python` and `proxy` are files and `socat` a real file under a path of
 `netClosure` (one test, which `probe` and `prepare` share), `probe` does not prove `private-proxy` and `prepare`
 refuses the network and `private-proxy`. No contract field is added: these are the backend's own config, and the proxy's other
-inputs are launch.json/1's existing fields (below).
+inputs are launch.json/1's existing fields (below). Write access (0.3.0) needs `pins` (pot's `core/pins.py`) and
+`git` (host git) beside `python`, each a file: the host's look before and after the run. Without them `probe` does
+not prove `protected-as-mounts` and `prepare` refuses write access.
 
 **`launch.json`** ([launch.json/1](../../contracts/launch-1.md)) is read leniently, and only these fields:
 
@@ -52,6 +54,8 @@ inputs are launch.json/1's existing fields (below).
 | `pane`, `hostTools.tmux` | The proxy's notices of a denial on the caller's tmux pane (`--tmux`, `--pane`), as bwrap's |
 | `netFix` | The permanent fix a denial names (the proxy's `--fix`) |
 | `siblingOf` | A sibling's proxy shows no one-run fix (`--sibling`) |
+| `pins` | Write access: each workspace's pins, as pot's core resolved them ([Write access](#write-access)); read strictly (an unknown key is refused) |
+| `repoKitPaths` | Write access: the look's `repo_kit_change` (read by `pins.py`) |
 
 ## Probe
 
@@ -77,9 +81,10 @@ Guarantees, in bubblewrap's vocabulary (no new names):
 | `in-place` | The workspace at its own path |
 | `root-files` | A `file` item at `/…`, bound into the container's own root |
 | `resource-limits` | podman only: `--cgroups=split` keeps the container in the cgroup of the pot that starts it, so the scope's `MemoryMax` and `TasksMax` apply (seen in a smoke run: the container's cgroup is a child of its caller's) |
+| `protected-as-mounts` | When the config names the look's programs (`python`, `pins`, `git`, each a file): write access binds each pin pot's core resolved onto itself, read-only over the writable workspace, a mount point the run can't write, rename, remove or replace ([Write access](#write-access)) |
 | `private-proxy` | When the config's network programs pass the one test `prepare` applies too (`render::net_gaps`, V2): `python` and `proxy` files, `socat` a real file (not a link) under a path of `netClosure`, which is required. The proxy listens on a socket in the run folder, which only the caller can reach, and the run serves it on 127.0.0.1:3128 in its own network namespace ([The network](#the-network)) |
 
-Not proved yet: `protected-as-mounts`, `same-path-clone` (see [What's next](#whats-next)); never: `nest`,
+Not proved yet: `same-path-clone` (see [What's next](#whats-next)); never: `nest`,
 `separate-kernel`.
 
 **pot must not cache this probe.** pot caches a backend's probe per build; this one's answer depends on the caller
@@ -196,6 +201,7 @@ run's that the plan binds, but for the pipe and the proxy's socket, which `run` 
 | `closure-store` not proved | `/nix/store` bound read-only | the same |
 | `/bin/sh`, `/usr/bin/env`, the CA bundle, `/etc/passwd`, `/etc/group`, `/etc/hosts` | read-only binds | the same |
 | `access: read` (in place) | `PATH` bound read-only, and `common` when it is outside (a worktree's); in each, sockets and hidden paths masked | the same |
+| `access: write` (in place) | `PATH` bound writable, and `common` when it is outside (a worktree's); then launch.json's `pins`: each of `dirs` bound writable onto itself and each of `ro` read-only onto itself; sockets and hidden paths masked as with read access; each sealed folder a folder of the run's (`RUNDIR/sealed/N`) bound writable at its path with its entries bound read-only into it ([Write access](#write-access)) | the same, with `--mount` (`readonly` for `ro`) |
 | `access: none` | no workspace at all (pot 0.2.0): `PATH` and `common` masked where a bound folder would show them (bwrap's `unseen`); the command starts in the home | the same |
 | `read`, `write` items | bound read-only or writable, where the path exists and is not hidden | the same |
 | `socket` items | bound; every other socket under a bound folder or the workspace is masked | the same |
@@ -221,6 +227,54 @@ not its own real path (a link, or `..`), naming it. A hidden path that is a link
 real path; Home Manager's files are links) is not refused: the link is masked where a bound folder shows it, and so
 is its real path, by the kind of what it points to. And it refuses a bind whose source does not exist (the run folder's own files and the state
 directories aside), since docker would create it.
+
+## Write access
+
+`access: write` in place (0.3.0) carries out what bubblewrap's `Pins` did, from the list pot's core resolved once as
+the run started (launch.json/1's [`pins`](../../contracts/launch-1.md#pins), `core/pins.py`; decided 2026-11-21: one
+implementation, no port of `Pins` here):
+
+- **Binds.** The workspace's top (and a worktree's common directory, outside it) writable at its own path; each of
+  `dirs` (every git directory, and every folder between a pin and its root) writable onto itself; each of `ro` (a
+  git directory's `config`, `config.worktree`, `hooks`, `info`, `commondir` and `gitdir`, a `.git` file, what a
+  `**/NAME` pattern names, each protected path that exists) read-only onto itself. A pin is a mount point: the run
+  can't write it (EROFS), or rename, remove or replace it, or rename a file over it (EBUSY); a folder above a pin is
+  a mount point too, so a pin can't be moved away with its folder. So `git config` fails (its rename over
+  `.git/config`), while a commit works (objects, refs and the index are writable). podman and docker mount by
+  destination depth, so each pin lands over the writable workspace (tested under both: `tests/run.rs`,
+  `write_access_in_place_holds_every_pin`). Sockets and hidden paths in the workspace are masked as with read
+  access, and nothing is bound inside a hidden folder, a pin neither (bwrap's K4). A protected path that does not
+  exist at the start is not pinned, as under bubblewrap: the run can create it, and `after` reports it.
+- **Placeholders.** `prepare` creates each of `pins`' placeholders before the engine binds them (a file exclusively,
+  never through a link; one there already stops the run), records the files in `placeholders.json` (bwrap's), and
+  binds them read-only: a run can't create `commondir`, `config.worktree` or `gitdir` in a git directory, or a hooks
+  folder where git had none. `cleanup` removes each file that still holds what `prepare` wrote, and leaves a folder,
+  as bwrap does.
+- **Refusals.** A `refused` entry (a link on or above a protected path, a protected file with a second hard link)
+  stops `prepare` with its message, bwrap's, before anything is placed. `prepare` then checks each pin again (no
+  link, its kind, a protected file with one link, no placeholder there yet): the host may have changed it since pot
+  resolved it.
+- **Checked again before the engine.** `prepare` records each workspace path the plan binds (the top, each pin, each
+  sealed entry) with its device and inode in `container.env`; `run`, just before it starts the engine, refuses one
+  that is now another file, a link, of another kind, or (a protected file) has a second hard link: `the workspace
+  changed since prepare: PATH (…); run prepare again`, and the engine never starts. bubblewrap has no such check: it
+  binds by path when it starts, right after its own resolution. The engine still resolves a bind's source when it
+  mounts it, so a change in the moment between this check and the mount is not caught; only a process of the
+  caller's on the host could make one.
+- **Sealed folders**, as bwrap's `seal`: each of `pins`' `sealed` folders (not hidden, at most 256 entries) is the run
+  folder's `sealed/N`, bound writable at its path, with each entry of the host's bound read-only into it (`prepare`
+  makes its mount point in `sealed/N` first, so no engine creates one as root) and a link made there as the same
+  link. No entry can be written, replaced, renamed or removed, and a new entry (pi's `settings.json.lock`) lands in
+  `sealed/N`, never on the host. A folder with more entries stays as it is, with bwrap's start note. `cleanup`
+  removes `sealed/`, making a folder the run left unwritable writable first.
+- **The host's look.** `prepare` runs pot's own code, `PYTHON -I -S PINS before GIT RUNDIR` (the config's programs, in
+  pot's environment, as bwrap's `prepare` runs), which writes `before.json` (bwrap's: the git metadata fingerprint,
+  the host-run files' hashes, the refs) and prints the start notes for hidden paths git tracks; `prepare` adds those
+  and a sealed folder's note to launch.json's `notes`, the one key a backend built apart adds. `after` runs `PINS
+  after`, which reports what bwrap's `after` does for an in-place write run: `commits`, `unsigned`, `base`,
+  `touches_host_run`, `repo_kit_change`, `new_git_metadata`, `hidden_blanked`, and `sealed_left` (from the seals
+  `prepare` recorded in `sealed.json`). It reads the run folder's files never through a link, and its arguments hold
+  paths only. `agent_config` stays empty, as it is for bwrap's in-place runs.
 
 ## Run and cleanup
 
@@ -380,8 +434,8 @@ refused, since a field this backend does not know could narrow the run):
 
 **What this slice does not carry out yet** (each is refused, never dropped):
 
-- write access in place: the workspace's pins (git directories, `config`, hooks and the protected paths as read-only
-  mounts, links and hard links refused, the placeholders), as bwrap's `Pins`;
+- write access when launch.json has no `pins` for a workspace (a pot before 0.3.0), or the config names no `python`,
+  `pins` and `git`;
 - clone mode: the clone at its original path, its pins, proposal links, and the `after` staging fetch;
 - the network, and `private-proxy`, when the config's `python`, `proxy`, `socat` and `netClosure` do not pass
   `probe`'s test (above);
@@ -395,6 +449,9 @@ refused, since a field this backend does not know could narrow the run):
   that bash can't hand over, or that is not a `NAME`;
 - a path that is not its real path, and a bind source that does not exist (above).
 
+It stops the run, as bwrap does and not as a gap, on a pin pot's core could not make (launch.json's `refused`: a
+link, a hard link), with its message, and on a pin that changed since ([Write access](#write-access)).
+
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
 value found: a secret misplaced into a field is never printed. `prepare` can run again: it replaces its files, never
 writing through a link planted in the run folder, and names the file it could not write.
@@ -402,17 +459,18 @@ writing through a link planted in the run folder, and names the file it could no
 Not placed yet, which leaves the run narrower than bubblewrap's, never wider: `/run/pot/README.md`, `explain.txt`,
 `why.json`, `bin/` (the shims), `notfound/` and `bash_env` (the not-found advice), `~/.gitconfig`, and
 `/run/current-system`. So the command's environment is bwrap's but for `BASH_ENV`, the exported not-found handler, and
-`/run/pot/bin` and `/run/pot/notfound` on `PATH` (tested against bwrap.py's own `run_env` and `deliver`). Sealed folders are read-only (only read access is carried out, so every workspace folder
-is).
+`/run/pot/bin` and `/run/pot/notfound` on `PATH` (tested against bwrap.py's own `run_env` and `deliver`). With read
+access a sealed folder stays plainly read-only, as the whole workspace is (bwrap seals it there too); with write
+access it is sealed as bwrap seals it ([Write access](#write-access)). The hidden-path start notes are given for
+write runs only.
 
 ## What's next
 
 1. The other bindings: `status.relay`, `git.fetch`, `nix` (the broker and the nix relay); then siblings.
-2. Write access: pot's core resolves the workspace's protected paths and pins and passes them to the backend
-   (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
-3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
-4. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
-5. pot choosing the backend from a root, probing it for every run.
+2. Clone mode: the clone at its original path, its pins (the same `core/pins.py`), `after` and `cleanup` for clones;
+   the conformance review with executed evidence per guarantee, write access included (plan step 4).
+3. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
+4. pot choosing the backend from a root, probing it for every run.
 
 ## Sources
 
@@ -449,6 +507,16 @@ is).
   shape with no value; a via-file mcp key with a quote, and a missing key file, are refused before the engine starts,
   naming the binding and file; the command's environment equals what bwrap.py's `run_env` plus `deliver` computes for
   the same policy (but for what is not placed yet, above)
+- The write slice's tests in `run.rs` (rootless podman 5.4.1 and docker on platform-vm, 2026-11-22), under both
+  engines, with the pins resolved by `core/pins.py` as pot does: the workspace is writable and a commit works; a
+  write, `rm`, `mv` and a rename over each of `flake.nix`, `sub/flake.nix`, `AGENTS.md`, `.git/config`, `.git/hooks`,
+  `.git`, the placeholders and a sealed entry fail, so do `mv sub` (a pin's folder), `git config` and a write or
+  `mkdir` outside the workspace; a sealed folder's new entry stays in the run folder and is in `sealed_left`; a
+  created `missing.md` (protected, absent at the start) is in `touches_host_run`, as under bwrap; in a worktree, the
+  common `config`, `hooks`, the worktree's git directory and its `.git` file hold and a commit works; a link on a
+  pin and a hard-linked protected file stop `prepare` with bwrap's message and place nothing; a pin replaced, linked
+  or hard-linked after `prepare` stops `run` before the engine starts
+- [core/pins.py](../../core/pins.py): `Pins`, `resolve_workspace` (the pins), `before_look`, `look_after` (the look)
 - [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `credentials`, `deliver`, `mcp_servers`, `masked`, `Pins`, `cleanup`, `run` (the proxy),
   `after` (denials and loopback) (the reference backend); [core/proxy.py](../../core/proxy.py)
 - [core/pot.py](../../core/pot.py): `launch_facts` (launch.json), `scope_for` (resource-limits)

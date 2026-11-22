@@ -141,6 +141,12 @@ fn context_of(rundir: &Path) -> String {
 fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> {
     let (p, l) = load(rundir)?;
     let refuse = |m: String| Refusal::new(&p.context, m);
+    // 0.3.0: a pin pot's core could not make (a link, a hard link) stops the run, with its message (bwrap's)
+    if p.access == "write" && p.mode == "in-place" {
+        if let Some(r) = l.pins.iter().flatten().find_map(|w| w.refused.as_ref()) {
+            return Err(refuse(r.message.clone()));
+        }
+    }
     let paths = cfg.paths().map_err(refuse)?;
     let (engine, program) = engine(cfg).map_err(refuse)?;
     let base = match &cfg.base_closure {
@@ -157,6 +163,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
         .map_err(|e| refuse(format!("the run directory {}: {e}", rundir.display())))?;
     let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
     let net = cfg.net_tools().map_err(refuse)?;
+    let look = cfg.look_tools();
     let inputs = Inputs {
         policy: &p,
         launch: &l,
@@ -167,6 +174,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
         rundir: &abs.to_string_lossy(),
         base_closure: &base,
         net: net.as_ref(),
+        look: look.as_ref(),
         host: &host::RealHost,
     };
     let plan = render::render(&inputs).map_err(|gaps| {
@@ -315,7 +323,88 @@ fn dir_new(path: &Path) -> std::io::Result<()> {
 /// for the variables and the proxy's socket. `prepare` records no kind for them.
 const RUNTIME: &[&str] = &["secrets.fifo", "proxy.sock"];
 
-fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
+/// A workspace path the plan binds, as `prepare` found it: `run` checks it again just before the engine starts.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PinRecord {
+    path: String,
+    kind: launch::Kind,
+    dev: u64,
+    ino: u64,
+    /// A protected file: it must have no second hard link.
+    single: bool,
+}
+
+/// What is at PATH now, never through a link: (kind, dev, ino, links), or why it is no pin.
+fn pin_now(path: &str) -> Result<(launch::Kind, u64, u64, u64), &'static str> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = Path::new(path).symlink_metadata().map_err(|_| "missing")?;
+    if m.file_type().is_symlink() {
+        return Err("a link");
+    }
+    let kind = if m.is_dir() {
+        launch::Kind::Folder
+    } else {
+        launch::Kind::File
+    };
+    Ok((kind, m.dev(), m.ino(), m.nlink()))
+}
+
+/// Each pin as it should be: KIND, no link, and (SINGLE) no second hard link; with RECORDED, the same inode.
+fn pin_gap(path: &str, kind: launch::Kind, single: bool, recorded: Option<(u64, u64)>) -> Option<String> {
+    let why = match pin_now(path) {
+        Err(why) => why.to_string(),
+        Ok((k, _, _, _)) if k != kind => format!("not the {kind:?} it was").to_lowercase(),
+        Ok((_, d, i, _)) if recorded.is_some_and(|r| r != (d, i)) => "another file".into(),
+        Ok((launch::Kind::File, _, _, n)) if single && n > 1 => "a second hard link".into(),
+        Ok(_) => return None,
+    };
+    Some(format!("{path} ({why})"))
+}
+
+/// The placeholders, created before anything binds them: exclusively, never through a link; a file's path and text
+/// recorded in `placeholders.json` (bwrap's), for cleanup, even when one fails.
+fn make_placeholders(rundir: &Path, p: &Plan) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut placed: Vec<(String, String)> = vec![];
+    let mut result = Ok(());
+    for ph in &p.placeholders {
+        let path = Path::new(&ph.path);
+        let made = match ph.kind {
+            launch::Kind::Folder => fs::create_dir(path),
+            launch::Kind::File => fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .and_then(|mut f| f.write_all(ph.text.as_deref().unwrap_or_default().as_bytes())),
+        };
+        match made {
+            Ok(()) if ph.kind == launch::Kind::File => {
+                placed.push((ph.path.clone(), ph.text.clone().unwrap_or_default()));
+            }
+            Ok(()) => {}
+            Err(e) => {
+                result = Err(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "{} (it appeared after pot resolved the workspace's pins: run again): {e}",
+                        ph.path
+                    ),
+                ));
+                break;
+            }
+        }
+    }
+    if !placed.is_empty() {
+        write_new(
+            &rundir.join("placeholders.json"),
+            serde_json::to_string(&placed).unwrap_or_default().as_bytes(),
+            0o600,
+        )?;
+    }
+    result
+}
+
+fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -> std::io::Result<()> {
     // the engines refuse a cidfile that exists: one left from before goes (a link: the link); so does what an earlier
     // run left of its own (never a folder)
     for n in std::iter::once(&"container.id").chain(RUNTIME) {
@@ -329,11 +418,7 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
             RunFile::Dir { name } => dir_new(&rundir.join(name))?,
             RunFile::FreshDir { name } => {
                 let path = rundir.join(name);
-                match path.symlink_metadata() {
-                    Ok(m) if m.is_dir() => fs::remove_dir_all(&path).map_err(at(&path))?,
-                    Ok(_) => fs::remove_file(&path).map_err(at(&path))?,
-                    Err(_) => {}
-                }
+                remove_tree_writable(&path).map_err(at(&path))?;
                 fs::create_dir(&path).map_err(at(&path))?;
             }
             RunFile::File { name, text, mode } => write_new(&rundir.join(name), text.as_bytes(), *mode)?,
@@ -358,6 +443,20 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     }
     for d in &p.host_dirs {
         fs::create_dir_all(d).map_err(at(Path::new(d)))?;
+    }
+    // write access: the placeholders, then every pin's inode as it is now, for run to check again
+    make_placeholders(rundir, p)?;
+    let mut pins = vec![];
+    for (path, kind) in &p.pins {
+        let (_, dev, ino, _) = pin_now(path)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path}: {why}")))?;
+        pins.push(PinRecord {
+            path: path.clone(),
+            kind: *kind,
+            dev,
+            ino,
+            single: single.contains(path),
+        });
     }
     let mut argv = Vec::new();
     for a in p.argv() {
@@ -391,7 +490,8 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
     let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults,
-        "fifo": p.fifo, "proxy": p.proxy, "credentials": p.creds, "hostless": p.hostless, "secretsAt": p.secrets_at });
+        "fifo": p.fifo, "proxy": p.proxy, "credentials": p.creds, "hostless": p.hostless, "secretsAt": p.secrets_at,
+        "pins": pins });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -446,7 +546,103 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
             format!("launch.json's uid {} is not this process's", l.uid),
         ));
     }
-    place(rundir, &plan).map_err(|e| Refusal::new(&p.context, format!("can't place the run's files: {e}")))
+    // write access: each pin is still as pot's core resolved it (no link, the same kind, a protected file with no
+    // second hard link), and no placeholder is there yet
+    let single: std::collections::BTreeSet<String> = l
+        .pins
+        .iter()
+        .flatten()
+        .flat_map(|w| w.ro.iter())
+        .filter(|r| r.kind == launch::Kind::File)
+        .map(|r| r.path.clone())
+        .collect();
+    let mut changed = vec![];
+    for (path, kind) in &plan.pins {
+        if plan.placeholders.iter().any(|ph| &ph.path == path) {
+            if Path::new(path).symlink_metadata().is_ok() {
+                changed.push(format!("{path} (there now, where pot planned a placeholder)"));
+            }
+        } else if let Some(g) = pin_gap(path, *kind, single.contains(path), None) {
+            changed.push(g);
+        }
+    }
+    if !changed.is_empty() {
+        return Err(Refusal::new(
+            &p.context,
+            format!(
+                "the workspace changed since pot resolved its pins: {}; run again",
+                changed.join(", ")
+            ),
+        ));
+    }
+    place(rundir, &plan, &single)
+        .map_err(|e| Refusal::new(&p.context, format!("can't place the run's files: {e}")))?;
+    if p.access == "write" && p.mode == "in-place" {
+        write_look(cfg, rundir, &plan).map_err(|m| Refusal::new(&p.context, m))?;
+    }
+    Ok(())
+}
+
+/// The host's look at a write run, by pot's own code (core's pins.py, which bwrap.py runs too): `python -I -S PINS
+/// VERB GIT RUNDIR`, in pot's environment (as bwrap's prepare and after run), with no value in its arguments.
+fn look(cfg: &Config, verb: &str, rundir: &Path) -> Result<serde_json::Value, String> {
+    let t = cfg
+        .look_tools()
+        .ok_or("write access: the backend's --config names no python, pins and git")?;
+    let out = std::process::Command::new(&t.python)
+        .args(["-I", "-S", &t.pins, verb, &t.git])
+        .arg(rundir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("can't run {}: {e}", t.python))?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "the host's look ({verb}) failed: {}",
+            why.lines().last().unwrap_or("no message")
+        ));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("the host's look ({verb}): {e}"))
+}
+
+/// After `place`, for a write run: the seals' record (`sealed.json`, for after's `sealed_left`), the look before the run
+/// (`before.json`), and the start notes in launch.json (a sealed folder over the cap, a hidden path git tracks).
+fn write_look(cfg: &Config, rundir: &Path, plan: &Plan) -> Result<(), String> {
+    let abs = fs::canonicalize(rundir).map_err(|e| format!("{}: {e}", rundir.display()))?;
+    let seals: Vec<serde_json::Value> = plan
+        .seals
+        .iter()
+        .map(|s| {
+            serde_json::json!({ "dest": s.dest, "base": abs.join(&s.base), "entries": s.entries, "rel": s.rel })
+        })
+        .collect();
+    write_new(
+        &abs.join("sealed.json"),
+        serde_json::Value::from(seals).to_string().as_bytes(),
+        0o600,
+    )
+    .map_err(|e| e.to_string())?;
+    let before = look(cfg, "before", &abs)?;
+    let mut notes = plan.notes.clone();
+    notes.extend(
+        before["notes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|n| n.as_str().map(String::from)),
+    );
+    if !notes.is_empty() {
+        // a backend built apart adds only notes to launch.json (launch.json/1)
+        let path = abs.join("launch.json");
+        let mut l: serde_json::Value = read_own(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| serde_json::from_slice(&b).map_err(|e| format!("launch.json: {e}")))?;
+        let mut all: Vec<serde_json::Value> = l["notes"].as_array().cloned().unwrap_or_default();
+        all.extend(notes.into_iter().map(serde_json::Value::from));
+        l["notes"] = all.into();
+        write_new(&path, format!("{l}\n").as_bytes(), 0o644).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// A file of the run's, read only when it is a regular file: never through a link planted in the run folder.
@@ -609,6 +805,27 @@ struct EngineEnv {
     /// Where the run sees a via-file binding's file.
     #[serde(default, rename = "secretsAt")]
     secrets_at: String,
+    /// Write access: every workspace path the plan binds, as prepare found it.
+    #[serde(default)]
+    pins: Vec<PinRecord>,
+}
+
+/// Write access, just before the engine starts: each pin is the inode prepare recorded, of its kind, no link, and a
+/// protected file has no second hard link. The engine resolves a bind's source when it mounts it, so this narrows
+/// the window between the check and the bind to the engine's own start; bwrap binds at its start with no such check.
+fn pins_unchanged(pins: &[PinRecord]) -> Result<(), String> {
+    let changed: Vec<String> = pins
+        .iter()
+        .filter_map(|r| pin_gap(&r.path, r.kind, r.single, Some((r.dev, r.ino))))
+        .collect();
+    if changed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the workspace changed since prepare: {}; run prepare again",
+            changed.join(", ")
+        ))
+    }
 }
 
 /// R2: the run folder's engine paths as `prepare` left them, checked just before the engine starts: the engine
@@ -1166,6 +1383,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     // R2 again, now that the proxy runs: every path the engine is handed is as prepare left it, or as run made it
     engine_paths(&abs, e, &env.own).map_err(refuse)?;
     runtime_paths(&abs, env.fifo, env.proxy.is_some(), secret_names.as_deref()).map_err(refuse)?;
+    pins_unchanged(&env.pins).map_err(refuse)?;
     let argv = lifecycle::run_argv(&argv, std::io::stdin().is_terminal());
 
     // U2: a variable passed by name that the host has unset takes pot's value: in the engine's environment (the
@@ -1204,7 +1422,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     Ok(code)
 }
 
-fn after(rundir: &Path) -> Result<(), Refusal> {
+fn after(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> {
     let (p, l) = load(rundir)?;
     // the proxy's log, when the run had the network: a regular file only, never through a link
     let log = rundir.join("proxy.log");
@@ -1218,10 +1436,61 @@ fn after(rundir: &Path) -> Result<(), Refusal> {
             ));
         }
     };
-    let ev = lifecycle::after_event(&p, &l, &log)
+    // write access: the host's look after the run (pins.py: bwrap's code), against before.json
+    let looked = if p.access == "write" && p.mode == "in-place" {
+        let c = cfg.map_err(|m| Refusal::new(&p.context, m.clone()))?;
+        Some(
+            look(c, "after", rundir)
+                .map_err(|m| Refusal::new(&p.context, format!("the container backend's after: {m}")))?,
+        )
+    } else {
+        None
+    };
+    let ev = lifecycle::after_event(&p, &l, &log, looked)
         .map_err(|m| Refusal::new(&p.context, format!("the container backend's after: {m}")))?;
     let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{ev}\n").as_bytes());
     Ok(())
+}
+
+/// The placeholders `placeholders.json` lists, each removed while it is a regular file that still holds what prepare
+/// wrote (never a link, never one the host changed). Returns what could not be removed.
+fn remove_placeholders(list: &Path) -> Vec<String> {
+    let Ok(bytes) = read_own(list) else {
+        return vec![];
+    };
+    let placed: Vec<(String, String)> = serde_json::from_slice(&bytes).unwrap_or_default();
+    let mut failed = vec![];
+    for (path, text) in placed {
+        let p = Path::new(&path);
+        let ours = p.symlink_metadata().is_ok_and(|m| m.file_type().is_file())
+            && fs::read(p).is_ok_and(|b| b == text.as_bytes());
+        if ours {
+            if let Err(e) = fs::remove_file(p) {
+                failed.push(format!("{path}: {e}"));
+            }
+        }
+    }
+    failed
+}
+
+/// Remove PATH as [`remove_tree`] does, a folder the run made unwritable made writable first (bwrap's
+/// `remove_sealed`); never through a link.
+fn remove_tree_writable(path: &Path) -> std::io::Result<()> {
+    fn open_up(d: &Path) {
+        if d.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            let _ = fs::set_permissions(d, fs::Permissions::from_mode(0o700));
+            if let Ok(rd) = fs::read_dir(d) {
+                for e in rd.flatten() {
+                    open_up(&e.path());
+                }
+            }
+        }
+    }
+    if remove_tree(path).is_ok() {
+        return Ok(());
+    }
+    open_up(path);
+    remove_tree(path)
 }
 
 /// Remove PATH: a folder with what is in it, or a file or link (never followed). Missing is done.
@@ -1422,6 +1691,11 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     let rd = |n: &str| abs.join(n);
     let mut failed = stop_proxies(&abs);
     failed.extend(cleanup_engine(cfg, &abs));
+    // write access: the placeholders that still hold what prepare wrote (bwrap's cleanup), and the seals' bases
+    failed.extend(remove_placeholders(&rd("placeholders.json")));
+    if let Err(e) = remove_tree_writable(&rd("sealed")) {
+        failed.push(format!("{}: {e}", rd("sealed").display()));
+    }
     for n in ["enginehome", "dockercfg", "secrets"] {
         if let Err(e) = remove_tree(&rd(n)) {
             failed.push(format!("{}: {e}", rd(n).display()));
@@ -1451,6 +1725,9 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "secrets.fifo",
         "proxy.sock",
         "mcp.json",
+        "placeholders.json",
+        "sealed.json",
+        "before.json",
     ] {
         match fs::remove_file(rd(n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -1587,7 +1864,16 @@ fn main() -> ExitCode {
                     .ok()
                     .flatten()
                     .is_some_and(|t| render::net_gaps(&t, &host::RealHost).is_empty());
-                engine(&c).and_then(|(e, program)| probe_now(e, &program, net))
+                // protected-as-mounts exactly where prepare carries write access out: the look's programs are named
+                let look = c.look_tools().is_some();
+                engine(&c)
+                    .and_then(|(e, program)| probe_now(e, &program, net))
+                    .map(|mut g| {
+                        if look {
+                            g.push("protected-as-mounts");
+                        }
+                        g
+                    })
             }) {
                 Ok(g) => serde_json::json!({ "guarantees": g }),
                 Err(err) => serde_json::json!({ "guarantees": [], "error": err }),
@@ -1603,7 +1889,7 @@ fn main() -> ExitCode {
             Ok(c) => run(c, rundir).map(|code| exit = code),
             Err(m) => Err(Refusal::new(&context_of(rundir), m.clone())),
         },
-        Verb::After { rundir } => after(rundir),
+        Verb::After { rundir } => after(cfg.as_ref(), rundir),
         Verb::Cleanup { rundir } => cleanup(cfg.as_ref(), rundir),
     };
     match result {

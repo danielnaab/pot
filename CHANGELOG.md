@@ -68,6 +68,16 @@ v2.14.0's `sandbox` on).
   `cleanup` remove it too (after a `run` killed with SIGKILL). `/run/pot/mcp.json` is bubblewrap's, bound read-only
   for every run, and holds no value; `run` refuses a via-file mcp key with a quote, a backslash or a control
   character. The other bindings (`status.relay`, `git.fetch`, `nix`) are still refused.
+- **The container backend carries out write access in place**, under podman and docker, from launch.json's `pins`
+  (pot's core resolves them; no port of bwrap's `Pins`). The workspace (and a worktree's common directory) is bound
+  writable, each git directory and each folder above a pin writable onto itself, and each pin read-only onto itself
+  over it, so a pin can't be written, renamed, removed or replaced, nor moved with its folder, and `git config`
+  fails while a commit works. `prepare` creates the placeholders (`cleanup` removes them), seals the sealed folders
+  as bwrap does, stops on a link or hard-link refusal with bwrap's message, and records each pin's inode; `run`
+  refuses a pin that changed since, before the engine starts. `after` reports bwrap's in-place write facts (commits,
+  host-run changes, new git metadata, hidden paths committed empty, sealed leftovers) by running core's `pins.py`.
+  New config keys `pins` and `git` (with `python`); `probe` proves `protected-as-mounts` when they are named. Clone
+  mode, `git.fetch`, `nix`, `status.relay` and siblings are still refused.
 
 ### Changed
 
