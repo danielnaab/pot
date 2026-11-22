@@ -1,0 +1,207 @@
+{
+  "version": 1,
+  "run": "3c1a",
+  "context": "review",
+  "mode": "in-place",
+  "access": "none",
+  "backend": {
+    "name": "container",
+    "requires": [],
+    "proved": [
+      "closure-store",
+      "own-netns",
+      "own-pidns",
+      "no-tiocsti",
+      "local-listen",
+      "in-place",
+      "root-files"
+    ]
+  },
+  "workspace": [
+    {
+      "id": "repo:/home/u/src/notes",
+      "path": "/home/u/src/notes",
+      "common": "/home/u/src/notes/.git",
+      "protected": [],
+      "sealed": [],
+      "proposal": [],
+      "clone": null
+    }
+  ],
+  "items": [
+    {
+      "kind": "package",
+      "value": "/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7",
+      "class": "see",
+      "sources": [
+        {
+          "root": "standard"
+        }
+      ],
+      "effective": true
+    },
+    {
+      "kind": "package",
+      "value": "/nix/store/scikhwasnkiqmjsi9iczrrx59bwbn379-pot-kits",
+      "class": "see",
+      "sources": [
+        {
+          "root": "tools"
+        }
+      ],
+      "effective": true,
+      "tools": true
+    },
+    {
+      "kind": "env.set",
+      "value": "TZ=America/Chicago",
+      "class": "see",
+      "sources": [
+        {
+          "root": "base"
+        }
+      ],
+      "effective": true
+    },
+    {
+      "kind": "env.set",
+      "value": "NOTES_CACHE=~/.cache/notes",
+      "class": "see",
+      "sources": [
+        {
+          "kit": "repo:/home/u/src/notes",
+          "file": "/home/u/src/notes/flake.nix",
+          "as": "see"
+        }
+      ],
+      "effective": true
+    },
+    {
+      "kind": "file",
+      "value": "~/.config/notes/config.toml",
+      "class": "see",
+      "sources": [
+        {
+          "kit": "repo:/home/u/src/notes",
+          "file": "/home/u/src/notes/flake.nix",
+          "as": "see"
+        }
+      ],
+      "effective": true,
+      "source": "/nix/store/0aqd4v7xhp2c9z2lfy5h4v0rdf3q4k8n-config.toml",
+      "mode": "fixed"
+    },
+    {
+      "kind": "access",
+      "value": "none",
+      "class": "limits",
+      "sources": [
+        {
+          "context": "review"
+        }
+      ],
+      "effective": true
+    },
+    {
+      "kind": "hidden",
+      "value": "~/.ssh",
+      "class": "limits",
+      "sources": [
+        {
+          "root": "hidden"
+        }
+      ],
+      "effective": true,
+      "paths": [
+        "/home/u/.ssh"
+      ]
+    },
+    {
+      "kind": "network",
+      "value": "none",
+      "class": "limits",
+      "sources": [
+        {
+          "context": "review"
+        }
+      ],
+      "effective": true
+    },
+    {
+      "kind": "network",
+      "value": "api.anthropic.com:443",
+      "class": "reach",
+      "sources": [
+        {
+          "kit": "root:claude-code@personal",
+          "file": "/nix/store/x-kit.json",
+          "as": "request"
+        }
+      ],
+      "effective": false,
+      "why": "not in this run",
+      "request": "network api.anthropic.com:443",
+      "requestClass": "ordinary"
+    },
+    {
+      "kind": "env",
+      "value": "NOTES_TOKEN",
+      "class": "reach",
+      "sources": [
+        {
+          "kit": "repo:/home/u/src/notes",
+          "file": "/home/u/src/notes/flake.nix",
+          "as": "request"
+        },
+        {
+          "grant": "grants.json",
+          "digest": "sha256-AAAA"
+        }
+      ],
+      "effective": true,
+      "secret": true,
+      "request": "env NOTES_TOKEN",
+      "requestClass": "ordinary"
+    },
+    {
+      "kind": "state",
+      "value": "notes",
+      "class": "reach",
+      "sources": [
+        {
+          "kit": "repo:/home/u/src/notes",
+          "file": "/home/u/src/notes/flake.nix",
+          "as": "request"
+        }
+      ],
+      "effective": true,
+      "at": "~/.cache/notes",
+      "shared": false,
+      "request": "state notes",
+      "requestClass": "ordinary"
+    }
+  ],
+  "mounts": {
+    "state": [
+      {
+        "name": "notes",
+        "at": "~/.cache/notes",
+        "key": [
+          "repo:/home/u/src/notes"
+        ],
+        "dir": "/home/u/.local/state/pot/state/9f2e/notes"
+      }
+    ],
+    "run": "/run/pot",
+    "launcher": "/run/pot/launcher"
+  },
+  "bindings": [],
+  "children": {},
+  "grants": [
+    {
+      "id": "repo:/home/u/src/notes",
+      "digest": "sha256-AAAA",
+      "match": true
+    }
+  ]
+}

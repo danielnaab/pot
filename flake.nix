@@ -5,8 +5,10 @@
   # inputs.self.submodules (github: and path: inputs reject it). Its development-only inputs (the docs check's
   # knowledge-base-kit) are in dev/flake.nix, so no root or producer locks them.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+  # crane builds pot's Rust code (backends/container, the container backend); it has no inputs of its own
+  inputs.crane.url = "github:ipetkov/crane";
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, crane, ... }:
     let
       lib = nixpkgs.lib;
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
@@ -16,6 +18,9 @@
       # kitsFor (lib/kits-for.nix, contract pot-lib/1): a producer's kits as the bundle pot reads (pot-kits/1)
       kitsFor = import ./lib/kits-for.nix { inherit potSrc; };
       mkRoot = import ./nix/root.nix { inherit potSrc; };
+      # pot's Rust code (grove's dev kit): the container backend, pot-container, and its checks. The source is the
+      # Cargo workspace plus what the tests read: the transcripts (docs/reference/container/) and policy-1 fixtures
+      rust = import ./nix/rust.nix { inherit crane; };
       # pot's default root: for someone without one (pot init writes a minimal one to edit). It runs
       # the host's claude as claude-code@personal, with its token file (claude setup-token) and nix
       defaultRoot = pkgs: mkRoot {
@@ -48,15 +53,18 @@
       packages = forAll (pkgs: rec {
         default = defaultRoot pkgs;
         pot = default;
+        # the container backend (pot phase 2; draft): pot-container probe|prepare|run|after|cleanup RUNDIR
+        pot-container = (rust pkgs).package;
       });
       apps = forAll (pkgs: rec {
         default = { type = "app"; program = lib.getExe self.packages.${pkgs.system}.default; meta.description = "pot with its default root"; };
         pot = default;
       });
 
-      devShells = forAll (pkgs: { default = pkgs.mkShell { packages = [ pkgs.shellcheck pkgs.jq pkgs.python3 ]; }; });
+      devShells = forAll (pkgs: { default = pkgs.mkShell { packages = [ pkgs.shellcheck pkgs.jq pkgs.python3 ]
+        ++ (with pkgs; [ cargo rustc clippy rustfmt cargo-deny ]); }; });
 
-      checks = forAll (pkgs: {
+      checks = forAll (pkgs: (rust pkgs).checks // {
         # bash -n first: bash's own parser, so a script bash can't run fails even where shellcheck's
         # parser would differ
         shellcheck = pkgs.runCommand "pot-shellcheck" { nativeBuildInputs = [ pkgs.shellcheck ]; } ''

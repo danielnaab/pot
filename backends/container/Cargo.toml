@@ -1,0 +1,26 @@
+[package]
+name = "pot-container"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "pot's container backend: a run's policy.json carried out with podman or docker"
+publish = false
+
+[[bin]]
+name = "pot-container"
+path = "src/main.rs"
+
+[dependencies]
+# Kept deliberately few (grove's dev kit): say why before adding one.
+clap = { version = "4.5", features = ["derive"] }   # the CLI (family convention)
+serde = { version = "1", features = ["derive"] }    # policy.json/1 and launch.json models
+serde_json = "1"                                    # reading them; probe's output
+
+[dev-dependencies]
+trycmd = "0.15"                                     # Markdown CLI transcripts (docs/reference/container/)
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

@@ -2,3 +2,5 @@
 __pycache__/
 result
 result-*
+# cargo's build folder (pot's Rust code, backends/)
+/target

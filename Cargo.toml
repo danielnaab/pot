@@ -1,0 +1,8 @@
+# pot's Rust code: one workspace, so crane and cargo-deny see one lock. Each member is a binary pot calls behind
+# a contract (strategic-stack decision 3); the Python core stays in core/.
+[workspace]
+resolver = "3"
+members = ["backends/container"]
+
+[profile.release]
+strip = true
