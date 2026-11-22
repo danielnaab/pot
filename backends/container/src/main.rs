@@ -219,35 +219,81 @@ fn print_plan(engine: &str, p: &Plan) -> String {
     out
 }
 
+/// An error that names its path.
+fn at(path: &Path) -> impl Fn(std::io::Error) -> std::io::Error + '_ {
+    move |e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+}
+
+/// Write PATH afresh: whatever is there is removed first (a file pot left read-only, or a link someone planted),
+/// then a new file is created exclusively, which never follows a link (audit F9).
+fn write_new(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    match path.symlink_metadata() {
+        Ok(m) if m.is_dir() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "a folder is in the way",
+            ))
+            .map_err(at(path));
+        }
+        Ok(_) => fs::remove_file(path).map_err(at(path))?,
+        Err(_) => {}
+    }
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)
+        .map_err(at(path))?;
+    f.write_all(bytes).map_err(at(path))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(at(path))
+}
+
+/// A folder of the run's: created, or kept when it is a real folder; a link there is refused.
+fn dir_new(path: &Path) -> std::io::Result<()> {
+    match path.symlink_metadata() {
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "not a folder",
+        ))
+        .map_err(at(path)),
+        Err(_) => fs::create_dir(path).map_err(at(path)),
+    }
+}
+
 fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     for f in &p.files {
         match f {
-            RunFile::Dir { name } => fs::create_dir_all(rundir.join(name))?,
-            RunFile::File { name, text, mode } => {
-                let path = rundir.join(name);
-                fs::write(&path, text)?;
-                fs::set_permissions(&path, fs::Permissions::from_mode(*mode))?;
-            }
+            RunFile::Dir { name } => dir_new(&rundir.join(name))?,
+            RunFile::File { name, text, mode } => write_new(&rundir.join(name), text.as_bytes(), *mode)?,
             RunFile::Link { name, target } => {
                 let path = rundir.join(name);
-                if path.symlink_metadata().is_err() {
-                    std::os::unix::fs::symlink(target, path)?;
+                if path.symlink_metadata().is_ok() {
+                    fs::remove_file(&path).map_err(at(&path))?;
                 }
+                std::os::unix::fs::symlink(target, &path).map_err(at(&path))?;
             }
         }
     }
     for d in &p.host_dirs {
-        fs::create_dir_all(d)?;
+        fs::create_dir_all(d).map_err(at(Path::new(d)))?;
     }
     let mut argv = Vec::new();
     for a in p.argv() {
         argv.extend_from_slice(a.as_bytes());
         argv.push(0);
     }
-    fs::write(rundir.join("container.argv"), argv)?;
+    write_new(&rundir.join("container.argv"), &argv, 0o600)?;
     // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
-    let env = serde_json::json!({ "keep": p.engine_keep, "set": p.engine_set.iter().cloned().collect::<std::collections::BTreeMap<_, _>>() });
-    fs::write(rundir.join("container.env"), format!("{env}\n"))
+    let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
+    let env = serde_json::json!({ "keep": p.engine_keep, "set": set });
+    write_new(
+        &rundir.join("container.env"),
+        format!("{env}\n").as_bytes(),
+        0o600,
+    )
 }
 
 fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
