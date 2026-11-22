@@ -327,7 +327,8 @@ A `credential` or `mcp` binding (policy-1 `bindings[]`) is carried out as bwrap.
 
 - **The values, at run time.** Before it starts anything, `run` reads each binding's variables on the host, from its
   `from`: `file` or `envFile`, a key file of `NAME=VALUE` lines (`export NAME=VALUE`, `#` comments, one pair of quotes
-  stripped; `~` is the caller's home), or for a `credential` of one variable with no such line in `file`, the whole
+  stripped; a leading `~` or `~/` is the caller's `HOME`; `~user/` is not expanded, so such a path is refused as missing, where
+  bwrap's `expanduser` would read it), or for a `credential` of one variable with no such line in `file`, the whole
   file, stripped (a token file); `env`, a host variable of another name (a binding of one variable); nothing, the
   host's variables of the same names. A variable the host has unset is left out. A key file that can't be read, has
   no `NAME=VALUE` line where one is needed, or lacks a variable (but `AWS_CREDENTIAL_EXPIRATION`) stops the run before
@@ -344,7 +345,8 @@ A `credential` or `mcp` binding (policy-1 `bindings[]`) is carried out as bwrap.
   caller's, 0700, holding exactly those files, each a regular file of the caller's, 0400. The variable's record is the
   file's path in the run, `/run/pot/secrets/NAME`. The run reads the file, and can't write, replace, `chmod` or remove
   it, or add one beside it (a read-only bind; every process of the run is its user, with no capability). `run`
-  removes `secrets/` when the command ends and on every early return; after a `run` killed with SIGKILL, `cleanup`
+  removes `secrets/` when the command ends and on every early return after it writes the files (a run that stops
+  reading a value leaves the empty folder `prepare` made, holding nothing, for `cleanup`); after a `run` killed with SIGKILL, `cleanup`
   removes it, and so does the next `prepare`, before anything else, even when it then stops. This is the one file
   policy-1 rule 6 allows.
 - **Precedence**, as bwrap's `run` (`env.update(deliver(credentials()))` after `run_env`): a binding's variable beats
