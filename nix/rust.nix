@@ -6,7 +6,7 @@ let
   inherit (pkgs) lib;
   craneLib = crane.mkLib pkgs;
   root = ./..;
-  # The Cargo workspace, and what its tests read: the transcripts and their run folders, and policy-1's fixtures
+  # The Cargo workspace, and what its tests read: the transcripts and their run folders, policy-1's fixtures and schema
   src = lib.fileset.toSource {
     inherit root;
     fileset = lib.fileset.unions [
@@ -14,6 +14,7 @@ let
       ../deny.toml
       ../docs/reference/container
       ../contracts/fixtures/policy-1
+      ../contracts/policy-1.schema.json
     ];
   };
   # pname and version from the member's Cargo.toml (the workspace's root manifest has neither)

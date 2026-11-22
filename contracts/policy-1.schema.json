@@ -55,7 +55,8 @@
         "name": {
           "enum": [
             "bubblewrap",
-            "seatbelt"
+            "seatbelt",
+            "container"
           ]
         },
         "requires": {

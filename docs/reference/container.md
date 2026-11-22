@@ -30,12 +30,12 @@ else docker), `podman` and `docker` (the programs), `image` (docker's empty imag
 and the store paths bound into every run, named as bwrap's config names them: `sh`, `shell`, `env`, `cacert`,
 `terminfo`, `tzdir` and `baseClosure` (a file of store paths). `prepare` needs all of the store paths.
 
-**`launch.json`**, until it has a contract of its own (launch.json/1), is read leniently, and only these fields:
+**`launch.json`** ([launch.json/1](../../contracts/launch-1.md)) is read leniently, and only these fields:
 
 | Field | Used for |
 |---|---|
 | `argv` | The command |
-| `cwd` | Where it starts (`env -C`); the home under `access: none` when it is in a workspace |
+| `cwd` | Where it starts (`env -C`); under `access: none`, the home instead, always |
 | `home` | The run's `HOME`: an empty tmpfs, owned by the run's user |
 | `user`, `group` | The run's `/etc/passwd` and `/etc/group` |
 | `uid`, `gid` | `--user`; with podman, the id `--userns=keep-id` keeps. `prepare` refuses a `uid` that is not the caller's |
@@ -70,6 +70,32 @@ Guarantees, in bubblewrap's vocabulary (no new names):
 Not proved yet: `protected-as-mounts`, `same-path-clone`, `private-proxy` (see [What's next](#whats-next)); never:
 `nest`, `separate-kernel`.
 
+**pot must not cache this probe.** pot caches a backend's probe per build; this one's answer depends on the caller
+(its `NoNewPrivs`, the engine's state and configuration), so pot must probe it for every run.
+
+## The engine's configuration
+
+podman and docker read configuration that changes every container: `CONTAINERS_CONF_OVERRIDE` and the user's
+`~/.config/containers/containers.conf` can add a volume, a variable or `seccomp_profile = "unconfined"`;
+`~/.config/containers/mounts.conf` adds mounts; `CONTAINER_HOST` and `DOCKER_HOST` (or a docker context) send the
+command to another engine. The conformance audit (2026-11-21) saw each widen a run while the probe claimed every
+guarantee. So the engine starts with:
+
+- **an environment of pot's**: the caller's cleared, but for `PATH HOME USER LOGNAME XDG_RUNTIME_DIR XDG_DATA_HOME
+  DBUS_SESSION_BUS_ADDRESS CONTAINERS_STORAGE_CONF TMPDIR LANG TERM COLORTERM` and the run's variables passed by name
+  (`engine::KEEP`);
+- **podman:** `CONTAINERS_CONF` the run's `containers.conf` (it replaces every other containers.conf; no default
+  mounts file, volumes, variables or devices; the default seccomp profile), and `HOME` an empty folder of the run's
+  (`enginehome`), since podman reads `~/.config/containers/mounts.conf` from `$HOME` whatever containers.conf says.
+  The caller's storage is named first (`XDG_DATA_HOME`, and `~/.config/containers/storage.conf` as
+  `CONTAINERS_STORAGE_CONF`). probe uses `CONTAINERS_CONF=/dev/null` and `RUNDIR/enginehome`;
+- **docker:** `DOCKER_CONFIG` an empty folder of the run's (probe: one that does not exist).
+
+`prepare` writes these as `container.env` (the names kept and the values set; no secret's value) for `run`, and
+`--print` shows them. A root that offers this backend should also hide `~/.config/containers` (and
+`~/.docker/config.json`, which pot hides already) from its runs; adding `~/.config/containers` to pot's default
+hidden list is a change to pot's core, listed in [What's next](#whats-next).
+
 ## Policy to flags
 
 | Policy | podman | docker |
@@ -79,18 +105,19 @@ Not proved yet: `protected-as-mounts`, `same-path-clone`, `private-proxy` (see [
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never` |
 | the working directory | `/usr/bin/env -C CWD -- ARGV` (podman takes no `-w` with `--rootfs`) | the same |
-| `/tmp`, `/run`, `HOME` | `--tmpfs`; the home `mode=0700,U` | the home `mode=0700,uid=UID,gid=GID` |
+| `/tmp`, `/run`, `HOME` | `--tmpfs …,notmpcopyup` (podman's default copies the folder below into the tmpfs); the home `mode=0700,U` | `--tmpfs`; the home `mode=0700,uid=UID,gid=GID` |
 | no effective network reach item | `--network none` | the same |
-| `closure-store` proved | `--volume P:P:ro` for each path of `launch.json` `closure` and the config's base closure | the same |
-| `closure-store` not proved | `--volume /nix/store:/nix/store:ro` | the same |
+| a bind | `--volume SRC:DEST:ro` (or `:rw`) | `--mount type=bind,source=SRC,target=DEST[,readonly]`: docker's `--volume` creates a missing source, as root |
+| `closure-store` proved | a read-only bind for each path of `launch.json` `closure` and the config's base closure | the same |
+| `closure-store` not proved | `/nix/store` bound read-only | the same |
 | `/bin/sh`, `/usr/bin/env`, the CA bundle, `/etc/passwd`, `/etc/group`, `/etc/hosts` | read-only binds | the same |
-| `access: read` (in place) | `--volume PATH:PATH:ro`, and `common` when it is outside | the same |
-| `access: none` | no workspace at all (decided 2026-11-21) | the same |
-| `read`, `write` items | `--volume PATH:PATH:ro` or `:rw`, where the path exists and is not hidden | the same |
-| `socket` items | `--volume PATH:PATH:rw`; every other socket under a bound folder or the workspace is masked | the same |
+| `access: read` (in place) | `PATH` bound read-only, and `common` when it is outside (a worktree's); in each, sockets and hidden paths masked | the same |
+| `access: none` | no workspace at all (pot 0.2.0): `PATH` and `common` masked where a bound folder would show them (bwrap's `unseen`); the command starts in the home | the same |
+| `read`, `write` items | bound read-only or writable, where the path exists and is not hidden | the same |
+| `socket` items | bound; every other socket under a bound folder or the workspace is masked | the same |
 | `hidden` items | under a bound folder or the workspace: a read-only bind of an empty folder (or file) over it; nothing is bound inside a hidden folder | the same |
-| `mounts.state` | `--volume DIR:HOME/AT:rw` (`prepare` creates `DIR`) | the same |
-| `file`, mode `fixed` | `--volume SOURCE:PATH:ro` | the same |
+| `mounts.state` | `DIR` bound writable at `HOME/AT` (`prepare` creates `DIR`) | the same |
+| `file`, mode `fixed` | `SOURCE` bound read-only at `PATH` | the same |
 | `env.set` | `--env NAME=VALUE` (`~` as the home) | the same |
 | `env` items, `TERM`, `COLORTERM` | `--env NAME`: the engine reads the value from its own environment, so no value is in an argument | the same |
 | pot's variables | `HOME USER LOGNAME SHELL PATH LANG TERMINFO_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE TZDIR POT POT_POLICY POT_RUN PS1`, `POT_TOOLS`, `POT_CLONE` (bwrap's `run_env`) | the same |
@@ -98,8 +125,14 @@ Not proved yet: `protected-as-mounts`, `same-path-clone`, `private-proxy` (see [
 | `mounts.launcher` | `POTBIN/pot` at `/run/pot/launcher`; `~/.config/pot/launcher` links to it | the same |
 | `resource-limits` proved | `--cgroups split` | refused |
 
-A mask is never a `--tmpfs`: podman mounts every tmpfs before every bind, so a tmpfs below a bound folder is covered
-by that folder (a smoke run showed the hidden folder's contents). The engines order binds by destination.
+A mask is a read-only bind of an empty file or folder of the run's, never a `--tmpfs`: the first smoke run's tmpfs
+mask showed the hidden folder's contents (podman's `tmpcopyup` fills a tmpfs with what is below it; every podman
+tmpfs now says `notmpcopyup`). The engines mount by destination depth.
+
+**Paths are compared as strings**, so `prepare` refuses a bound path, a workspace top or common, a socket, or a
+hidden path a bound folder would show (by its name or by its real path) that is not its own real path (a link, or
+`..`), naming it. And it refuses a bind whose source does not exist (the run folder's own files and the state
+directories aside), since docker would create it.
 
 ## Refusals
 
@@ -127,8 +160,12 @@ refused, since a field this backend does not know could narrow the run):
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
-- a path a `--volume` can't name (`:` or `,`), and a command whose name holds `=` (`env` would read it as a
-  variable).
+- a path a bind can't name (`:` or `,`), and a command whose name holds `=` (`env` would read it as a variable);
+- a path that is not its real path, and a bind source that does not exist (above).
+
+A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
+value found: a secret misplaced into a field is never printed. `prepare` can run again: it replaces its files, never
+writing through a link planted in the run folder, and names the file it could not write.
 
 Not placed yet, which leaves the run narrower than bubblewrap's, never wider: `/run/pot/README.md`, `explain.txt`,
 `why.json`, `bin/` (the shims), `notfound/` and `bash_env` (the not-found advice), `mcp.json`, `~/.gitconfig`, and
@@ -139,11 +176,12 @@ is).
 
 1. `run`: the docker image (`docker import` of an empty tar), `-t` when stdin is a terminal, the exit status; then
    the proxy over a bound socket, and the bindings.
-2. The workspace's pins in Rust, or from pot's core as data (an open question: one implementation of the protected
-   paths, not two).
+2. Write access: pot's core resolves the workspace's protected paths and pins and passes them to the backend
+   (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
 3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
 4. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
-5. `backend.name` `container` in policy-1's schema, and pot choosing the backend from a root.
+5. pot choosing the backend from a root, probing it for every run; `~/.config/containers` in pot's default hidden
+   list (a core change).
 
 ## Sources
 
@@ -158,3 +196,9 @@ is).
   gid kept, the workspace read-only (EROFS), the home and state writable, `CapEff` 0, `NoNewPrivs` 1, seccomp
   filter on, 17 store paths visible, a secret variable passed by name, the container's cgroup under its caller's
   with `--cgroups split`; a `--tmpfs` mask under the workspace bind did not hide the folder, a bind did
+- The conformance audit (2026-11-21, real containers) and the smoke runs after its fixes: with `access: none` and
+  the workspace's parent bound, the workspace was empty and the command started in the home; with a hostile
+  `~/.config/containers` (a volume, a variable, `seccomp_profile = "unconfined"`, a mounts.conf) and
+  `CONTAINERS_CONF_OVERRIDE`, the run had `Seccomp: 2`, no variable and neither mount (before: `Seccomp: 0`, both);
+  a home tmpfs under a bound folder was empty (before, with podman's default: a copy of the host folder); a `..`
+  path and a linked workspace were refused

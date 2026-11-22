@@ -682,4 +682,13 @@ mod tests {
         let e = parse(&v.to_string()).unwrap_err().to_string();
         assert_eq!(e, "pot (review): policy.json/1: run: expected a string");
     }
+
+    /// policy-1's schema names this backend in `backend.name` (a new value within version 1).
+    #[test]
+    fn the_schema_names_this_backend() {
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../contracts/policy-1.schema.json")).unwrap();
+        let names = &schema["properties"]["backend"]["properties"]["name"]["enum"];
+        assert!(names.as_array().unwrap().iter().any(|n| n == BACKEND), "{names}");
+    }
 }
