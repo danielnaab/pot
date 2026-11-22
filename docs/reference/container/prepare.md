@@ -9,7 +9,7 @@ engine's command instead and writes nothing (`pot explain --backend-command`). T
 [the container backend](../container.md#policy-to-flags).
 
 These transcripts run in `prepare.in/`. `read-only/` is a review context: read access to `~/src/notes`, a read
-path, a hidden folder, a state mount, a fixed file, a secret variable passed by name, and `resource-limits` proved
+path, a hidden folder, a state mount, a fixed file, a secret variable (handed over a pipe under podman, refused under docker), and `resource-limits` proved
 (the run is in pot's systemd scope). `config-podman.json` and `config-docker.json` name the store paths this
 backend binds into every run. None of the host paths exist here, so no read path, mask or socket is bound.
 
@@ -18,7 +18,7 @@ backend binds into every run. None of the host paths exist here, so no read path
 ```console
 $ pot-container --config config-podman.json prepare --print read-only
 # the podman command for this run, an option a line (pot explain --backend-command)
-# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/read-only/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/read-only/storage.conf HOME=[CWD]/read-only/enginehome
+# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM; and CONTAINERS_CONF=[CWD]/read-only/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/read-only/storage.conf HOME=[CWD]/read-only/enginehome
 podman
   --root [CWD]/read-only/enginestore --runroot [CWD]/read-only/engineroot --tmpdir [CWD]/read-only/enginetmp
   run --interactive
@@ -72,25 +72,25 @@ podman
   --env USER=u
   --env TERM
   --env COLORTERM
-  --env NOTES_TOKEN
   --rootfs [CWD]/read-only/rootfs:O
-  /usr/bin/env -C /home/u/src/notes -- notes check --all
+  /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-secrets /usr/bin/env -C /home/u/src/notes -- notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
 
 ```
 
 ## docker
 
-docker can't keep a container in pot's scope, so it refuses a run that has `resource-limits`:
+docker can't keep a container in pot's scope, so it refuses a run that has `resource-limits`; and it passes no file
+descriptor, so it refuses a secret variable:
 
 ```console
 $ pot-container --config config-docker.json prepare --print read-only
 ? 1
-pot (review): the container backend does not carry out yet: resource-limits under docker (a container is not in pot's scope)
+pot (review): the container backend does not carry out yet: resource-limits under docker (a container is not in pot's scope); the secret variable NOTES_TOKEN under docker (it passes no file descriptor: the value would be in the container's configuration)
 
 ```
 
-Without it (`access-none/`: no workspace at all, so the command starts in the home):
+Without them (`access-none/`: no workspace at all, so the command starts in the home; `NOTES_TOKEN` a plain variable):
 
 ```console
 $ pot-container --config config-docker.json prepare --print access-none
@@ -110,6 +110,8 @@ docker
   --read-only
   --user 1000:100
   --pull never
+  --name pot-[..]
+  --entrypoint ''
   --tmpfs /run:rw,nosuid,nodev,mode=0755
   --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777
   --mount type=bind,source=/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh,target=/bin/sh,readonly

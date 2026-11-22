@@ -60,14 +60,17 @@ fn world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, Pa
     }
     fs::write(store.join("ca.crt"), "").unwrap();
     let (sh, env) = (which("sh"), which("env"));
+    // the closure the run sees; none in the flake's sandbox (no nix-store), where no container starts
     let closure = Command::new("nix-store")
         .arg("-qR")
         .arg(&sh)
         .arg(&env)
         .output()
-        .unwrap();
-    assert!(closure.status.success());
-    fs::write(store.join("base.txt"), &closure.stdout).unwrap();
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    fs::write(store.join("base.txt"), &closure).unwrap();
     let s = |f: &str| store.join(f).display().to_string();
     let config = serde_json::json!({ "engine": engine, engine: program, "sh": sh, "shell": sh, "env": env,
         "cacert": s("ca.crt"), "terminfo": s("terminfo"), "tzdir": s("zoneinfo"), "baseClosure": s("base.txt") });
@@ -89,6 +92,14 @@ fn world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, Pa
         .cloned()
         .collect();
     p["items"] = items.into();
+    // docker can't be handed a secret (R3): its runs pass the variable by name, as a plain one
+    if engine == "docker" {
+        for it in p["items"].as_array_mut().unwrap() {
+            if it["kind"] == "env" {
+                it["secret"] = false.into();
+            }
+        }
+    }
     // the test is not in pot's systemd scope
     let proved: Vec<serde_json::Value> = p["backend"]["proved"]
         .as_array()
@@ -449,4 +460,361 @@ fn cleanup_reports_what_it_could_not_remove() {
     assert_eq!(err.lines().count(), 1, "{err}");
     // what it could not remove is left as it was
     assert!(run.join("rootfs/written").exists());
+}
+
+/// The argument after OPT in the run's `container.argv`.
+fn argv_value(run: &Path, opt: &str) -> Option<String> {
+    let argv = fs::read(run.join("container.argv")).unwrap();
+    let words: Vec<String> = argv
+        .split(|b| *b == 0)
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    words.iter().position(|w| w == opt).map(|i| words[i + 1].clone())
+}
+
+/// A program standing in for the engine: it records that it ran, and fails.
+fn fake_engine(top: &Path) -> (PathBuf, PathBuf) {
+    let (fake, ran) = (top.join("fake-engine"), top.join("fake-engine-ran"));
+    fs::write(
+        &fake,
+        format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", ran.display()),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&fake).status().unwrap();
+    (fake, ran)
+}
+
+fn set_engine_program(top: &Path, engine: &str, program: &Path) {
+    let path = top.join("config.json");
+    let mut c: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    c[engine] = program.display().to_string().into();
+    fs::write(&path, c.to_string()).unwrap();
+}
+
+/// R1: a SIGTERM before the engine wrote the cidfile leaves no container: run removes it by the run's own name
+/// (docker) or store (podman), never only by the cidfile.
+#[test]
+fn an_early_sigterm_leaves_no_container() {
+    for (engine, var) in [("podman", "POT_TEST_PODMAN"), ("docker", "POT_TEST_DOCKER")] {
+        let Ok(program) = std::env::var(var) else {
+            eprintln!("{var} is not set: no container started");
+            continue;
+        };
+        let sleep = coreutils("sleep");
+        for delay in [10, 20, 40] {
+            let (top, run) = world(&format!("{engine}-early"), engine, &program, &[&sleep, "300"]);
+            prepare(&top, &run);
+            let mut child = verb(&top, &run, "run").stdin(Stdio::null()).spawn().unwrap();
+            std::thread::sleep(Duration::from_millis(delay));
+            ok(&Command::new("kill")
+                .arg("-TERM")
+                .arg(child.id().to_string())
+                .output()
+                .unwrap());
+            let started = Instant::now();
+            child.wait().unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "{engine}: the run did not stop"
+            );
+            if engine == "docker" {
+                let name = argv_value(&run, "--name").expect("docker's container has the run's name");
+                let left = Command::new(&program)
+                    .args(["ps", "--all", "--quiet", "--filter", &format!("name=^{name}$")])
+                    .output()
+                    .unwrap();
+                ok(&left);
+                assert_eq!(
+                    String::from_utf8_lossy(&left.stdout),
+                    "",
+                    "{engine} at {delay} ms: a container is left"
+                );
+            } else {
+                let ps = podman(&program, &run, &["ps", "--all", "--quiet"]);
+                assert_eq!(
+                    String::from_utf8_lossy(&ps.stdout),
+                    "",
+                    "{engine} at {delay} ms: a container is left"
+                );
+            }
+            assert_eq!(engine_processes(&run), Vec::<String>::new());
+            ok(&verb(&top, &run, "cleanup").output().unwrap());
+        }
+    }
+}
+
+/// R2: run refuses an engine path that is not what prepare left (a link, or a cidfile), before the engine starts.
+#[test]
+fn run_refuses_an_engine_path_planted_after_prepare() {
+    for (name, plant) in [
+        ("engineroot", "link"),
+        ("enginetmp", "link"),
+        ("enginestore", "link"),
+        ("enginehome", "link"),
+        ("rootfs", "link"),
+        ("container.id", "file"),
+    ] {
+        let (top, run) = world(
+            &format!("planted-{name}"),
+            "podman",
+            "podman",
+            &["/bin/sh", "-c", "true"],
+        );
+        prepare(&top, &run);
+        let (fake, log) = fake_engine(&top);
+        set_engine_program(&top, "podman", &fake);
+        // run checks container.argv's program against the config's: prepare again with the fake
+        prepare(&top, &run);
+        let elsewhere = top.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let p = run.join(name);
+        if p.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            fs::remove_dir_all(&p).unwrap();
+        }
+        if plant == "link" {
+            symlink(&elsewhere, &p).unwrap();
+        } else {
+            fs::write(&p, "0000").unwrap();
+        }
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        let r = fs::canonicalize(&run).unwrap().display().to_string();
+        assert!(err.contains(&format!("{r}/{name}")), "{name}: {err}");
+        assert!(!log.exists(), "{name}: the engine ran");
+    }
+}
+
+/// R2: cleanup never hands the engine a linked path, and keeps the store (exit 1, named) when it could not remove
+/// the container, rather than deleting it under a live one.
+#[test]
+fn cleanup_keeps_the_store_when_the_container_could_not_be_removed() {
+    for linked in [Some("engineroot"), Some("enginetmp"), None] {
+        let (top, run) = world("keeps-store", "podman", "podman", &["/bin/sh", "-c", "true"]);
+        prepare(&top, &run);
+        let (fake, log) = fake_engine(&top);
+        set_engine_program(&top, "podman", &fake);
+        fs::write(run.join("enginestore/db.sql"), "").unwrap();
+        if let Some(n) = linked {
+            let elsewhere = top.join("elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            symlink(&elsewhere, run.join(n)).unwrap();
+        }
+        let out = verb(&top, &run, "cleanup").output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{linked:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        let r = fs::canonicalize(&run).unwrap().display().to_string();
+        assert!(err.contains(&format!("{r}/enginestore")), "{linked:?}: {err}");
+        assert!(
+            run.join("enginestore/db.sql").exists(),
+            "{linked:?}: the store was removed"
+        );
+        match linked {
+            Some(n) => {
+                assert!(!log.exists(), "{n}: the engine was given a linked path");
+                assert!(err.contains(&format!("{r}/{n}")), "{err}");
+            }
+            None => assert!(log.exists()),
+        }
+        assert_eq!(err.lines().count(), 1, "{err}");
+    }
+}
+
+/// R3: a secret variable's value is in no file of the run folder or the OCI runtime's state, and in no engine
+/// process's arguments or environment, while the command has it.
+#[test]
+fn podman_keeps_a_secret_out_of_every_file() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let marker = "pot-qa-marker-7f3a1c";
+    let sleep = coreutils("sleep");
+    // the value only from the environment: the marker is in no argument of the command
+    let script = format!("echo \"$NOTES_TOKEN\"; {sleep} 3");
+    let (top, run) = world("podman-secret", "podman", &program, &["/bin/sh", "-c", &script]);
+    prepare(&top, &run);
+    let child = verb(&top, &run, "run")
+        .env("NOTES_TOKEN", marker)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for("the container", || {
+        !String::from_utf8_lossy(&podman(&program, &run, &["ps", "--quiet"]).stdout)
+            .trim()
+            .is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let mut found = vec![];
+    let xdg = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap()).join("crun");
+    let mut todo = vec![run.clone(), xdg];
+    while let Some(d) = todo.pop() {
+        let Ok(entries) = fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let Ok(m) = e.path().symlink_metadata() else {
+                continue;
+            };
+            if m.is_dir() {
+                todo.push(e.path());
+            } else if m.is_file()
+                && fs::read(e.path()).is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
+            {
+                found.push(e.path().display().to_string());
+            }
+        }
+    }
+    let needle = format!("{}/engine", fs::canonicalize(&run).unwrap().display());
+    for e in fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(c) = fs::read(e.path().join("cmdline")) else {
+            continue;
+        };
+        if !String::from_utf8_lossy(&c).contains(&needle) {
+            continue;
+        }
+        for f in ["cmdline", "environ"] {
+            if fs::read(e.path().join(f))
+                .is_ok_and(|b| b.windows(marker.len()).any(|w| w == marker.as_bytes()))
+            {
+                found.push(format!("{}/{f}", e.path().display()));
+            }
+        }
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        marker,
+        "the command has the secret"
+    );
+    assert_eq!(found, Vec::<String>::new(), "the secret's value is there");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// R4: docker refuses an image with the empty layer but a configuration (here an entrypoint), and removes the
+/// container with its anonymous volumes.
+#[test]
+fn docker_refuses_an_image_with_a_configuration() {
+    let Ok(program) = std::env::var("POT_TEST_DOCKER") else {
+        eprintln!("POT_TEST_DOCKER is not set: no container started");
+        return;
+    };
+    let image = "localhost/pot-qa-hostile:1";
+    let mut import = Command::new(&program)
+        .args(["import", "--change", r#"ENTRYPOINT ["/bin/false"]"#, "-", image])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut import.stdin.take().unwrap(), &[0u8; 1024]).unwrap();
+    assert!(import.wait().unwrap().success());
+    let (top, run) = world("docker-hostile", "docker", &program, &["/bin/sh", "-c", "true"]);
+    let path = top.join("config.json");
+    let mut c: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    c["image"] = image.into();
+    fs::write(&path, c.to_string()).unwrap();
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    let _ = Command::new(&program).args(["rmi", image]).output();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("is not pot's empty image") && err.contains("Entrypoint"),
+        "{err}"
+    );
+    assert_eq!(argv_value(&run, "--entrypoint").as_deref(), Some(""));
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// R5: a process that only names the run folder's engine state (here a sleep given a path in the store) is not
+/// the engine's: run does not wait for it.
+#[test]
+fn podman_waits_only_for_the_engines_processes() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let (top, run) = world("podman-bystander", "podman", &program, &["/bin/sh", "-c", "true"]);
+    prepare(&top, &run);
+    let store = fs::canonicalize(run.join("enginestore")).unwrap();
+    let mut bystander = Command::new("sh")
+        .args(["-c", "sleep 20; :", "sh"])
+        .arg(store.join("x"))
+        .arg("--root")
+        .arg(&store)
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    let took = started.elapsed();
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    ok(&out);
+    assert!(
+        took < Duration::from_secs(10),
+        "run waited {took:?} for a bystander"
+    );
+}
+
+/// R6: what only podman's user namespace can remove (a mode-000 folder of another id, as an overlay's work/work
+/// is) goes through podman unshare; when that fails too, cleanup names the folder and exits 1.
+#[test]
+fn podman_cleanup_removes_a_mode_000_folder_of_another_id_or_names_it() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let plant = |top: &Path, dir: &Path| {
+        let scratch = top.join("unshare");
+        fs::create_dir_all(scratch.join("home")).unwrap();
+        let made = Command::new(&program)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("XDG_RUNTIME_DIR", std::env::var_os("XDG_RUNTIME_DIR").unwrap())
+            .env("HOME", scratch.join("home"))
+            .env("CONTAINERS_CONF", "/dev/null")
+            .args(["--root", &scratch.join("s").display().to_string()])
+            .args(["--runroot", &scratch.join("r").display().to_string()])
+            .args([
+                "--tmpdir",
+                &scratch.join("t").display().to_string(),
+                "unshare",
+                "sh",
+                "-c",
+            ])
+            .arg(r#"mkdir -p "$1/work/work/x" && chown -R 1:1 "$1" && chmod 000 "$1/work/work""#)
+            .arg("sh")
+            .arg(dir)
+            .output()
+            .unwrap();
+        ok(&made);
+        let _ = fs::remove_dir_all(&scratch);
+    };
+    // removed through podman unshare
+    let (top, run) = world("podman-mode000", "podman", &program, &["/bin/sh", "-c", "true"]);
+    prepare(&top, &run);
+    plant(&top, &run.join("engineroot/overlay"));
+    assert!(fs::remove_dir_all(run.join("engineroot")).is_err());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert_eq!(names(&run), set(LEFT));
+    // podman unshare fails (a podman that can't run): named, exit 1
+    let (top, run) = world(
+        "podman-mode000-kept",
+        "podman",
+        &program,
+        &["/bin/sh", "-c", "true"],
+    );
+    prepare(&top, &run);
+    plant(&top, &run.join("engineroot/overlay"));
+    let (fake, _) = fake_engine(&top);
+    set_engine_program(&top, "podman", &fake);
+    let out = verb(&top, &run, "cleanup").output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    let r = fs::canonicalize(&run).unwrap().display().to_string();
+    assert!(err.contains(&format!("{r}/engineroot")), "{err}");
+    set_engine_program(&top, "podman", Path::new(&program));
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert_eq!(names(&run), set(LEFT));
 }

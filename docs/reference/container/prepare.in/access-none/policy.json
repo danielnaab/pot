@@ -159,7 +159,7 @@
         }
       ],
       "effective": true,
-      "secret": true,
+      "secret": false,
       "request": "env NOTES_TOKEN",
       "requestClass": "ordinary"
     },

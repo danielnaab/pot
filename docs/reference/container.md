@@ -103,15 +103,28 @@ through `/proc/self/fd`, and with `--network none` the runroot has none. **probe
 made 0700, holding podman's home, storage.conf and store) and removes it: it leaves nothing in the folder pot gives
 it, which is often pot's state.
 
-**A run's variables reach the container through the engine's environment** (`--env NAME`: the engine reads the
-value, so no value is in an argument or a file; policy-1 rule 6 rules out an env file). So a run may not be granted
-a variable the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
+**A run's plain variables reach the container through the engine's environment** (`--env NAME`: the engine reads
+the value, so no value is in an argument). The engine writes that value into the container's configuration
+(`enginestore/overlay-containers/ID/userdata/config.json`, `$XDG_RUNTIME_DIR/crun/ID/config.json`, docker's
+container config), which is acceptable for a plain variable and not for a secret (policy-1 rule 6: never in the
+run's files; the conformance audit of 2026-11-21 found a secret there, R3). **A secret variable** (an `env` item with
+`secret: true`) never reaches the engine. `run` writes `NAME=value` records, each ended by a NUL, into a pipe whose
+read end the engine passes on (`--preserve-fd FD`: fd 3 in the container). The run's bash (the config's `shell`)
+starts first: it reads fd 3, closes it, exports the variables and execs `/usr/bin/env -C CWD -- ARGV`. The value is
+in no file, no argument and not in the engine's environment (checked in a real run: a marker value was in no file of
+the run folder or of `$XDG_RUNTIME_DIR/crun`, and in no engine process's arguments or environment, while the command
+printed it). docker passes no file descriptor, so `prepare` refuses a secret variable under docker. The run's bash
+is used rather than this binary: the binary would need its own closure (glibc, libgcc) bound, which the config does
+not name. A plain variable may not be one the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
 `_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `LISTEN_*`, `HOME`,
 `PATH`, `TMPDIR`, `NOTIFY_SOCKET`, `REGISTRY_AUTH_FILE`, `SSH_AUTH_SOCK`, or one of Go's runtime variables (`GODEBUG`,
-`GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). A later `run` could hand the
-values over a pipe instead (`--env-file /dev/fd/N`), which would lift this.
+`GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). For a secret variable under podman
+this list is no longer needed, since the engine never sees it: only the names pot sets itself (`HOME`, `PATH` and the
+rest of pot's variables) would stay refused. It still applies to secret variables for now; lifting it is a later
+change. Plain variables could use the same pipe, which would lift the list for them too.
 
-`prepare` writes these as `container.env` (the names kept and the values set; no secret's value) for `run`, and
+`prepare` writes these as `container.env` (the names kept, the values set and the secret variables' names; no
+secret's value) for `run`, and
 `--print` shows them. A root that offers this backend should also hide `~/.config/containers` (and
 `~/.docker/config.json`, which pot hides already) from its runs; adding `~/.config/containers` to pot's default
 hidden list is a change to pot's core, listed in [What's next](#whats-next).
@@ -121,11 +134,13 @@ hidden list is a change to pot's core, listed in [What's next](#whats-next).
 | Policy | podman | docker |
 |---|---|---|
 | (always) | `--root RUNDIR/enginestore --runroot RUNDIR/engineroot --tmpdir RUNDIR/enginetmp`, before `run` | none |
-| (always) | `run --interactive --init --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same |
+| (always) | `run --interactive --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same, and `--name pot-HASH` (16 hex digits of the run folder's path, FNV-1a) |
+| (always) | `--init`: the engine's init is PID 1 (catatonit, or docker's `docker-init`), a read-only bind of the engine's own file; the command is never PID 1, which ignores a signal it has no handler for | the same |
 | stdin a terminal | `--tty`, added by `run` | the same |
+| a secret `env` item | `--preserve-fd FD`, added by `run`; the entry is `SHELL --noprofile --norc -c SCRIPT pot-secrets /usr/bin/env -C CWD -- ARGV` | refused |
 | (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
-| the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never` |
+| the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never --entrypoint ""` |
 | the working directory | `/usr/bin/env -C CWD -- ARGV` (podman takes no `-w` with `--rootfs`) | the same |
 | `/tmp`, `/run`, `HOME` | `--tmpfs …,notmpcopyup` (podman's default copies the folder below into the tmpfs); the home `mode=0700,U` | `--tmpfs`; the home `mode=0700,uid=UID,gid=GID` |
 | no effective network reach item | `--network none` | the same |
@@ -141,7 +156,7 @@ hidden list is a change to pot's core, listed in [What's next](#whats-next).
 | `mounts.state` | `DIR` bound writable at `HOME/AT` (`prepare` creates `DIR`) | the same |
 | `file`, mode `fixed` | `SOURCE` bound read-only at `PATH` | the same |
 | `env.set` | `--env NAME=VALUE` (`~` as the home) | the same |
-| `env` items, `TERM`, `COLORTERM` | `--env NAME`: the engine reads the value from its own environment, so no value is in an argument | the same |
+| `env` items (not secret), `TERM`, `COLORTERM` | `--env NAME`: the engine reads the value from its own environment, so no value is in an argument | the same |
 | pot's variables | `HOME USER LOGNAME SHELL PATH LANG TERMINFO_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE TZDIR POT POT_POLICY POT_RUN PS1`, `POT_TOOLS`, `POT_CLONE` (bwrap's `run_env`) | the same |
 | `mounts.run` | `/run/pot/policy.json` and `/run/pot/denials`, read-only | the same |
 | `mounts.launcher` | `POTBIN/pot` at `/run/pot/launcher`; `~/.config/pot/launcher` links to it | the same |
@@ -159,33 +174,46 @@ directories aside), since docker would create it.
 
 ## Run and cleanup
 
-**`run`** reads `container.argv` and `container.env` (regular files only, never a link) and starts the engine with the
-caller's environment cleared but for the names `container.env` keeps, then the values it sets. stdin, stdout and
-stderr are the engine's. It adds `--tty` when stdin is a terminal. The command is never PID 1 (`--init`: the
-engine's init is), since PID 1 ignores a signal it has no handler for. docker's root is the config's image, by
-default `localhost/pot-empty:1`; `run` imports it from an empty tar when it is missing (`docker import`) and refuses
-an image whose layers are not the one empty layer. Its name is content-stable, so runs share it and `cleanup` leaves
-it.
+**`run`** reads `container.argv` and `container.env` (regular files only, never a link). Just before it starts the
+engine, it checks that the run folder's engine paths are as `prepare` left them (audit R2), since the engine writes
+through a link and binds the run's files. `enginestore`, `enginehome` and `rootfs` (docker: `dockercfg`) must be real
+folders. `engineroot`, `enginetmp`, `emptydir` and `potcfg` must be real folders or absent. The run's files must be
+regular files or absent, and `container.id` must be absent. Otherwise `run` refuses, naming each path, and the
+engine never starts. It starts the engine with the caller's environment cleared but for the names `container.env`
+keeps, then the values it sets. stdin, stdout and stderr are the engine's. It adds `--tty` when stdin is a terminal,
+and the secrets' pipe ([above](#the-engines-configuration)). docker's root is the config's image, by default
+`localhost/pot-empty:1`. `run` imports it from an empty tar when it is missing (`docker import`) and refuses an image
+that is not the one empty layer with no configuration (R4): `Entrypoint`, `Cmd`, `Env`, `Volumes`, `User`,
+`WorkingDir`, `OnBuild`, `Labels`, `ExposedPorts`, `Healthcheck`, `StopSignal`, `Shell` and `ArgsEscaped` must be
+empty, null or unset. Its name is content-stable, so runs share it and `cleanup` leaves it.
 
 **`run` returns only once the container is gone** (audit N7). With `--rm`, conmon's cleanup (its exit command, a
 `podman container cleanup`) outlived `podman run` and recreated `enginestore` after `cleanup`. So there is no
 `--rm`: once the engine exits, `run` removes the container (podman: `rm --all --force --time 0` in the run's own
-store, so a container whose id never reached the cidfile goes too; docker: `rm --force` with the cidfile's id), then
-waits until no process on the host names the run folder's engine state (podman, conmon and its exit command all
-do), up to 30 s. It writes the status to `RUNDIR/status`, as bwrap's `run` does, and exits with it: the command's
+store, so a container whose id never reached the cidfile goes too; docker: `rm --force --volumes` with the run's name,
+R1, R4). It then waits until none of the engine's processes for this run is left, up to 30 s. Those are a podman
+whose arguments hold the exact pair `--root RUNDIR/enginestore` (its `run`, `rm`, `stop` and conmon's exit command),
+and a conmon whose bundle (`-b`) is in the run's store, whose `--exit-dir` is the run's, or whose pidfile is in the
+run's runroot. A process that only names a path there is not one of them (R5). It writes the status to `RUNDIR/status`, as bwrap's `run` does, and exits with it: the command's
 exit code, or 128 and the signal's number when a signal ended the engine. A removal that failed is one line on
 stderr; the status is still the command's.
 
 **Signals.** SIGINT is the command's: `run` keeps running, and the terminal sends it to the engine too, which passes
 it on (bwrap's `run` ignores it the same way). SIGTERM or SIGHUP stops the container through the engine (`stop
---time 10`: SIGTERM, then SIGKILL after 10 s), then `run` removes it as above. Before the container exists, it kills
-the engine instead.
+--time 10`: SIGTERM, then SIGKILL after 10 s), then `run` removes it as above. A stop before the container exists is
+retried each second until it does, so the engine's create is never cut off half done (R1: an early SIGTERM had left
+a docker container behind). podman with still no container after 10 s is killed; its store is the run's alone.
 
-**`cleanup`** (audit N6) removes, in order: the container, through the engine (podman's when the run's store is not
-empty, docker's when the cidfile names one), waiting for the engine's processes as `run` does; the engine's state
-(`enginestore`, `engineroot`, `enginetmp`), where what the user can't remove (files of another id of the user
-namespace) is removed with `podman unshare rm -rf`, by a podman whose own store is a private temporary folder, never
-the run's; then the engine's home and what `prepare` placed. It never follows a link planted in the run folder (a
+**`cleanup`** (audit N6) removes, in order:
+
+- The container, through the engine (podman's when the run's store is not empty; docker's by the run's name),
+  waiting for the engine's processes as `run` does. The engine is never handed a linked path (R2). When
+  `engineroot`, `enginetmp` or `enginehome` is not a real folder, or the removal or the wait fails, the engine's
+  state is kept whole and named, never deleted under a container that may still run.
+- The engine's state (`enginestore`, `engineroot`, `enginetmp`). What the user can't remove (files of another id of
+  the user namespace, an overlay's mode-000 `work/work`) is removed with `podman unshare rm -rf`, run by a podman
+  whose own store is a private temporary folder, never the run's.
+- The engine's home and what `prepare` placed. It never follows a link planted in the run folder (a
 link is removed, not followed) and never empties a folder that should be empty (`rootfs`, `emptydir`). Every
 removal it could not make is named in one refusal (exit 1); what it removed stays removed, so it can run again.
 
@@ -220,7 +248,7 @@ refused, since a field this backend does not know could narrow the run):
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
 - a path a bind can't name (`:`, `,` or `"`), and a command whose name holds `=` (`env` would read it as a variable);
-- a run's variable that configures the container engine (above);
+- a run's variable that configures the container engine (above), and a secret variable under docker;
 - a path that is not its real path, and a bind source that does not exist (above).
 
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
@@ -251,6 +279,12 @@ is).
   or `POT_TEST_DOCKER` names the engine (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, 2026-11-21): `true`
   and `exit 3` with no engine process or container left at return, SIGTERM stopping the run (143), a killed run's
   container, store and subuid-owned files removed by `cleanup`, and `cleanup` run twice
+- The run slice's conformance audit (2026-11-21, flexion-assistant session record
+  `2026-11-21-pot-phase-2/container-qa-2.md`) and the fixes for its findings R1-R6, each with a test in `run.rs`: an
+  early SIGTERM leaves no container (podman and docker); a link planted after `prepare` is refused by `run`; `cleanup`
+  keeps the store when it could not remove the container; a secret's value in no file or engine process; a docker
+  image with a configuration refused; a bystander process naming the store not waited for; a mode-000 folder of
+  another id removed through `podman unshare`, or named
 - [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `masked`, `Pins`, `cleanup` (the reference backend)
 - [core/pot.py](../../core/pot.py): `launch_facts` (launch.json), `scope_for` (resource-limits)
 - The phase 2 spike, executed on platform-vm on 2026-11-21 (flexion-assistant session record

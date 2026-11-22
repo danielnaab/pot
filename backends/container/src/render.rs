@@ -43,6 +43,11 @@ pub fn upholds(engine: Engine, g: &str) -> bool {
 
 pub const DOCKER_IMAGE: &str = "localhost/pot-empty:1";
 
+/// The run's bash, before the command: it reads the secret variables from fd 3 (`NAME=value` records, each ended by
+/// a NUL, from `run`'s pipe), closes it, sets them and execs the command (R3).
+pub const SECRETS_SCRIPT: &str =
+    r#"while IFS= read -r -d '' kv <&3; do export "$kv"; done; exec 3<&-; exec "$@""#;
+
 /// podman's global options for a run: its store, its runtime state (runroot: the conmon sockets, the mount
 /// table) and its temporary files (exit codes), all in the run folder. `cleanup` names the same.
 pub fn podman_globals(rundir: &str) -> Vec<String> {
@@ -117,6 +122,8 @@ pub struct Plan {
     /// The engine's environment (audit F2): only these of the caller's variables, then `engine_set`.
     pub engine_keep: Vec<String>,
     pub engine_set: Vec<(String, String)>,
+    /// The secret variables `run` hands over its pipe (podman only), by name.
+    pub secrets: Vec<String>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -249,6 +256,14 @@ fn gaps(i: &Inputs) -> Vec<String> {
             "the variable {}, which configures the container engine, as a run's variable",
             e.value
         ));
+    }
+    if i.engine == Engine::Docker {
+        for e in p.effective("env").filter(|e| e.secret == Some(true)) {
+            out.push(format!(
+                "the secret variable {} under docker (it passes no file descriptor: the value would be in the container's configuration)",
+                e.value
+            ));
+        }
     }
     for it in p.items.iter().filter(|it| it.effective && !known_kind(&it.kind)) {
         out.push(format!("an item of kind {} ({})", it.kind, it.class));
@@ -599,6 +614,10 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         Engine::Docker => {
             opts.push(o(&["--user", &ids]));
             opts.push(o(&["--pull", "never"]));
+            // R1: the run's name, so run and cleanup find the container before its id is in the cidfile
+            opts.push(o(&["--name", &crate::lifecycle::docker_name(i.rundir)]));
+            // R4: the image's entrypoint, if it had one, never runs
+            opts.push(o(&["--entrypoint", ""]));
         }
     }
     for (dest, mt) in &mounts {
@@ -624,7 +643,20 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         })
         .collect();
     sources.extend(closure.iter().cloned());
-    let (set, pass) = environment(i);
+    let (set, mut pass) = environment(i);
+    // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration):
+    // run hands it over a pipe, fd 3 in the container (podman; docker refuses it above)
+    let secret: BTreeSet<&str> = p
+        .effective("env")
+        .filter(|e| e.secret == Some(true))
+        .map(|e| e.value.as_str())
+        .collect();
+    let secrets: Vec<String> = pass
+        .iter()
+        .filter(|n| secret.contains(n.as_str()))
+        .cloned()
+        .collect();
+    pass.retain(|n| !secret.contains(n.as_str()));
     for (k, v) in &set {
         opts.push(o(&["--env", &format!("{k}={v}")]));
     }
@@ -680,7 +712,21 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         Engine::Docker => vec![i.image.to_string()],
     };
     // podman can't take -w with --rootfs (the spike): coreutils env changes directory, then execs the command
-    let mut entry = vec!["/usr/bin/env".to_string(), "-C".into(), cwd, "--".into()];
+    let mut entry = vec![];
+    if !secrets.is_empty() {
+        entry.extend(
+            [
+                &i.paths.shell,
+                "--noprofile",
+                "--norc",
+                "-c",
+                SECRETS_SCRIPT,
+                "pot-secrets",
+            ]
+            .map(String::from),
+        );
+    }
+    entry.extend(["/usr/bin/env".to_string(), "-C".into(), cwd, "--".into()]);
     entry.extend(l.argv.iter().cloned());
     Ok(Plan {
         program: i.program.to_string(),
@@ -692,6 +738,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         sources,
         engine_keep,
         engine_set,
+        secrets,
     })
 }
 
@@ -927,13 +974,29 @@ mod tests {
         }
         // K4: nothing is bound inside a hidden folder (its socket is not masked: the whole folder is)
         assert!(!lines(&plan).iter().any(|x| x.contains("secrets/x.sock")));
-        // a secret variable is passed by name: its value never reaches argv
-        assert!(has(&plan, "--env NOTES_TOKEN"));
+        // R3: a secret variable never reaches the engine: not in argv, not as --env NAME (the engine would write
+        // its value into the container's configuration), not in the engine's environment. run hands it over a pipe
+        // the engine passes on (fd 3), and the run's bash sets it before the command starts
+        assert!(!has(&plan, "--env NOTES_TOKEN"));
         assert!(!plan.argv().iter().any(|a| a.starts_with("NOTES_TOKEN=")));
+        assert!(!plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
+        assert_eq!(plan.secrets, ["NOTES_TOKEN"]);
+        assert_eq!(
+            plan.entry[..7],
+            [
+                "/nix/store/b-bash/bin/bash",
+                "--noprofile",
+                "--norc",
+                "-c",
+                SECRETS_SCRIPT,
+                "pot-secrets",
+                "/usr/bin/env"
+            ]
+        );
         assert!(has(&plan, "--env NOTES_CACHE=/home/u/.cache/notes"));
         assert_eq!(plan.root, ["--rootfs", "/r/rootfs:O"]);
         assert_eq!(
-            plan.entry,
+            plan.entry[6..],
             [
                 "/usr/bin/env",
                 "-C",
@@ -1012,7 +1075,10 @@ mod tests {
         let gaps = go(&p, &l, Engine::Docker, &nothing()).unwrap_err();
         assert_eq!(
             gaps,
-            ["resource-limits under docker (a container is not in pot's scope)"]
+            [
+                "resource-limits under docker (a container is not in pot's scope)",
+                "the secret variable NOTES_TOKEN under docker (it passes no file descriptor: the value would be in the container's configuration)"
+            ]
         );
     }
 
@@ -1406,6 +1472,12 @@ mod tests {
         assert!(has(&plan, "--init"));
         let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
         assert!(has(&plan, "--init"));
+        // R1, R4: docker's container has the run's name, and the image's entrypoint never runs
+        assert!(has(
+            &plan,
+            &format!("--name {}", crate::lifecycle::docker_name("/r"))
+        ));
+        assert!(has(&plan, "--entrypoint "));
         let argv = plan.argv();
         assert!(!argv.iter().any(|a| a == "--rm"), "{argv:?}");
         assert_eq!(argv[..3], ["docker", "run", "--interactive"]);
@@ -1494,6 +1566,7 @@ mod tests {
             let (mut p, l) = run_dir("read-only");
             for it in p.items.iter_mut().filter(|i| i.kind == "env") {
                 it.value = bad.into();
+                it.secret = Some(false);
             }
             for engine in [Engine::Podman, Engine::Docker] {
                 p.backend.proved.retain(|g| g != "resource-limits");
@@ -1506,10 +1579,11 @@ mod tests {
                 );
             }
         }
-        // the variables the run is passed by name reach the engine, which reads their values
-        assert!(plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
+        // a variable the run is passed by name (not a secret) reaches the engine, which reads its value
         let (p, l) = run_dir("access-none");
         let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
+        assert!(plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
+        assert!(has(&plan, "--env NOTES_TOKEN") && plan.secrets.is_empty());
         assert_eq!(
             plan.engine_set,
             [("DOCKER_CONFIG".to_string(), "/r/dockercfg".to_string())]

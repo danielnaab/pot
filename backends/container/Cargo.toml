@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }    # policy.json/1 and launch.j
 serde_json = "1"                                    # reading them; probe's output
 serde_path_to_error = "0.1"                         # where a decoding error is, so it can be said without the value (audit F7)
 signal-hook = { version = "0.3", default-features = false } # run: SIGTERM and SIGINT caught without unsafe, so the container is stopped and removed (N7)
+rustix = { version = "1", default-features = false, features = ["std", "pipe"] } # run: an inheritable pipe for the secrets (R3), without unsafe
 
 [dev-dependencies]
 trycmd = "0.15"                                     # Markdown CLI transcripts (docs/reference/container/)

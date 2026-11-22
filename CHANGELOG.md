@@ -20,6 +20,13 @@ v2.14.0's `sandbox` on).
   image, `localhost/pot-empty:1`. `after` prints bwrap's empty event. `cleanup` removes a killed run's container and
   store through the engine (`podman unshare` for subuid-owned files), never follows a link in the run folder, and
   names every removal it could not make instead of ignoring it (audit N6).
+- **The container backend's run slice, after its conformance audit (R1-R6):** a secret variable never reaches
+  the engine. Under podman it goes over a pipe to fd 3 (`--preserve-fd`), read by the run's bash before the
+  command, and is in no file. docker refuses a secret variable. docker's container has the run's name, so an early
+  SIGTERM leaves none, and a stop is retried until the container exists. `run` refuses engine paths that are not as
+  `prepare` left them (links). `cleanup` never hands the engine a linked path and keeps the store when the container
+  could not be removed. docker's image must have no configuration (`--entrypoint ""`, `rm --volumes`). The wait is
+  for this run's podman and conmon processes only. `podman unshare` removes whatever the user can't.
 
 ## v0.2.0 - 2026-11-21
 
