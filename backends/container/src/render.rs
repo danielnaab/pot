@@ -87,6 +87,9 @@ pub struct Plan {
     pub host_dirs: Vec<String>,
     /// Every bind's source, the closure's included: `prepare` checks that each exists ([`missing_sources`]).
     pub sources: Vec<String>,
+    /// The engine's environment (audit F2): only these of the caller's variables, then `engine_set`.
+    pub engine_keep: Vec<String>,
+    pub engine_set: Vec<(String, String)>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -592,6 +595,29 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         opts.push(o(&["--env", k]));
     }
 
+    // the engine reads pot's configuration, never the user's, and only allowlisted variables (audit F2)
+    let mut engine_keep: Vec<String> = crate::engine::KEEP.iter().map(|k| (*k).to_string()).collect();
+    for k in &pass {
+        if !engine_keep.contains(k) {
+            engine_keep.push(k.clone());
+        }
+    }
+    let engine_set = match i.engine {
+        Engine::Podman => {
+            files.push(RunFile::File {
+                name: "containers.conf".into(),
+                text: crate::engine::containers_conf(&rd("empty")),
+                mode: 0o444,
+            });
+            vec![("CONTAINERS_CONF".to_string(), rd("containers.conf"))]
+        }
+        Engine::Docker => {
+            files.push(RunFile::Dir {
+                name: "dockercfg".into(),
+            });
+            vec![("DOCKER_CONFIG".to_string(), rd("dockercfg"))]
+        }
+    };
     let root = match i.engine {
         Engine::Podman => {
             files.push(RunFile::Dir {
@@ -612,6 +638,8 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         files,
         host_dirs,
         sources,
+        engine_keep,
+        engine_set,
     })
 }
 
@@ -1263,5 +1291,52 @@ mod tests {
                 .any(|m| m.starts_with("/r/") || m.contains("state/9f2e")),
             "{missing:#?}"
         );
+    }
+
+    /// F2: the engine reads only pot's configuration: podman a containers.conf of the run's own (no default mounts,
+    /// volumes, env or devices) with `CONTAINERS_CONF_OVERRIDE` and the user's files out of reach; docker an empty
+    /// config folder. Only allowlisted variables reach the engine (no `CONTAINER_HOST`, `DOCKER_HOST`, …).
+    #[test]
+    fn the_engine_reads_only_pots_configuration() {
+        let (p, l) = run_dir("read-only");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert_eq!(
+            plan.engine_set,
+            [("CONTAINERS_CONF".to_string(), "/r/containers.conf".to_string())]
+        );
+        let conf = plan.files.iter().find_map(|f| match f {
+            RunFile::File { name, text, .. } if name == "containers.conf" => Some(text.clone()),
+            _ => None,
+        });
+        let conf = conf.expect("containers.conf");
+        assert!(conf.contains("default_mounts_file = \"/r/empty\""), "{conf}");
+        assert!(conf.contains("volumes = []") && conf.contains("env = []") && conf.contains("devices = []"));
+        assert!(!conf.contains("seccomp_profile"));
+        for bad in [
+            "CONTAINERS_CONF_OVERRIDE",
+            "CONTAINERS_CONF",
+            "CONTAINER_HOST",
+            "CONTAINER_CONNECTION",
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_CONFIG",
+            "XDG_CONFIG_HOME",
+        ] {
+            assert!(
+                !plan.engine_keep.iter().any(|k| k == bad),
+                "{bad} reaches the engine"
+            );
+        }
+        // the variables the run is passed by name reach the engine, which reads their values
+        assert!(plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
+        let (p, l) = run_dir("access-none");
+        let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
+        assert_eq!(
+            plan.engine_set,
+            [("DOCKER_CONFIG".to_string(), "/r/dockercfg".to_string())]
+        );
+        assert!(plan.files.contains(&RunFile::Dir {
+            name: "dockercfg".into()
+        }));
     }
 }

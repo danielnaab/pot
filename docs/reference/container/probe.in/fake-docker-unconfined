@@ -1,6 +1,11 @@
 #!/bin/sh
 # A stand-in for docker in probe's transcript: what `docker version` and `docker info` print on a host with the
 # memory and pids controllers and seccomp unconfined (the daemon's seccomp-profile).
+# The transcripts' runner sets DOCKER_HOST and CONTAINERS_CONF_OVERRIDE: neither may reach the engine, which must
+# read pot's own (absent) config folder.
+if [ -n "${DOCKER_HOST+x}${CONTAINERS_CONF_OVERRIDE+x}" ] || [ "$DOCKER_CONFIG" != /nonexistent/pot-container ]; then
+  echo "fake-docker: the caller's engine configuration reached the engine" >&2; exit 1
+fi
 case "$1" in
   version) echo "27.5.1" ;;
   info) echo 'true true ["name=seccomp,profile=unconfined","name=cgroupns"]' ;;

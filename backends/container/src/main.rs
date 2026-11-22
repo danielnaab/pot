@@ -5,6 +5,7 @@
 //! This slice: `probe`, `prepare` (and `prepare --print`, which writes nothing) and `cleanup`. `run` and `after`
 //! refuse. See docs/reference/container.md.
 
+mod engine;
 mod host;
 mod launch;
 mod policy;
@@ -182,6 +183,16 @@ fn quote(s: &str) -> String {
 fn print_plan(engine: &str, p: &Plan) -> String {
     let mut out =
         format!("# the {engine} command for this run, an option a line (pot explain --backend-command)\n");
+    let _ = writeln!(
+        out,
+        "# the engine runs with only these of the caller's variables: {}; and {}",
+        p.engine_keep.join(" "),
+        p.engine_set
+            .iter()
+            .map(|(k, v)| format!("{k}={}", quote(v)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let words = |a: &[String]| a.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
     let _ = writeln!(out, "{}", quote(&p.program));
     let mut closure = 0;
@@ -228,7 +239,10 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
         argv.extend_from_slice(a.as_bytes());
         argv.push(0);
     }
-    fs::write(rundir.join("container.argv"), argv)
+    fs::write(rundir.join("container.argv"), argv)?;
+    // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
+    let env = serde_json::json!({ "keep": p.engine_keep, "set": p.engine_set.iter().cloned().collect::<std::collections::BTreeMap<_, _>>() });
+    fs::write(rundir.join("container.env"), format!("{env}\n"))
 }
 
 fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
@@ -264,6 +278,8 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
 fn cleanup(rundir: &Path) {
     for n in [
         "container.argv",
+        "container.env",
+        "containers.conf",
         "container.id",
         "passwd",
         "group",
@@ -275,7 +291,7 @@ fn cleanup(rundir: &Path) {
         let _ = fs::remove_file(rundir.join(n));
     }
     // empty folders only: the rootfs is an overlay's lower layer and emptydir a mask, which the run never writes
-    for d in ["potcfg", "rootfs", "emptydir"] {
+    for d in ["potcfg", "rootfs", "emptydir", "dockercfg"] {
         let _ = fs::remove_dir(rundir.join(d));
     }
 }

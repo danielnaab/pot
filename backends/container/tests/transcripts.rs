@@ -11,6 +11,9 @@ fn docs() -> PathBuf {
 #[test]
 fn transcripts() {
     let cases = trycmd::TestCases::new();
+    // audit F2: the caller's engine configuration never reaches the engine (probe.in's stand-in checks)
+    cases.env("DOCKER_HOST", "tcp://198.51.100.1:2375");
+    cases.env("CONTAINERS_CONF_OVERRIDE", "/nonexistent/override.conf");
     cases.register_bin("pot-container", Path::new(env!("CARGO_BIN_EXE_pot-container")));
     // a run directory's absolute path shows as [CWD]/NAME (each page runs in its .in folder)
     cases.case(docs().join("*.md"));

@@ -4,8 +4,7 @@
 //!
 //! [`assess`] is pure, over what [`facts`] read from the engine and /proc, so its rules are unit-tested.
 
-use std::process::Command;
-
+use crate::engine;
 use crate::render::Engine;
 
 /// Guarantees this slice proves wherever its engine checks pass (bwrap's names, where they mean the same).
@@ -100,8 +99,10 @@ fn docker_seccomp(options: &str) -> bool {
     })
 }
 
-fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program)
+/// The engine as probe runs it: only pot's variables, and none of the user's configuration (audit F2).
+fn run(engine: Engine, program: &str, args: &[&str]) -> Result<String, String> {
+    let (k, v) = engine::probe_set(engine);
+    let out = engine::command(program, &[], &[(k.to_string(), v.to_string())])
         .args(args)
         .output()
         .map_err(|e| format!("can't run {program}: {e}"))?;
@@ -133,8 +134,9 @@ pub fn facts(engine: Engine, program: &str) -> Facts {
     };
     match engine {
         Engine::Podman => {
-            f.version = run(program, &["version", "--format", "{{.Client.Version}}"]);
+            f.version = run(engine, program, &["version", "--format", "{{.Client.Version}}"]);
             let info = run(
+                engine,
                 program,
                 &[
                     "info",
@@ -159,8 +161,9 @@ pub fn facts(engine: Engine, program: &str) -> Facts {
             }
         }
         Engine::Docker => {
-            f.version = run(program, &["version", "--format", "{{.Server.Version}}"]);
+            f.version = run(engine, program, &["version", "--format", "{{.Server.Version}}"]);
             match run(
+                engine,
                 program,
                 &[
                     "info",
