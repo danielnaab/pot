@@ -66,19 +66,19 @@ pot (work): policy.json/1: children: row root:relay:relaytest is neither admitte
 
 ```
 
-## run and after
+## run, after and cleanup
 
-Not in this slice: they refuse. `cleanup` removes what `prepare` placed, and succeeds on a run directory it never
-prepared.
+`run` runs only what `prepare` wrote. `after` reads the policy as `prepare` does, and refuses write access and clone
+mode. `cleanup` succeeds on a run directory it never prepared.
 
 ```console
 $ pot-container run work-bindings
 ? 1
-pot (work): the container backend's run is not in this slice
+pot (work): [CWD]/work-bindings/container.argv: No such file or directory (os error 2) (run prepare first)
 
 $ pot-container after work-bindings
 ? 1
-pot (work): the container backend's after is not in this slice
+pot (work): policy.json is for the bubblewrap backend, not container
 
 $ pot-container cleanup no-such-run
 

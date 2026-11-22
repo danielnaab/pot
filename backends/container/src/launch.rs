@@ -28,6 +28,9 @@ pub struct Launch {
     /// The root's pot (a store path's bin/): `/run/pot/launcher`, and on `PATH`.
     #[serde(default)]
     pub pot_bin: Option<String>,
+    /// Whether the host signs commits: the `after` event's `signs`.
+    #[serde(default)]
+    pub host_signs: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

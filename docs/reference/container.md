@@ -6,9 +6,9 @@ status: draft
 pot's third backend, beside bubblewrap and Seatbelt: it carries out a run's [policy.json/1](../../contracts/policy-1.md)
 as one `podman run` or `docker run`, a fresh container per run, on any host or CI that has either. It is pot's
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
-`packages.pot-container`). This page is the first slice (pot phase 2, plan step 3): it probes and renders the
-command; `run` and `after` are not written yet, and no root offers the backend. The transcripts that test it are
-the pages under [container/](container/probe.md).
+`packages.pot-container`). This page is its second slice (pot phase 2, plan step 3): it probes, renders the
+command and runs it, for runs in place with read access or none; no root offers the backend yet. The transcripts
+that test it are the pages under [container/](container/probe.md).
 
 ```
 pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
@@ -18,8 +18,9 @@ pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
 |---|---|
 | `probe` | Prints `{ "guarantees": [ … ] }`, or none beside an `error` ([transcript](container/probe.md)) |
 | `prepare` | Checks the policy and refuses what it can't carry out; places the run's files and `container.argv` (the command, NUL-separated). `--print` prints the command and writes nothing ([transcript](container/prepare.md)) |
-| `run`, `after` | Refuse: not in this slice |
-| `cleanup` | Removes what `prepare` placed; never fails |
+| `run` | Runs `container.argv` with the engine environment `prepare` recorded; exits with the command's status once the container is gone ([Run and cleanup](#run-and-cleanup)) |
+| `after` | Prints the run's `after` event: bwrap's, empty (nothing a read-only run can leave) |
+| `cleanup` | Removes the run's container and store through the engine, then what `prepare` placed; names every removal it could not make (exit 1) |
 
 A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 
@@ -93,7 +94,12 @@ guarantee. So the engine starts with:
 **The store is the run's own** (`enginestore`, removed by `cleanup`): with `--rootfs` there are no image layers to
 keep, and a fresh store cost about 10 ms a start against a persistent one (rootless podman 5.4.1 on platform-vm,
 2026-11-21: 105 ms against 96 ms, mean of five `true` runs); native rootless overlay works on kernel 6.6, so no
-`mount_program` is needed. **probe** runs the engine in a temporary folder of its own (`$TMPDIR/pot-container-probe-…`,
+`mount_program` is needed. **So is its runtime state**: podman's global options name the store (`--root`), the
+runroot (`--runroot RUNDIR/engineroot`: the mount table, the container's runtime files) and the temporary files
+(`--tmpdir RUNDIR/enginetmp`: exit codes). A runroot in the run's storage.conf is not enough: podman ignores it for
+a rootless user when `CONTAINERS_STORAGE_CONF` names the file (podman 5.4.1, 2026-11-21). The sockets are no limit
+on the run folder's path: conmon's attach socket is in the store (218 bytes in a smoke run), bound and reached
+through `/proc/self/fd`, and with `--network none` the runroot has none. **probe** runs the engine in a temporary folder of its own (`$TMPDIR/pot-container-probe-…`,
 made 0700, holding podman's home, storage.conf and store) and removes it: it leaves nothing in the folder pot gives
 it, which is often pot's state.
 
@@ -114,7 +120,9 @@ hidden list is a change to pot's core, listed in [What's next](#whats-next).
 
 | Policy | podman | docker |
 |---|---|---|
-| (always) | `run --rm --interactive --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private` | the same |
+| (always) | `--root RUNDIR/enginestore --runroot RUNDIR/engineroot --tmpdir RUNDIR/enginetmp`, before `run` | none |
+| (always) | `run --interactive --init --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same |
+| stdin a terminal | `--tty`, added by `run` | the same |
 | (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never` |
@@ -148,6 +156,42 @@ not its own real path (a link, or `..`), naming it. A hidden path that is a link
 real path; Home Manager's files are links) is not refused: the link is masked where a bound folder shows it, and so
 is its real path, by the kind of what it points to. And it refuses a bind whose source does not exist (the run folder's own files and the state
 directories aside), since docker would create it.
+
+## Run and cleanup
+
+**`run`** reads `container.argv` and `container.env` (regular files only, never a link) and starts the engine with the
+caller's environment cleared but for the names `container.env` keeps, then the values it sets. stdin, stdout and
+stderr are the engine's. It adds `--tty` when stdin is a terminal. The command is never PID 1 (`--init`: the
+engine's init is), since PID 1 ignores a signal it has no handler for. docker's root is the config's image, by
+default `localhost/pot-empty:1`; `run` imports it from an empty tar when it is missing (`docker import`) and refuses
+an image whose layers are not the one empty layer. Its name is content-stable, so runs share it and `cleanup` leaves
+it.
+
+**`run` returns only once the container is gone** (audit N7). With `--rm`, conmon's cleanup (its exit command, a
+`podman container cleanup`) outlived `podman run` and recreated `enginestore` after `cleanup`. So there is no
+`--rm`: once the engine exits, `run` removes the container (podman: `rm --all --force --time 0` in the run's own
+store, so a container whose id never reached the cidfile goes too; docker: `rm --force` with the cidfile's id), then
+waits until no process on the host names the run folder's engine state (podman, conmon and its exit command all
+do), up to 30 s. It writes the status to `RUNDIR/status`, as bwrap's `run` does, and exits with it: the command's
+exit code, or 128 and the signal's number when a signal ended the engine. A removal that failed is one line on
+stderr; the status is still the command's.
+
+**Signals.** SIGINT is the command's: `run` keeps running, and the terminal sends it to the engine too, which passes
+it on (bwrap's `run` ignores it the same way). SIGTERM or SIGHUP stops the container through the engine (`stop
+--time 10`: SIGTERM, then SIGKILL after 10 s), then `run` removes it as above. Before the container exists, it kills
+the engine instead.
+
+**`cleanup`** (audit N6) removes, in order: the container, through the engine (podman's when the run's store is not
+empty, docker's when the cidfile names one), waiting for the engine's processes as `run` does; the engine's state
+(`enginestore`, `engineroot`, `enginetmp`), where what the user can't remove (files of another id of the user
+namespace) is removed with `podman unshare rm -rf`, by a podman whose own store is a private temporary folder, never
+the run's; then the engine's home and what `prepare` placed. It never follows a link planted in the run folder (a
+link is removed, not followed) and never empties a folder that should be empty (`rootfs`, `emptydir`). Every
+removal it could not make is named in one refusal (exit 1); what it removed stays removed, so it can run again.
+
+Outside the run folder, as with any rootless podman: the OCI runtime's state for a running container
+(`$XDG_RUNTIME_DIR/crun/ID`, gone once the container is removed) and the user's podman pause process, which keeps
+the user namespace for later podman commands and is shared with them.
 
 ## Refusals
 
@@ -190,13 +234,8 @@ is).
 
 ## What's next
 
-1. `run`: the docker image (`docker import` of an empty tar), `-t` when stdin is a terminal, the exit status; then
-   the proxy over a bound socket, and the bindings. From the audit's third pass: `run` returns only once the
-   container is gone (`--rm` leaves conmon's cleanup running after `podman run` returns, which recreated
-   `enginestore` after `cleanup`, N7); the run's storage.conf sets `runroot` inside the run folder (today runtime
-   state goes to the user's `XDG_RUNTIME_DIR`); `cleanup` removes a killed run's container and store through the
-   engine (`podman rm -f`, then `podman unshare rm -rf enginestore`: subuid-owned files) and reports a removal it
-   could not make (N6).
+1. The network (pot's proxy over a socket bound into `/run/pot`, with its 108-byte `sun_path` limit), then the
+   bindings.
 2. Write access: pot's core resolves the workspace's protected paths and pins and passes them to the backend
    (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
 3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
@@ -207,7 +246,11 @@ is).
 ## Sources
 
 - [backends/container/src/](../../backends/container/src/): `policy.rs` (reading policy.json/1), `probe.rs`,
-  `render.rs` (the flags), `main.rs` (the verbs)
+  `render.rs` (the flags), `lifecycle.rs` (run's and cleanup's commands, the after event), `main.rs` (the verbs)
+- [backends/container/tests/run.rs](../../backends/container/tests/run.rs): real containers, when `POT_TEST_PODMAN`
+  or `POT_TEST_DOCKER` names the engine (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, 2026-11-21): `true`
+  and `exit 3` with no engine process or container left at return, SIGTERM stopping the run (143), a killed run's
+  container, store and subuid-owned files removed by `cleanup`, and `cleanup` run twice
 - [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `masked`, `Pins`, `cleanup` (the reference backend)
 - [core/pot.py](../../core/pot.py): `launch_facts` (launch.json), `scope_for` (resource-limits)
 - The phase 2 spike, executed on platform-vm on 2026-11-21 (flexion-assistant session record

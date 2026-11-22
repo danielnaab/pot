@@ -12,7 +12,14 @@ v2.14.0's `sandbox` on).
 - **The container backend, a first slice** (draft, [docs/reference/container.md](docs/reference/container.md)):
   `pot-container`, pot's first Rust code (`packages.pot-container`). It reads policy.json/1 strictly, probes podman
   or docker, and renders a run as one `podman run` / `docker run`, refusing what it does not carry out yet; no
-  root offers it, and its `run` is not written. policy.json/1's schema gains the `backend.name` value `container`.
+  root offers it. policy.json/1's schema gains the `backend.name` value `container`.
+- **The container backend runs a command** (in place, read access or none): `run` executes the prepared command
+  (`--tty` when stdin is a terminal, the engine's init as PID 1), exits with its status, and returns only once the
+  container is removed and the engine's processes for the run have ended (no `--rm`; audit N7). SIGTERM stops the
+  container. podman's store, runroot and temporary files are the run folder's. docker runs from an empty imported
+  image, `localhost/pot-empty:1`. `after` prints bwrap's empty event. `cleanup` removes a killed run's container and
+  store through the engine (`podman unshare` for subuid-owned files), never follows a link in the run folder, and
+  names every removal it could not make instead of ignoring it (audit N6).
 
 ## v0.2.0 - 2026-11-21
 

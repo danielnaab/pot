@@ -43,6 +43,20 @@ pub fn upholds(engine: Engine, g: &str) -> bool {
 
 pub const DOCKER_IMAGE: &str = "localhost/pot-empty:1";
 
+/// podman's global options for a run: its store, its runtime state (runroot: the conmon sockets, the mount
+/// table) and its temporary files (exit codes), all in the run folder. `cleanup` names the same.
+pub fn podman_globals(rundir: &str) -> Vec<String> {
+    let rd = |n: &str| format!("{}/{n}", rundir.trim_end_matches('/'));
+    vec![
+        "--root".into(),
+        rd("enginestore"),
+        "--runroot".into(),
+        rd("engineroot"),
+        "--tmpdir".into(),
+        rd("enginetmp"),
+    ]
+}
+
 /// Everything `render` needs.
 pub struct Inputs<'a> {
     pub policy: &'a Policy,
@@ -548,8 +562,11 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         args: a.iter().map(|s| (*s).to_string()).collect(),
         closure: false,
     };
+    // no --rm: run removes the container once the engine has exited, and waits for its processes (N7)
     let mut opts = vec![
-        o(&["run", "--rm", "--interactive"]),
+        o(&["run", "--interactive"]),
+        // the engine's init is PID 1, never the command (PID 1 ignores a signal it has no handler for)
+        o(&["--init"]),
         o(&["--log-driver", "none"]),
         o(&["--cidfile", &rd("container.id")]),
         o(&["--hostname", "pot"]),
@@ -560,6 +577,15 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         o(&["--security-opt", "no-new-privileges"]),
         o(&["--read-only"]),
     ];
+    if i.engine == Engine::Podman {
+        opts.insert(
+            0,
+            Opt {
+                args: podman_globals(i.rundir),
+                closure: false,
+            },
+        );
+    }
     let ids = format!("{}:{}", l.uid, l.gid);
     match i.engine {
         Engine::Podman => {
@@ -1347,6 +1373,42 @@ mod tests {
                 .any(|m| m.starts_with("/r/") || m.contains("state/9f2e")),
             "{missing:#?}"
         );
+    }
+
+    /// N7: no `--rm` (conmon's cleanup outlived `podman run` and recreated the store after cleanup): `run` removes
+    /// the container itself. podman's store, runtime state (runroot) and temporary files are the run folder's,
+    /// named by global options before `run` (podman ignores a runroot in the storage.conf `CONTAINERS_STORAGE_CONF`
+    /// names, for a rootless user); docker has none.
+    #[test]
+    fn no_rm_and_podmans_state_is_the_run_folders() {
+        let (p, l) = run_dir("access-none");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        let argv = plan.argv();
+        assert!(!argv.iter().any(|a| a == "--rm"), "{argv:?}");
+        assert_eq!(
+            argv[..9],
+            [
+                "podman",
+                "--root",
+                "/r/enginestore",
+                "--runroot",
+                "/r/engineroot",
+                "--tmpdir",
+                "/r/enginetmp",
+                "run",
+                "--interactive"
+            ]
+        );
+        assert_eq!(podman_globals("/r/"), argv[1..7]);
+        assert!(has(&plan, "--cidfile /r/container.id"));
+        // the command is never PID 1, which ignores SIGTERM and SIGINT it has no handler for: the engine's init is
+        // (bwrap's own process is PID 1 in its namespace)
+        assert!(has(&plan, "--init"));
+        let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
+        assert!(has(&plan, "--init"));
+        let argv = plan.argv();
+        assert!(!argv.iter().any(|a| a == "--rm"), "{argv:?}");
+        assert_eq!(argv[..3], ["docker", "run", "--interactive"]);
     }
 
     /// F2: the engine reads only pot's configuration: podman a containers.conf of the run's own (no default mounts,
