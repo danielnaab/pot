@@ -1560,6 +1560,10 @@ def clone_mode_checks(host, root, ctx, flags, clone):
         if flags.get(f) and not clone:
             form = "--from REF" if f == "from" else "--detach"
             raise C.Refusal(f"pot ({name}): --{f} is clone mode: pot dispatch {form} CMD, or pot --clone {form} CMD", 2)
+    if clone and ctx.get("access") == "none":
+        # 0.1.1: before the clone is made (compose refuses it too)
+        raise C.Refusal(f"pot ({name}): access none: the run sees no workspace, so it has no clone to work in; "
+                        "a context with access none runs in place", 2)
     if clone and flags.get("repo") and flags.get("access") != "read":
         # D5: a --repo that is or holds a root gets the root refusal (V1) first
         for v in flags["repo"]:
@@ -2966,6 +2970,8 @@ def path_answer(policy, p, cp, pre, home, facts, srcs):
         if i["kind"] == "hidden" and any(C.under(p, h) for h in i.get("paths", [])):
             return f"{pre} {cp} is hidden by your root in every run ({i['value']}, {srcs(i)})", False
     for w in policy["workspace"]:
+        if C.under(p, w["path"]) and policy["access"] == "none":
+            return f"{pre} {cp} is in the workspace {w['id']}, which this run does not see (access none)", False
         if C.under(p, w["path"]):
             rel = p[len(w["path"]) + 1:]
             for i in items:

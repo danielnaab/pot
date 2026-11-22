@@ -1047,6 +1047,10 @@ def compose(inp):
         ca = (cmdkit["manifest"].get("commands") or {}).get(cmdname, {}).get("access")
         if ca and ACCESS_RANK[ca] < ACCESS_RANK[access]:
             access = ca
+    if access == "none" and clone_mode:
+        # 0.1.1: access none is no workspace at all, so a clone would be made for nothing
+        raise Refusal(f"pot ({ctx['name']}): access none: the run sees no workspace, so it has no clone to work in; "
+                      "a context with access none runs in place", 2)
     item("access", access, "limits", [{"context": ctx["name"]}])
     hidden = []
     for h in DEFAULT_HIDDEN + list(root.get("baseHidden") or []):
@@ -1249,7 +1253,7 @@ def compose(inp):
     workspace = [{"id": w["id"], "path": w["top"],
                   "common": os.path.join(w["top"], ".git") if w.get("clone") else w["common"],
                   "protected": [p for p in protect if p not in proposal] if access == "write" else [],
-                  "sealed": [] if clone_mode else sealed,
+                  "sealed": [] if clone_mode or access == "none" else sealed,
                   "proposal": proposal,
                   "clone": w.get("clone")} for w in inp["workspace"]]
     policy = {
@@ -1336,7 +1340,7 @@ def narrower(child, parent):
             ok = v in pnet or (not any(c in v for c in "*?[") and any(fnmatch.fnmatchcase(v.lower(), p.lower()) for p in pnet))
         elif k == "read":
             p = i.get("path") or v
-            ok = p.startswith("/nix/store/") or any(under(p, t) for t in tops) \
+            ok = p.startswith("/nix/store/") or (parent["access"] != "none" and any(under(p, t) for t in tops)) \
                 or any(under(p, q) or under(v, q) for q in paths(("read", "write", "socket")))
         elif k in ("write", "socket"):
             p = i.get("path") or v
@@ -1952,7 +1956,8 @@ def explain_text(policy, report, root, width=100):
     out.append(f"context    {ctx['name']}: {policy['mode']}, access {policy['access']}, {policy['backend']['name']}"
                + (f"; includes {', '.join('root:' + n for n in inc)}" if inc else ""))
     for w in policy["workspace"]:
-        out.append(f"workspace  {w['id']} ({policy['access']}) {w['path']}")
+        acc = "none: not in the run" if policy["access"] == "none" else policy["access"]
+        out.append(f"workspace  {w['id']} ({acc}) {w['path']}")
     scions = [k for k in report["kits"] if k["kind"] == "scion"]
     if scions:
         out += wrap_words("       submodules:", [f"{k['name']} {(k.get('source') or {}).get('tag', '')}".rstrip()
@@ -2022,6 +2027,8 @@ def explain_text(policy, report, root, width=100):
         for k, v in groups.items():
             out += wrap_words("limits     protect:" if first else " " * 20, v[:-1] + [f"{v[-1]} ({k})"], width, 20)
             first = False
+    elif policy["access"] == "none":
+        out.append("limits     no workspace (access none): the run does not see it, and starts in its home")
     else:
         out.append(f"limits     the workspace is read-only (access {policy['access']})")
     if proposed:

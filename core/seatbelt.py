@@ -338,7 +338,7 @@ def prepare(cfg, rundir, print_cmd=False):
                             link(runhome, rel, target, made)
                         except Stop:
                             pass     # below a read request's link: the host folder shows its own
-        for w in policy["workspace"]:
+        for w in policy["workspace"] if policy["access"] != "none" else []:
             reads.append(real(w["path"]))
         t = time.time()
         found, _ = B.secret_walk(cfg, [r for r in reads if os.path.isdir(r)])
@@ -356,10 +356,12 @@ def prepare(cfg, rundir, print_cmd=False):
             keep.append(real(i["path"]))
             home_link(i.get("value", ""), i["path"])
 
-    # the workspace
+    # the workspace; 0.1.1: with access none there is none, denied over every allow (a read request's folder, inspect's
+    # view), and the run starts in its HOME
     pinsets, clones = [], []
-    cwd = launch["cwd"]
-    for w in policy["workspace"]:
+    cwd = start_dir(policy, launch, runhome)
+    hidden += unseen(policy)
+    for w in policy["workspace"] if policy["access"] != "none" else []:
         top, common = real(w["path"]), real(w["common"])
         if w.get("clone"):
             # §11: no same-path clone: the run works in the clone, at its own path
@@ -513,6 +515,16 @@ def prepare(cfg, rundir, print_cmd=False):
         json.dump(launch, f)
     if print_cmd:
         print_command(cfg, rundir, policy, launch, prof)
+
+
+def unseen(policy):
+    """0.1.1: access none: the workspace's paths (each top and git common directory), as the profile names them."""
+    return [real(p) for p in B.unseen(policy)]
+
+
+def start_dir(policy, launch, runhome):
+    """Where the command starts: the caller's folder, or with access none the run's own HOME."""
+    return runhome if policy["access"] == "none" else launch["cwd"]
 
 
 def readme(policy, launch, rundir, runhome):

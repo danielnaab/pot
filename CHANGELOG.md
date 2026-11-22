@@ -24,6 +24,14 @@ v2.14.0's `sandbox` on).
 - **run-env/1 no longer lets a release add a key to a policy item** within version 1: a new field, an item's key
   included, is a new version (policy.json/1). pot 0.1.0 added none.
 
+### Fixed
+
+- **`access = "none"` is no workspace at all**, in both backends: neither the repository nor its git directory is
+  in the run, even under a folder a read request binds (masked, or denied under Seatbelt), and the command starts
+  in the run's home. 0.1.0 treated `none` as `read`, so a context with `access = "none"` saw its workspace
+  read-only. A clone context with `access = "none"` is refused, and `pot explain` and `pot why` say there is no
+  workspace. Siblings: a run with `none` covers no read inside the workspace.
+
 ## v0.1.0 - 2026-11-21
 
 pot in its own repository, extracted from graft v2.22.0 with its history. It reads and writes exactly what graft

@@ -54,7 +54,7 @@ Terms built from these:
 |---|---|
 | **workspace** | The repositories a run works on. |
 | **mode** | `in-place` or `clone`. |
-| **access** | `write`, `read` or `none`: what the run may do to its workspace. |
+| **access** | `write`, `read` or `none`: what the run may do to its workspace. `none`: the run has no workspace; the repository and its git directory are not in it, and it starts in its home. |
 | **state** | A reach request for a private persistent directory. |
 | **command** | A program that a kit ships. |
 | **command kit**, **repo kit**, **submodule kit**, **root kit**, **agent kit** | A kit by its place: the kit whose command runs; a repository's own needs; the kit of a git submodule at a release tag; a kit the root defines; a kit that describes an agent, such as Claude Code. |
@@ -168,7 +168,7 @@ programs.pot.contexts.readonly = { extends = "work"; access = "read"; };
 |---|---|---|
 | `extends` | a context name | Start from that context's fields. |
 | `mode` | `in-place`, `clone`, `none` | `none` is `host`. `clone` is [dispatch](#dispatch)'s. |
-| `access` | `write`, `read`, `none` | What the run may do to its workspace. |
+| `access` | `write`, `read`, `none` | What the run may do to its workspace. `none`: no workspace in the run, even under a folder a read request names; the command starts in the run's home, and `pot explain` says `limits     no workspace (access none): the run does not see it, and starts in its home`. A clone context with `access = "none"` is refused: `pot (NAME): access none: the run sees no workspace, so it has no clone to work in; a context with access none runs in place`. |
 | `backend` | a backend name, default `auto` | The backend that enforces the run. |
 | `requires` | guarantee names | A run for which the backend cannot prove these is refused ([Guarantees](#guarantees)). |
 | `trust` | `workspace`, `root` | Whether workspace kits are evaluated. `root` is not in 0.1.0. |

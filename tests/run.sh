@@ -401,6 +401,10 @@ EOF
         defaultInstance.sel = "a";
         contexts.work.include = [ "daniel" ];
         contexts.readonly = { extends = "work"; access = "read"; };
+        # 0.1.1: access none, no workspace
+        contexts.blind = { extends = "work"; access = "none"; };
+        contexts.blindclone = { extends = "dispatch"; access = "none"; };
+        contexts.blindview = { extends = "inspect"; access = "none"; };
         inspect.home = [ ];
       };
     });
@@ -608,6 +612,36 @@ while True:
   refuse "pot: F1, nothing reached the listener" grep -q CONNECTED "$work/lo-port"
   ran "pot: the readonly context" sb_loud readonly bash -c 'echo z >> notes.md 2>&1; true'
   expect "has no write" holds "Read-only file system"
+  # 0.1.1: access none is no workspace at all: neither the repository nor its git directory is in the run, which
+  # starts in its home; a folder a read request binds above the workspace shows it empty
+  # shellcheck disable=SC2016 # the run's shell expands them
+  ran "pot: access none" sb_ blind bash -c 'echo "pwd=$PWD"; test -e "$1" && echo "workspace seen"; test -e "$1/.git" && echo "git seen"
+    grep -c "There is no workspace" /run/pot/README.md; pot why "$1/notes.md"; true' _ "$c"
+  expect "starts in the run's home" has "pwd=$HOME"
+  refuse "the workspace is not there" holds "workspace seen"
+  refuse "nor its git directory" holds "git seen"
+  expect "the run's README says so" has "1"
+  expect "pot why says so" holds "/notes.md is in the workspace repo:"
+  expect "(not seen)" holds "which this run does not see (access none)"
+  ran "pot: explain, access none" sb_ explain blind
+  expect "names no workspace" has "limits     no workspace (access none): the run does not see it, and starts in its home"
+  expect "and the workspace row" holds "(none: not in the run) $c"
+  ran "pot: explain --json, access none" sb_ explain --json blind
+  expect "has access none, nothing protected or sealed" test "$(jq -c '[.access, [.workspace[] | .protected, .sealed]]' <<<"$out")" = '["none",[[],[]]]'
+  mkdir -p "$work/sbup/ws" && git_ -C "$work/sbup/ws" init -q && echo secret-ish > "$work/sbup/ws/f" && echo seen > "$work/sbup/g"
+  git_ -C "$work/sbup/ws" add f && git_ -C "$work/sbup/ws" commit -qm init
+  cd "$work/sbup/ws"
+  # shellcheck disable=SC2016 # the run's shell expands them
+  ran "pot: access none, under a folder --read binds" sb_ blind --read "$work/sbup" bash -c 'cat "$1/g"; echo "ws=[$(ls -A "$1/ws")]"; true' _ "$work/sbup"
+  expect "the folder is read" has "seen"
+  expect "the workspace in it is empty" has "ws=[]"
+  # shellcheck disable=SC2016 # the run's shell expands them
+  ran "pot: access none, inspect's view" sb_ blindview bash -c 'echo "pwd=$PWD"; test -e "$1/f" && echo "workspace seen"; true' _ "$work/sbup/ws"
+  expect "starts in the home" has "pwd=$HOME"
+  refuse "and has no workspace" holds "workspace seen"
+  cd "$c"
+  refused "pot: access none in a clone" sb_ blindclone true
+  expect "is refused" has "pot (blindclone): access none: the run sees no workspace, so it has no clone to work in; a context with access none runs in place"
   ran "pot: a log per run" bash -c "cat '$work'/sbstate/runs/*/log.jsonl"
   expect "start" holds '"ev":"start","by":"host"'
   expect "after" holds '"ev":"after","by":"host"'
@@ -1186,6 +1220,16 @@ pot_seatbelt() {
   expect "the README beside it" has "# pot: this run (work)"
   ran "pot (seatbelt): the caller's variables" env SB_DECOY=decoy-secret POT_QUIET=1 "$work/sbr/bin/pot" bash -c 'env | grep -c decoy-secret || true'
   expect "none of them" has "0"
+  # 0.1.1: access none, no workspace: denied, and the run starts in its own HOME
+  # shellcheck disable=SC2016 # the run's shell expands them
+  ran "pot (seatbelt): access none" sb_ blind bash -c 'echo "pwd=$PWD home=$HOME"; cat "$1/notes.md" >/dev/null 2>&1 && echo "workspace seen"
+    cat "$1/.git/HEAD" >/dev/null 2>&1 && echo "git seen"; true' _ "$c"
+  expect "starts in its HOME" grep -qE '^pwd=(.*) home=\1$' <<<"$out"
+  refuse "the workspace is denied" holds "workspace seen"
+  refuse "and its git directory" holds "git seen"
+  # shellcheck disable=SC2016 # the run's shell expands them
+  ran "pot (seatbelt): access none, inspect's view" sb_ blindview bash -c 'cat "$1/notes.md" >/dev/null 2>&1 && echo "workspace seen"; true' _ "$c"
+  refuse "denies the workspace too" holds "workspace seen"
   ran "pot (seatbelt): explain --backend-command" sb_ explain --backend-command
   expect "is sandbox-exec, with the profile" holds "/usr/bin/sandbox-exec -f"
   expect "and every path a parameter" holds "-DP0="

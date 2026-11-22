@@ -55,7 +55,7 @@ explain`, `pot why`, the startup line): a backend may show it and must not act o
 | `run` | string | MUST | The run's id, four hex digits: the backend sets `POT_RUN` to it. `pot explain --json` prints `explain`. |
 | `context` | string | MUST | The context's name: `POT`, and the prefix of every denial (`pot (<context>): …`). |
 | `mode` | `in-place` \| `clone` | MUST | `clone`: the workspace is a clone (`workspace[].clone`), and the run gets `POT_CLONE=1`. |
-| `access` | `write` \| `read` \| `none` | MUST | `write`: the workspace is writable, but for `protected`. Anything else: the workspace is read-only. `none` is composed when a context or `--access none` asks for it; both backends today treat it as `read` (an open question in pot's phase 2). |
+| `access` | `write` \| `read` \| `none` | MUST | `write`: the workspace is writable, but for `protected`. `read`: it is read-only. `none` (a context's `access = "none"`): there is no workspace in the run. Nothing binds or allows any `workspace[]` `path` or `common`; where a folder that a read or write item names holds one, or `inspect`'s view would show one, it is masked (bubblewrap) or denied (Seatbelt), as a hidden path is; an item that names the path itself, or a path in it, still binds what it names. The command starts in the run's home, not in `launch.json`'s `cwd`. pot never composes `none` with `mode` `clone` (it refuses the run). Before 0.1.1 both backends treated `none` as `read`. |
 | `backend` | object | MUST | `name` (`bubblewrap`, `seatbelt`), the guarantees the context `requires`, and those the backend `proved` at this run's probe (`resource-limits` only for a run in the resource scope; `closure-store` dropped for inspect and for a run with the `nix` capability). pot refused the run (125) before writing the file if `requires` is not within `proved`. |
 | `workspace` | list | MUST | Each repository, below. Empty for `pot inspect` outside a repository. |
 | `items` | list | MUST | Every see, limits and reach item, below. |
@@ -72,7 +72,7 @@ explain`, `pot why`, the startup line): a backend may show it and must not act o
 | `path` | MUST | The original path: where the run sees the repository. |
 | `common` | MUST | Its git common directory (in clone mode, the clone's `.git`). |
 | `protected` | MUST | Patterns (relative to `path`, `**/` for any depth) whose matches stay read-only and cannot be renamed, removed or replaced. Empty unless `access` is `write`. A link on a protected path, or a protected file with a second hard link, stops the run. |
-| `sealed` | MUST | Protected folders whose new entries are the run's alone (under bubblewrap: each existing entry read-only, a new one discarded at the end and listed in the `after` event). A backend that cannot seal keeps them plainly read-only, which is narrower, and says so (`pot explain`: `sealed: none`). Always empty in a clone. |
+| `sealed` | MUST | Protected folders whose new entries are the run's alone (under bubblewrap: each existing entry read-only, a new one discarded at the end and listed in the `after` event). A backend that cannot seal keeps them plainly read-only, which is narrower, and says so (`pot explain`: `sealed: none`). Always empty in a clone, and with `access` `none`. |
 | `proposal` | MUST | In a clone, the agent-configuration patterns that are writable there and flagged in review: a backend refuses a link on one, and reports changes to them in its `after` event. Always empty in place. |
 | `clone` | MUST | `null` in place; in clone mode, the clone's host path, which the run sees at `path` when the backend proves `same-path-clone` (else at its own path). |
 
@@ -100,7 +100,7 @@ out only items with `effective: true`.** An item not in effect says `why` (`not 
 | `state` | reach | Info | The request (`at`, `shared`). A backend binds `mounts.state`, which pot computed from these. |
 | `capability` | reach | Info | The request (`data`, the `binding` selector). A backend carries out `bindings`, which pot computed from these. |
 | `include` | reach | Info | A root kit the context includes; its requests are items of their own. |
-| `view` | reach | MUST | `inspect`'s view (value `inspect`): the whole file system read-only, the home empty but for `home` (paths read-only) and, with `homeManager`, home-manager's links; secrets and sockets masked; the workspace read-only (the state mounts stay writable). |
+| `view` | reach | MUST | `inspect`'s view (value `inspect`): the whole file system read-only, the home empty but for `home` (paths read-only) and, with `homeManager`, home-manager's links; secrets and sockets masked; the workspace read-only, or with `access` `none` masked (the state mounts stay writable). |
 | `unsandboxed` | reach | MUST | Never in effect in a policy pot writes: a granted one runs the command on the host instead. A backend refuses a policy that has one in effect. |
 
 `request`, `requestClass` (`ordinary`, `powerful`) and `sources` are Info. Each source is one of `{ kit, file,

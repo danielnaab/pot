@@ -61,7 +61,7 @@ policy.json/1, this section let a release add an optional key to an item).
 |---|---|---|
 | `version` | number | `1` |
 | `run` | string | the run's id, four hex digits |
-| `context`, `mode`, `access` | strings | the context; `in-place` or `clone`; `read` or `write` |
+| `context`, `mode`, `access` | strings | the context; `in-place` or `clone`; `write`, `read` or `none` (no workspace in the run, which starts in its home; since 0.1.1) |
 | `backend` | object | its `name`, the guarantees the context `requires`, and those it `proved` for this run (`resource-limits` only for a run that gets the resource scope; `nest` never since v2.20.0) |
 | `workspace` | list | each repository: `id` (a [kit identity](kit-1.md#identity)), `path` (the original path, where the run sees it), `common`, `protected`, `sealed` (since v2.19.1: the protected patterns whose folders are sealed under bubblewrap; `[ ]` in a clone), `proposal` (since v2.19.1: in a clone, the agent-configuration patterns that are writable there, flagged in review), `clone` (`null` in place; in clone mode, the clone's host path in pot's state, and `common` is the clone's `.git`) |
 | `items` | list | every see, limits and reach item: `kind`, `value`, `class` (`see`, `limits` or `reach`), `sources`, `effective`; a file a mirror dir binds also has `memory: true` (as in v2.15.0) and, from v2.16.0, `mirror` (the dir's label, such as `"memory"`) |

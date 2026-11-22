@@ -392,6 +392,23 @@ def masked(p):
     return [["--ro-bind", EMPTY, p]]
 
 
+def unseen(policy):
+    """0.1.1: with access none the run has no workspace: each repository's top and its git common directory, which
+    nothing binds and which are masked where a bound folder (or inspect's view) would show them."""
+    out = []
+    if policy["access"] == "none":
+        for w in policy["workspace"]:
+            for p in (w["path"], w["common"]):
+                if not any(p == q or p.startswith(q.rstrip("/") + "/") for q in out):
+                    out.append(p)
+    return out
+
+
+def start_dir(policy, launch):
+    """Where the command starts: the caller's folder, or with access none (no workspace to start in) the run's home."""
+    return launch["home"] if policy["access"] == "none" else launch["cwd"]
+
+
 def depth(p):
     return p.rstrip("/").count("/")
 
@@ -666,6 +683,8 @@ def mirrors_text(policy):
 
 def readme(policy, launch):
     ctx = policy["context"]
+    no_workspace = ("- There is no workspace (access `none`): the repository is not in this run, and the command\n"
+                    "  started in HOME.\n") if policy["access"] == "none" else ""
     return f"""# pot: this run ({ctx})
 
 You are inside a pot run, context `{ctx}`, access `{policy['access']}`.
@@ -680,7 +699,7 @@ The policy is /run/pot/policy.json; `pot why PATH|HOST|CMD|VAR` explains one ite
 - Protected files (what decides the sandbox, what the host runs, agent configuration) are
   read-only, and their folders cannot be renamed or removed. Edit them on the host.
 - Commits made here are unsigned; the host signs them afterwards.
-{mirrors_text(policy)}- Every denial message starts `pot ({ctx}):`.
+{no_workspace}{mirrors_text(policy)}- Every denial message starts `pot ({ctx}):`.
 """
 
 
@@ -707,6 +726,7 @@ def prepare(cfg, rundir, print_cmd=False):
     run_mnt = policy["mounts"]["run"]
     net = [i for i in eff(policy, "network") if i["class"] == "reach"]
     bound_dirs = []
+    shown = []           # inspect's view: the folders it shows of the home and of /tmp and /run (read items too)
 
     if view:
         args += [["--ro-bind", "/", "/"], ["--proc", "/proc"], ["--dev", "/dev"], ["--tmpfs", "/tmp"], ["--tmpfs", "/run"]]
@@ -730,7 +750,7 @@ def prepare(cfg, rundir, print_cmd=False):
                     continue      # the run's own launcher pointer, below (v2.18.0)
                 if not any(link == r or link.startswith(r + "/") for r in readable):
                     mount(link, 1, ["--symlink", target, link])
-        for w in policy["workspace"]:
+        for w in policy["workspace"] if policy["access"] != "none" else []:
             # the workspace, read-only, wherever it is (in ~ outside inspect.home, or in /tmp)
             if not any(w["path"].startswith(r + "/") or w["path"] == r for r in readable):
                 mount(w["path"], 1, ["--ro-bind", w["path"], w["path"]])
@@ -759,6 +779,8 @@ def prepare(cfg, rundir, print_cmd=False):
             p = i["path"]
             if os.path.exists(p):
                 mount(p, 1, ["--ro-bind", p, p])
+                shown.append(p)
+        shown += readable
     else:
         closure = launch.get("closure") or []
         if binding(policy, "nix"):
@@ -807,10 +829,25 @@ def prepare(cfg, rundir, print_cmd=False):
         if s not in named_socks and not in_hidden(s):
             mount(s, 2, ["--ro-bind", EMPTY, s])
 
+    # 0.1.1: access none, no workspace: masked where a bound folder, or inspect's view, would show it (a view hides
+    # what is under the home, /tmp and /run unless it shows that folder)
+    xdg = launch.get("xdgRuntime") or "/run"
+    for p in unseen(policy):
+        if not os.path.lexists(p) or in_hidden(p):
+            continue
+        if view:
+            gone = any(p == d or p.startswith(d + "/") for d in (home, "/tmp", "/run", xdg))
+            visible = not gone or any(p == r or p.startswith(r + "/") for r in shown)
+        else:
+            visible = any(p == b or p.startswith(b + "/") for b in bound_dirs)
+        if visible:
+            for a in masked(p):
+                mount(p, 2, a)
+
     # the workspace
     pinsets = []
     clones = []
-    for w in policy["workspace"]:
+    for w in policy["workspace"] if policy["access"] != "none" else []:
         top, common = w["path"], w["common"]
         if w.get("clone"):
             # clone mode (§9): the clone, bound at the original path (same-path-clone); its git directory, config
@@ -858,7 +895,7 @@ def prepare(cfg, rundir, print_cmd=False):
     # its parent's view, which is itself sealed); each workspace top on its own, scions included
     notes = []
     sealed_runs = []
-    for w in policy["workspace"]:
+    for w in policy["workspace"] if policy["access"] != "none" else []:
         src = w.get("clone") or w["path"]
         for d in sealed_dirs(cfg, src, w.get("sealed") or []):
             dest = w["path"] + d[len(src):]
@@ -880,7 +917,7 @@ def prepare(cfg, rundir, print_cmd=False):
     # v2.19.1: a hidden path under the workspace's real path (in place and with read access; inspect's view masks its
     # own; a clone holds only what git holds, so masking its copy protects nothing) is masked, and nothing is bound
     # inside a hidden folder there. One that git tracks gets a start note: the run sees it empty
-    if not view:
+    if not view and policy["access"] != "none":
         ws_hidden = []
         for w in policy["workspace"]:
             if w.get("clone"):
@@ -970,7 +1007,7 @@ def prepare(cfg, rundir, print_cmd=False):
     mounts.sort(key=lambda m: (depth(m[0]), m[1]))
     for _, _, a in mounts:
         args.append(a)
-    args += [["--chdir", launch["cwd"]], ["--clearenv"]]
+    args += [["--chdir", start_dir(policy, launch)], ["--clearenv"]]
 
     # files the run sees
     with open(os.path.join(rundir, "passwd"), "w") as f:
