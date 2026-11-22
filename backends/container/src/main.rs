@@ -476,7 +476,6 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
     for (path, kind) in &p.pins {
         let (_, id, _) = pin_now(path)
             .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path}: {why}")))?;
-        let _ = writeln!(listed, "{}:{} {path}", id.dev, id.ino);
         pins.push(PinRecord {
             path: path.clone(),
             kind: *kind,
@@ -487,9 +486,15 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
             single: single.contains(path),
         });
     }
+    // X1, Y1: what the entry checks inside the container: each bind's destination, with its source's device and inode
+    // as it is now (the placeholders and the run's own files made)
+    for (dest, src) in &p.checks {
+        let (_, id, _) = pin_now(src)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{src}: {why}")))?;
+        let _ = writeln!(listed, "{}:{} {dest}", id.dev, id.ino);
+    }
     if p.stat.is_some() {
-        // X1: what the entry's pin check compares, from inside the container
-        write_new(&rundir.join("pins.txt"), listed.as_bytes(), 0o444)?;
+        write_new(&rundir.join("binds.txt"), listed.as_bytes(), 0o444)?;
     }
     let mut argv = Vec::new();
     for a in p.argv() {
@@ -1793,7 +1798,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "placeholders.json",
         "sealed.json",
         "before.json",
-        "pins.txt",
+        "binds.txt",
     ] {
         match fs::remove_file(rd(n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {

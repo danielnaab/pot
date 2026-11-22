@@ -271,6 +271,17 @@ class Bwrap(unittest.TestCase):
         with self.assertRaisesRegex(B.Stop, "^sub/deep/flake.nix is a symbolic link, so the sandbox can't make it read-only"):
             self.prepare(pins)
 
+    def test_a_link_on_a_folder_above_a_pin_says_what_core_says(self):
+        # Y4: a link made at a dirs folder after resolving is refused at prepare with core's wording (the pin below it)
+        def pins(w):
+            d = P.resolve_workspace("git", w)
+            sub = os.path.join(w["path"], "sub")
+            os.rename(sub, sub + ".real")
+            os.symlink("sub.real", sub)
+            return [d]
+        with self.assertRaisesRegex(B.Stop, "^sub is a symbolic link, so the sandbox can't pin sub/deep/flake.nix, below it"):
+            self.prepare(pins)
+
     def test_a_pin_whose_kind_changed_after_resolving_is_refused_at_prepare(self):
         def pins(w):
             d = P.resolve_workspace("git", w)

@@ -300,7 +300,8 @@ def recheck(d):
     no second hard link (bwrap's message). A placeholder is checked when it is placed."""
     p = Pins(d["top"], d["common"], [], {})
     planned = {ph["path"] for ph in d["placeholders"]}
-    pins = [(x, "folder") for x in d["dirs"]] + [(r["path"], r["kind"]) for r in d["ro"]]
+    # the read-only pins first: a link above one is named as core names it (the pin below it, Y4), then the folders
+    pins = [(r["path"], r["kind"]) for r in d["ro"]] + [(x, "folder") for x in d["dirs"]]
     for path, kind in pins:
         if path in planned:
             continue

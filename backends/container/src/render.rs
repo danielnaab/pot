@@ -125,23 +125,25 @@ pub fn program_gaps(plan: &Plan, shell: &str, host: &dyn Host) -> Vec<String> {
     out
 }
 
-/// X1 (QA, 2026-11-22): the pin check, before anything else in the container. An engine binds a source by path, so a
-/// process that swaps a pin's folder for a link while the engine starts can make it bind another folder (podman's
-/// and docker's runtimes can't bind from an open descriptor of the caller's: tested, EACCES and EINVAL). So the
-/// entry checks, from inside, that every pin is a mount point (`/proc/self/mountinfo`) whose file is the device and
-/// inode prepare recorded (`/run/pot/pins.txt`, a line `DEV:INO PATH` each; `stat` is coreutils', its first
-/// argument). Otherwise nothing runs (exit 125), and it names each pin: the engine may have bound another folder
-/// there and made mount points in it. After the check no process outside can change the container's mounts.
+/// X1, Y1 (QA, 2026-11-22): the bind check, before anything else in the container. An engine resolves a bind's source
+/// and destination by path, so a process that swaps a folder for a link while the engine starts can make it bind
+/// another folder at a pin, or land a pin or a mask elsewhere (podman's and docker's runtimes can't bind from an open
+/// descriptor of the caller's: tested, EACCES and EINVAL). So the entry checks, from inside, that every bind under a
+/// bound host folder, and every pin, is a mount point (`/proc/self/mountinfo`) whose file is the device and inode
+/// prepare recorded for its source (`/run/pot/binds.txt`, a line `DEV:INO PATH` each; `stat` is coreutils', its first
+/// argument; each line is read whole, so a path may end with a space, Y3). Otherwise nothing runs (exit 125), and it names each, with the mount there (its source and root, Y2):
+/// the engine may have bound another folder there and made mount points in it.
 pub const PIN_CHECK: &str = concat!(
     r#"__pot_stat=$1 __pot_list=$2; shift 2; __pot_mp=$'\n'; __pot_bad=; "#,
+    r#"__pot_at() { local m=$1 r= x root mp rest src; while read -r x x x root mp rest; do if [ "$mp" = "$m" ]; then rest=${rest#* - }; read -r x src x <<<"$rest"; r="mounted from $src, root $root"; fi; done </proc/self/mountinfo; printf %s "${r:-no mount}"; }; "#,
     r#"while read -r __pot_x __pot_x __pot_x __pot_x __pot_m __pot_x; do __pot_mp+="$__pot_m"$'\n'; done </proc/self/mountinfo; "#,
-    r#"while IFS=' ' read -r __pot_want __pot_p; do "#,
+    r#"while IFS= read -r __pot_l; do __pot_want=${__pot_l%% *} __pot_p=${__pot_l#* }; "#,
     r#"__pot_m=${__pot_p//\\/\\134}; __pot_m=${__pot_m// /\\040}; "#,
     r#"case $__pot_mp in *$'\n'"$__pot_m"$'\n'*) ;; *) __pot_bad+=" $__pot_p (not a mount point)"; continue ;; esac; "#,
-    r#"[ "$("$__pot_stat" -c %d:%i -- "$__pot_p" 2>/dev/null)" = "$__pot_want" ] || __pot_bad+=" $__pot_p (another file)"; "#,
+    r#"[ "$("$__pot_stat" -c %d:%i -- "$__pot_p" 2>/dev/null)" = "$__pot_want" ] || __pot_bad+=" $__pot_p (another file: $(__pot_at "$__pot_m"))"; "#,
     r#"done <"$__pot_list"; "#,
-    r#"if [ -n "$__pot_bad" ]; then echo "pot: the workspace in the container is not the pins prepare recorded:$__pot_bad; the engine may have bound another folder there and made mount points in it; nothing ran" >&2; exit 125; fi; "#,
-    r#"unset -v __pot_stat __pot_list __pot_mp __pot_bad __pot_x __pot_m __pot_want __pot_p; exec "$@""#
+    r#"if [ -n "$__pot_bad" ]; then echo "pot: the container is not the binds prepare recorded:$__pot_bad; the engine may have bound another folder there and made mount points in it; nothing ran" >&2; exit 125; fi; "#,
+    r#"unset -f __pot_at; unset -v __pot_stat __pot_list __pot_mp __pot_bad __pot_x __pot_m __pot_l __pot_want __pot_p; exec "$@""#
 );
 
 /// A real file: it exists, is not a folder, and is its own real path (no link, no `..`).
@@ -298,8 +300,10 @@ pub struct Plan {
     pub pins: Vec<(String, Kind)>,
     /// Start notes (launch.json `notes`): a sealed folder over the cap.
     pub notes: Vec<String>,
-    /// X1, write access: coreutils' `stat` (beside the config's `env`), which the entry's pin check runs.
+    /// X1, Y1: coreutils' `stat` (beside the config's `env`), which the entry's check runs, when there is a bind to check.
     pub stat: Option<String>,
+    /// X1, Y1: each bind the entry checks (its destination, and the source whose device and inode prepare records).
+    pub checks: Vec<(String, String)>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -920,9 +924,33 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         vec!["/nix/store".into()]
     };
 
-    if write && p.mode == "in-place" {
-        // X1: what the entry's pin check compares, written by prepare once the placeholders exist
-        m.bind(&rd("pins.txt"), &format!("{run}/pins.txt"), READ, true);
+    // X1, Y1: what the entry checks inside the container before the command: every bind whose destination is under a
+    // bound host folder (a process outside that can rename there could make the engine land it elsewhere, or bind
+    // another source: a pin, a mask, a socket, a read or write item, a state folder, a seal) and every pin, each with
+    // its source (a mask's is the run folder's empty file or folder), whose device and inode prepare records
+    let host_folder = |src: &str| !under(src, i.rundir) && !src.starts_with("/nix/store/");
+    let bound: Vec<&str> = m
+        .by_dest
+        .iter()
+        .filter_map(|(d, (_, mt))| match mt {
+            Mount::Bind { src, .. } if host_folder(src) => Some(d.as_str()),
+            _ => None,
+        })
+        .collect();
+    let checks: Vec<(String, String)> = m
+        .by_dest
+        .iter()
+        .filter_map(|(d, (_, mt))| match mt {
+            Mount::Bind { src, .. }
+                if bound.iter().any(|b| under(d, b)) || (src == d && kinds.contains_key(src)) =>
+            {
+                Some((d.clone(), src.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    if !checks.is_empty() {
+        m.bind(&rd("binds.txt"), &format!("{run}/binds.txt"), READ, true);
     }
     let mut mounts: Vec<(String, Mount)> = m.by_dest.into_iter().map(|(d, (_, mt))| (d, mt)).collect();
     // every workspace path still bound onto itself, by kind, for prepare to record and run to check again
@@ -1084,7 +1112,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     let mut entry = vec![];
     // X1: with pins, the entry checks them first, then runs the rest; without the pipe the last hop then drops what
     // bash adds, as the pipe's last hop does
-    let stat = (!pins.is_empty()).then(|| {
+    let stat = (!checks.is_empty()).then(|| {
         let dir = i.paths.env.rsplit_once('/').map_or("", |(d, _)| d);
         format!("{dir}/stat")
     });
@@ -1098,7 +1126,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 PIN_CHECK,
                 "pot-pins",
                 stat.as_str(),
-                &format!("{run}/pins.txt"),
+                &format!("{run}/binds.txt"),
             ]
             .map(String::from),
         );
@@ -1169,6 +1197,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         pins,
         notes,
         stat,
+        checks,
     })
 }
 
@@ -1572,12 +1601,34 @@ mod tests {
         // with pot's values as operands: neither the run's bash nor the engine adds to its environment
         assert_eq!(plan.piped, ["TERM", "COLORTERM", "NOTES_TOKEN"]);
         assert!(!has(&plan, "--env TERM"));
+        // Y1: the masks and sockets under the bound workspace and read folder are checked inside first
+        assert_eq!(plan.entry[4], PIN_CHECK);
+        for d in [
+            "/home/u/src/notes/secrets",
+            "/home/u/docs/.ssh",
+            "/home/u/docs/.netrc",
+            "/home/u/docs/agent.sock",
+        ] {
+            assert!(
+                plan.checks.iter().any(|(dest, _)| dest == d),
+                "{d}: {:?}",
+                plan.checks
+            );
+        }
+        assert!(
+            plan.checks
+                .contains(&("/home/u/src/notes/secrets".into(), "/r/emptydir".into()))
+        );
+        assert!(
+            plan.checks
+                .contains(&("/home/u/docs/.netrc".into(), "/r/empty".into()))
+        );
         // T1: env -i, then bash, then the last hop with pot's values; the records are declared in bash
-        assert!(plan.fifo && plan.entry[10].is_empty() && plan.proxy.is_none());
+        assert!(plan.fifo && plan.entry[18].is_empty() && plan.proxy.is_none());
         assert!(has(&plan, "--volume /r/secrets.fifo:/run/pot/secrets.fifo:ro"));
         assert!(!lines(&plan).iter().any(|x| x.contains("--preserve-fd")));
         assert_eq!(
-            plan.entry[..24],
+            plan.entry[8..32],
             [
                 "/usr/bin/env",
                 "-i",
@@ -1606,8 +1657,8 @@ mod tests {
             ]
         );
         // V1: the planned names (not secret) are the script's arguments: their count, then each, in the pipe's order
-        assert_eq!(plan.entry[24..27], ["-C", "/home/u/src/notes", "--"]);
-        let last = &plan.entry[27..];
+        assert_eq!(plan.entry[32..35], ["-C", "/home/u/src/notes", "--"]);
+        let last = &plan.entry[35..];
         assert!(last.contains(&"NOTES_CACHE=/home/u/.cache/notes".to_string()));
         assert!(
             last.contains(&"PS1=(pot:review) \\w \\$ ".to_string()),
@@ -1896,7 +1947,13 @@ mod tests {
             lines(&plan)
         );
         assert!(has(&plan, "--volume /r/emptydir:/home/u/wt/notes.git:ro"));
-        assert_eq!(plan.entry[..3], ["/usr/bin/env", "-C", "/home/u"]);
+        // Y1: the masks under the bound folder are checked inside first; the last hop drops what its bash adds
+        assert!(
+            plan.checks
+                .contains(&("/home/u/src/notes".into(), "/r/emptydir".into()))
+        );
+        assert_eq!(plan.entry[8..10], ["/usr/bin/env", "-u"]);
+        assert!(plan.entry.windows(2).any(|w| w == ["-C", "/home/u"]));
     }
 
     fn read_item(path: &str) -> crate::policy::Item {
@@ -2748,7 +2805,11 @@ mod tests {
         assert_eq!(plan.entry[4], PIN_CHECK);
         assert_eq!(
             plan.entry[5..8],
-            ["pot-pins", "/nix/store/c-coreutils/bin/stat", "/run/pot/pins.txt"]
+            [
+                "pot-pins",
+                "/nix/store/c-coreutils/bin/stat",
+                "/run/pot/binds.txt"
+            ]
         );
         // then the rest of the entry: here the pipe's (a secret item), which clears the environment itself
         assert_eq!(plan.entry[8..11], ["/usr/bin/env", "-i", "--"]);
@@ -2774,7 +2835,7 @@ mod tests {
                 "-C"
             ]
         );
-        assert!(has(&plan, "--volume /r/pins.txt:/run/pot/pins.txt:ro"));
+        assert!(has(&plan, "--volume /r/binds.txt:/run/pot/binds.txt:ro"));
         assert_eq!(plan.stat.as_deref(), Some("/nix/store/c-coreutils/bin/stat"));
         // read access has no pins, so no check
         let (p, l) = run_dir("read-only");

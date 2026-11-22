@@ -86,6 +86,11 @@ v2.14.0's `sandbox` on).
   `pins.py` runs in an environment of its own (no caller variable but its list, no `GIT_*`). A path with a control
   character, or a sealed entry whose name is not UTF-8, is refused at `prepare`. `after` takes a missing
   `before.json` as an empty look, as bwrap does.
+- **The container backend's check covers every bind under a bound folder (its re-audit, Y1-Y6):** with read access as
+  with write access, the entry checks each mask (a hidden path's, a socket's), socket, `read` or `write` item, state
+  folder and seal under a bound host folder, as it checks the pins (`/run/pot/binds.txt`), so a mask swapped away
+  while the engine starts never shows the hidden path. The 125 message names the mount found there (its source and
+  root). A path ending with a space is checked as it is. bubblewrap's re-check names a link above a pin as core does.
 
 ### Changed
 

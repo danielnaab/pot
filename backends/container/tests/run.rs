@@ -3479,7 +3479,7 @@ finally:
                 // stopped: by run's check, by the entry's pin check, or by the engine itself (podman stats each
                 // source before it starts, and may find the swap's moment); never with the command run
                 assert_ne!(out.status.code(), Some(0), "{engine} try {i}: {stderr}");
-                if stderr.contains("not the pins prepare recorded") {
+                if stderr.contains("not the binds prepare recorded") {
                     checked += 1;
                 } else {
                     stopped += 1;
@@ -3487,15 +3487,12 @@ finally:
             }
             // the engine may have made a mount point in the outside folder when it bound it: only a stopped run may
             // leave one, and the check named the pin
-            let extra: Vec<String> = names(&victim).into_iter().filter(|n| n != "mark").collect();
+            let extra = remove_engine_made(engine, &program, &top, &victim, &["mark"]);
             if !extra.is_empty() {
                 assert!(
                     stderr.contains("newdir"),
                     "{engine} try {i}: {extra:?} made with no report: {stderr}"
                 );
-                for n in extra {
-                    let _ = fs::remove_file(victim.join(&n)).or_else(|_| fs::remove_dir(victim.join(&n)));
-                }
             }
             ok(&verb(&top, &run, "cleanup").output().unwrap());
             assert_eq!(engine_processes(&run), Vec::<String>::new());
@@ -3521,7 +3518,7 @@ fn the_entrys_pin_check_stops_a_run_whose_pins_are_not_recorded() {
         };
         set_script(&run, "echo ran", &[]);
         prepare(&top, &run);
-        let list = run.join("pins.txt");
+        let list = run.join("binds.txt");
         let flake = format!(" {}/flake.nix", ws.display());
         let text = fs::read_to_string(&list).unwrap();
         assert!(text.lines().any(|l| l.ends_with(&flake)), "{text}");
@@ -3542,8 +3539,11 @@ fn the_entrys_pin_check_stops_a_run_whose_pins_are_not_recorded() {
         assert_eq!(out.status.code(), Some(125), "{engine}: {err}");
         assert!(!String::from_utf8_lossy(&out.stdout).contains("ran"));
         assert!(
-            err.contains("not the pins prepare recorded")
-                && err.contains(&format!("{}/flake.nix (another file)", ws.display())),
+            err.contains("not the binds prepare recorded")
+                && err.contains(&format!(
+                    "{}/flake.nix (another file: mounted from ",
+                    ws.display()
+                )),
             "{engine}: {err}"
         );
         ok(&verb(&top, &run, "cleanup").output().unwrap());
@@ -3614,4 +3614,242 @@ fn the_hosts_look_runs_in_its_own_environment() {
         assert!(seen.lines().any(|l| l.starts_with(k)), "{k} missing: {seen}");
     }
     ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// Add a hidden item for PATHS to the run's policy.
+fn hide(run: &Path, paths: &[&Path]) {
+    let mut p: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("policy.json")).unwrap()).unwrap();
+    p["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "kind": "hidden", "value": "sub/private",
+        "class": "limits", "sources": [{ "root": "test" }], "effective": true,
+        "paths": paths.iter().map(|q| q.display().to_string()).collect::<Vec<_>>() }));
+    fs::write(run.join("policy.json"), p.to_string()).unwrap();
+}
+
+/// A world with a hidden folder `sub/private` holding a secret, and `decoy/private` beside it; WRITE gives write access
+/// (the pins), else read access. Returns (top, run, workspace).
+fn hidden_world(name: &str, engine: &str, program: &str, write: bool) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let files: &[(&str, &str)] = &[
+        ("sub/private/s.txt", "HIDDEN-SECRET\n"),
+        ("decoy/private/d.txt", "decoy\n"),
+    ];
+    let (top, run, ws) = if write {
+        let (top, run, ws, _) = write_world(name, engine, program, false, |ws| put(ws, files))?;
+        (top, run, ws)
+    } else {
+        let (top, run) = world(name, engine, program, &["true"]);
+        let ws = fs::canonicalize(top.join("ws")).unwrap();
+        put(&ws, files);
+        (top, run, ws)
+    };
+    hide(&run, &[&ws.join("sub/private")]);
+    Some((top, run, ws))
+}
+
+/// Y1 (QA re-audit, 2026-11-22): the same race against a mask. A process exchanges the hidden folder's parent `sub`
+/// with a link to `decoy` (in the workspace) while `run` starts, so the engine may land the mask on `decoy/private`;
+/// after the swap back the command would read `sub/private`. The entry's check covers every bind under a bound host
+/// folder, masks included (a mask must be a mount point of the run folder's empty file or folder), under read and
+/// write access. Over many tries under each engine the command never reads the hidden secret.
+#[test]
+fn a_mask_swapped_away_while_run_starts_never_shows_the_hidden_path() {
+    let swap = r#"
+import ctypes, os, sys, time
+d, victim, secs = sys.argv[1], sys.argv[2], float(sys.argv[3])
+libc = ctypes.CDLL(None, use_errno=True); AT = -100; EXCH = 2
+link = d + ".lnk"; os.symlink(victim, link)
+def x():
+    if libc.renameat2(AT, d.encode(), AT, link.encode(), EXCH) != 0: raise OSError(ctypes.get_errno(), "renameat2")
+end = time.time() + secs; real = True
+try:
+    while time.time() < end:
+        x(); real = not real; time.sleep(0.001)
+finally:
+    if not real: x()
+    os.unlink(link)
+"#;
+    let tries: usize = std::env::var("POT_TEST_RACE_TRIES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(10);
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        for write in [false, true] {
+            let mode = if write { "write" } else { "read" };
+            let Some((top, run, ws)) =
+                hidden_world(&format!("{engine}-hidrace-{mode}"), engine, &program, write)
+            else {
+                continue;
+            };
+            let cat = coreutils("cat");
+            let sleep = coreutils("sleep");
+            set_script(
+                &run,
+                "$2 2; $1 sub/private/s.txt 2>/dev/null; echo DONE",
+                &[&cat, &sleep],
+            );
+            let python = find("python3").unwrap();
+            let (mut masked, mut checked, mut stopped) = (0, 0, 0);
+            for i in 0..tries {
+                prepare(&top, &run);
+                let mut swapper = Command::new(&python)
+                    .args(["-I", "-c", swap])
+                    .arg(ws.join("sub"))
+                    .arg(ws.join("decoy"))
+                    .arg("1.5")
+                    .spawn()
+                    .unwrap();
+                std::thread::sleep(Duration::from_millis(100 + 40 * (i as u64 % 8)));
+                let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+                swapper.wait().unwrap();
+                let (stdout, stderr) = (
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                );
+                assert!(
+                    !stdout.contains("HIDDEN-SECRET"),
+                    "{engine} {mode} try {i}: the command read the hidden path"
+                );
+                if stdout.contains("DONE") {
+                    masked += 1;
+                } else if stderr.contains("not the binds prepare recorded") {
+                    checked += 1;
+                } else {
+                    assert_ne!(out.status.code(), Some(0), "{engine} {mode} try {i}: {stderr}");
+                    stopped += 1;
+                }
+                ok(&verb(&top, &run, "cleanup").output().unwrap());
+                // Y2: what the engine made in the swapped-in folder (a mount point named like a pin under `sub`),
+                // only when the run was stopped
+                let extra = remove_engine_made(engine, &program, &top, &ws.join("decoy"), &["private"]);
+                assert!(
+                    extra.is_empty() || !stdout.contains("DONE"),
+                    "{engine} {mode} try {i}: {extra:?} made in a run that went ahead"
+                );
+            }
+            eprintln!(
+                "{engine} {mode}: {tries} tries: {masked} masked, {checked} stopped by the entry's check, {stopped} stopped before"
+            );
+        }
+    }
+}
+
+/// Y1, Y2: the check itself, deterministically, for a mask: a mask whose recorded file is not what the container sees
+/// stops the run (125) before the command, naming it with its mount root and source (`/proc/self/mountinfo`), under
+/// read access too.
+#[test]
+fn the_entrys_check_stops_a_run_whose_mask_is_not_recorded() {
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some((top, run, ws)) = hidden_world(&format!("{engine}-maskcheck"), engine, &program, false)
+        else {
+            continue;
+        };
+        set_script(&run, "echo ran", &[]);
+        prepare(&top, &run);
+        let list = run.join("binds.txt");
+        let mask = format!(" {}/sub/private", ws.display());
+        let text = fs::read_to_string(&list).unwrap();
+        assert!(text.lines().any(|l| l.ends_with(&mask)), "{text}");
+        let wrong: String = text
+            .lines()
+            .map(|l| {
+                if l.ends_with(&mask) {
+                    format!("0:0{mask}\n")
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect();
+        fs::set_permissions(&list, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        fs::write(&list, wrong).unwrap();
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(125), "{engine}: {err}");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("ran"));
+        // Y2: the mount there, named by its root and source
+        assert!(
+            err.contains(&format!(
+                "{}/sub/private (another file: mounted from ",
+                ws.display()
+            )) && err.contains("emptydir"),
+            "{engine}: {err}"
+        );
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+    }
+}
+
+/// Y3: a pin whose path ends with a space is checked as it is (the check reads its list without stripping).
+#[test]
+fn a_pin_with_a_trailing_space_is_checked_as_it_is() {
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some((top, run, ws, _)) =
+            write_world(&format!("{engine}-space"), engine, &program, false, |ws| {
+                put(ws, &[("spaced /flake.nix", "{ }\n")]);
+            })
+        else {
+            continue;
+        };
+        set_script(&run, "echo ran", &[]);
+        prepare(&top, &run);
+        assert!(
+            fs::read_to_string(run.join("binds.txt"))
+                .unwrap()
+                .contains(&format!("{}/spaced \n", ws.display()))
+        );
+        let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{engine}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("ran"));
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+    }
+}
+
+/// Y2: remove what the engine made in a test's own swapped-in folder DIR (an empty mount point named like a pin),
+/// keeping KEEP; returns the names it found. podman's belong to a subordinate id: removed in podman's user namespace,
+/// with a store of the test's own under TOP (never the caller's). docker's would be root's: the test stops, naming it.
+fn remove_engine_made(engine: &str, program: &str, top: &Path, dir: &Path, keep: &[&str]) -> Vec<String> {
+    let extra: Vec<String> = names(dir)
+        .into_iter()
+        .filter(|n| !keep.contains(&n.as_str()))
+        .collect();
+    for n in &extra {
+        let p = dir.join(n);
+        if fs::remove_file(&p).is_ok() || fs::remove_dir(&p).is_ok() {
+            continue;
+        }
+        assert_eq!(
+            engine,
+            "podman",
+            "{engine} left {} (root's): remove it as root",
+            p.display()
+        );
+        let store = top.join("unshare");
+        let out = Command::new(program)
+            .arg("--root")
+            .arg(store.join("s"))
+            .arg("--runroot")
+            .arg(store.join("r"))
+            .args(["unshare", "rm", "-rf", "--"])
+            .arg(&p)
+            .output()
+            .unwrap();
+        ok(&out);
+        fs::remove_dir_all(&store).unwrap();
+    }
+    extra
 }
