@@ -33,13 +33,13 @@ podman
   --user 1000:100
   --passwd=false
   --cgroups split
-  --tmpfs /run:rw,nosuid,nodev,mode=0755
-  --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777
+  --tmpfs /run:rw,nosuid,nodev,mode=0755,notmpcopyup
+  --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,notmpcopyup
   --volume /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh:/bin/sh:ro
   --volume [CWD]/read-only/group:/etc/group:ro
   --volume [CWD]/read-only/hosts:/etc/hosts:ro
   --volume [CWD]/read-only/passwd:/etc/passwd:ro
-  --tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U
+  --tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U,notmpcopyup
   --volume [CWD]/read-only/hidden.txt:/home/u/.pot-hidden:ro
   --volume [CWD]/read-only/denials:/run/pot/denials:ro
   --volume /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot:/run/pot/launcher:ro
@@ -107,20 +107,20 @@ docker
   --pull never
   --tmpfs /run:rw,nosuid,nodev,mode=0755
   --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777
-  --volume /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh:/bin/sh:ro
-  --volume [CWD]/access-none/group:/etc/group:ro
-  --volume [CWD]/access-none/hosts:/etc/hosts:ro
-  --volume [CWD]/access-none/passwd:/etc/passwd:ro
+  --mount type=bind,source=/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh,target=/bin/sh,readonly
+  --mount type=bind,source=[CWD]/access-none/group,target=/etc/group,readonly
+  --mount type=bind,source=[CWD]/access-none/hosts,target=/etc/hosts,readonly
+  --mount type=bind,source=[CWD]/access-none/passwd,target=/etc/passwd,readonly
   --tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,uid=1000,gid=100
-  --volume [CWD]/access-none/hidden.txt:/home/u/.pot-hidden:ro
-  --volume [CWD]/access-none/denials:/run/pot/denials:ro
-  --volume /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot:/run/pot/launcher:ro
-  --volume [CWD]/access-none/policy.json:/run/pot/policy.json:ro
-  --volume /nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/env:/usr/bin/env:ro
-  --volume /nix/store/7f6kqbjr4l3qkl1m2s0a9hb3s5z7r0bq-nss-cacert-3.111/etc/ssl/certs/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
-  --volume /home/u/.local/state/pot/state/9f2e/notes:/home/u/.cache/notes:rw
-  --volume [CWD]/access-none/potcfg:/home/u/.config/pot:ro
-  --volume /nix/store/0aqd4v7xhp2c9z2lfy5h4v0rdf3q4k8n-config.toml:/home/u/.config/notes/config.toml:ro
+  --mount type=bind,source=[CWD]/access-none/hidden.txt,target=/home/u/.pot-hidden,readonly
+  --mount type=bind,source=[CWD]/access-none/denials,target=/run/pot/denials,readonly
+  --mount type=bind,source=/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot,target=/run/pot/launcher,readonly
+  --mount type=bind,source=[CWD]/access-none/policy.json,target=/run/pot/policy.json,readonly
+  --mount type=bind,source=/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/env,target=/usr/bin/env,readonly
+  --mount type=bind,source=/nix/store/7f6kqbjr4l3qkl1m2s0a9hb3s5z7r0bq-nss-cacert-3.111/etc/ssl/certs/ca-bundle.crt,target=/etc/ssl/certs/ca-certificates.crt,readonly
+  --mount type=bind,source=/home/u/.local/state/pot/state/9f2e/notes,target=/home/u/.cache/notes
+  --mount type=bind,source=[CWD]/access-none/potcfg,target=/home/u/.config/pot,readonly
+  --mount type=bind,source=/nix/store/0aqd4v7xhp2c9z2lfy5h4v0rdf3q4k8n-config.toml,target=/home/u/.config/notes/config.toml,readonly
   --env HOME=/home/u
   --env LANG=C.UTF-8
   --env LOGNAME=u

@@ -239,6 +239,18 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
         return Ok(());
     }
     // podman's keep-id keeps the caller's id; --user must name the same one, or the run writes as another user
+    // every bind's source exists (docker would create a missing one, as root)
+    let missing = render::missing_sources(
+        &plan,
+        &fs::canonicalize(rundir).unwrap_or_default().to_string_lossy(),
+        &host::RealHost,
+    );
+    if !missing.is_empty() {
+        return Err(Refusal::new(
+            &p.context,
+            format!("a bind's source does not exist: {}", missing.join(", ")),
+        ));
+    }
     if host::euid() != Some(l.uid) {
         return Err(Refusal::new(
             &p.context,

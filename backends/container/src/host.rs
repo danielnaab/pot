@@ -12,11 +12,19 @@ pub trait Host {
     fn is_real_dir(&self, p: &str) -> bool;
     /// Every socket below DIR, on DIR's file system, never through a link (bwrap's `find -xdev -type s`). Sorted.
     fn sockets_under(&self, dir: &str) -> Vec<String>;
+    /// The path with every link and `..` resolved, when it exists.
+    fn realpath(&self, p: &str) -> Option<String>;
 }
 
 pub struct RealHost;
 
 impl Host for RealHost {
+    fn realpath(&self, p: &str) -> Option<String> {
+        std::fs::canonicalize(p)
+            .ok()
+            .map(|r| r.to_string_lossy().into_owned())
+    }
+
     fn lexists(&self, p: &str) -> bool {
         Path::new(p).symlink_metadata().is_ok()
     }

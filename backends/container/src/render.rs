@@ -85,6 +85,18 @@ pub struct Plan {
     pub files: Vec<RunFile>,
     /// Host folders `prepare` creates (the state mounts' directories, in pot's state).
     pub host_dirs: Vec<String>,
+    /// Every bind's source, the closure's included: `prepare` checks that each exists ([`missing_sources`]).
+    pub sources: Vec<String>,
+}
+
+/// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
+/// directories (prepare creates them). docker would create a missing source, as root.
+pub fn missing_sources(plan: &Plan, rundir: &str, host: &dyn Host) -> Vec<String> {
+    plan.sources
+        .iter()
+        .filter(|s| !under(s, rundir) && !plan.host_dirs.contains(s) && !host.lexists(s))
+        .cloned()
+        .collect()
 }
 
 impl Plan {
@@ -327,15 +339,46 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         m.bind(&i.paths.cacert, ca, READ, true);
     }
 
+    // F3: masking compares paths as strings, so every path bound, masked or holding the workspace must be its
+    // own real path (no link, no `..`): refused, saying which, otherwise
+    let mut unreal = vec![];
+    let real = |q: &str, unreal: &mut Vec<String>| match host.realpath(q) {
+        Some(r) if r != q => {
+            let say = format!("{q} is not its real path ({r})");
+            if !unreal.contains(&say) {
+                unreal.push(say);
+            }
+            false
+        }
+        _ => true,
+    };
+
     // reach: read and write paths where they exist; hidden paths under them masked; their sockets masked
     let mut bound = vec![];
     for (kind, prio) in [("read", READ), ("write", WRITE)] {
         for it in p.effective(kind) {
             let q = it.path.as_deref().unwrap_or_default();
-            if host.lexists(q) && !hidden_or_below(q) {
+            if real(q, &mut unreal) && host.lexists(q) && !hidden_or_below(q) {
                 m.bind(q, q, prio, prio == READ);
                 bound.push(q.to_string());
             }
+        }
+    }
+    // the folders the run sees whole: the bound ones, and with read access each workspace's top and common
+    let mut roots = bound.clone();
+    if p.access == "read" && p.mode == "in-place" {
+        for w in &p.workspace {
+            roots.push(w.path.clone());
+            if !under(&w.common, &w.path) {
+                roots.push(w.common.clone());
+            }
+        }
+    }
+    // a hidden path a root would show, by its name or by its real path, must be its real path
+    for h in &hidden {
+        let shown = |q: &str| roots.iter().any(|b| at_or_under(q, b));
+        if host.lexists(h) && (shown(h) || host.realpath(h).is_some_and(|r| shown(&r))) {
+            real(h, &mut unreal);
         }
     }
     for h in &hidden {
@@ -345,7 +388,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     }
     let named: BTreeSet<&str> = p.effective("socket").filter_map(|s| s.path.as_deref()).collect();
     for s in &named {
-        if host.lexists(s) && !hidden_or_below(s) {
+        if real(s, &mut unreal) && host.lexists(s) && !hidden_or_below(s) {
             m.bind(s, s, WRITE, false);
         }
     }
@@ -357,33 +400,64 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         }
     }
 
-    // the workspace (in place): read access binds it read-only at its path; access none binds nothing (decided
-    // 2026-11-21); write access and clones need the pins and are refused above
-    let mut cwd = l.cwd.clone();
-    for w in &p.workspace {
-        match p.access.as_str() {
-            "read" if p.mode == "in-place" => {
-                m.bind(&w.path, &w.path, READ, true);
-                if !under(&w.common, &w.path) {
-                    m.bind(&w.common, &w.common, READ, true);
+    // the workspace (in place): read access binds it read-only at its path, its top and (a worktree's) common
+    // directory each with their sockets and hidden paths masked; write access and clones need the pins and are
+    // refused above. access none: no workspace at all (pot 0.2.0), masked where a bound folder would show it
+    // (bwrap's `unseen`), and the command starts in the home
+    if p.access == "read" && p.mode == "in-place" {
+        for w in &p.workspace {
+            let mut tops = vec![w.path.as_str()];
+            if !under(&w.common, &w.path) {
+                tops.push(w.common.as_str());
+            }
+            for top in tops {
+                if !real(top, &mut unreal) {
+                    continue;
                 }
-                for s in host.sockets_under(&w.path) {
+                m.bind(top, top, READ, true);
+                for s in host.sockets_under(top) {
                     if !in_hidden(&s) {
                         m.bind(&rd("empty"), &s, HIDE, true);
                     }
                 }
-                // a hidden path under the workspace is masked, and nothing is bound inside a hidden folder there
-                for h in hidden.iter().filter(|h| under(h, &w.path) && host.lexists(h)) {
+                // a hidden path there is masked, and nothing is bound inside a hidden folder there
+                for h in hidden.iter().filter(|h| under(h, top) && host.lexists(h)) {
                     if host.is_real_dir(h) {
                         m.by_dest.retain(|d, _| !under(d, h));
                     }
                     mask(&mut m, h);
                 }
             }
-            "none" if at_or_under(&cwd, &w.path) => cwd = home.to_string(),
-            _ => {}
         }
     }
+    let cwd = if p.access == "none" {
+        home.to_string()
+    } else {
+        l.cwd.clone()
+    };
+    if p.access == "none" {
+        let mut unseen: Vec<&str> = vec![];
+        for w in &p.workspace {
+            for q in [w.path.as_str(), w.common.as_str()] {
+                if !unseen.iter().any(|u| at_or_under(q, u)) {
+                    unseen.push(q);
+                }
+            }
+        }
+        for q in unseen {
+            if host.lexists(q)
+                && !in_hidden(q)
+                && bound.iter().any(|b| at_or_under(q, b))
+                && real(q, &mut unreal)
+            {
+                if host.is_real_dir(q) {
+                    m.by_dest.retain(|d, _| !under(d, q));
+                }
+                mask(&mut m, q);
+            }
+        }
+    }
+    refuse.extend(unreal);
 
     // state, fixed files, pot's own
     for s in &p.mounts.state {
@@ -448,7 +522,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     let bad = unsayable(&mounts, &closure);
     if !bad.is_empty() {
         refuse.push(format!(
-            "paths a --volume can't name (':' or ','): {}",
+            "paths a bind can't name (':' or ','): {}",
             bad.join(", ")
         ));
     }
@@ -489,19 +563,27 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     }
     for (dest, mt) in &mounts {
         opts.push(match mt {
+            // podman copies what is under a tmpfs into it unless told not to (tmpcopyup is its default)
+            Mount::Tmpfs { opts: t } if i.engine == Engine::Podman => {
+                o(&["--tmpfs", &format!("{dest}:{t},notmpcopyup")])
+            }
             Mount::Tmpfs { opts: t } => o(&["--tmpfs", &format!("{dest}:{t}")]),
-            Mount::Bind { src, ro } => o(&[
-                "--volume",
-                &format!("{src}:{dest}:{}", if *ro { "ro" } else { "rw" }),
-            ]),
+            Mount::Bind { src, ro } => bind_opt(i.engine, src, dest, *ro),
         });
     }
     for c in &closure {
-        opts.push(Opt {
-            args: vec!["--volume".into(), format!("{c}:{c}:ro")],
-            closure: p.proves("closure-store"),
-        });
+        let mut opt = bind_opt(i.engine, c, c, true);
+        opt.closure = p.proves("closure-store");
+        opts.push(opt);
     }
+    let mut sources: Vec<String> = mounts
+        .iter()
+        .filter_map(|(_, mt)| match mt {
+            Mount::Bind { src, .. } => Some(src.clone()),
+            Mount::Tmpfs { .. } => None,
+        })
+        .collect();
+    sources.extend(closure.iter().cloned());
     let (set, pass) = environment(i);
     for (k, v) in &set {
         opts.push(o(&["--env", &format!("{k}={v}")]));
@@ -529,7 +611,29 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         entry,
         files,
         host_dirs,
+        sources,
     })
+}
+
+/// A bind: podman's `--volume`; docker's `--mount`, since docker's `--volume` creates a missing source as root.
+fn bind_opt(engine: Engine, src: &str, dest: &str, ro: bool) -> Opt {
+    let arg = match engine {
+        Engine::Podman => (
+            "--volume",
+            format!("{src}:{dest}:{}", if ro { "ro" } else { "rw" }),
+        ),
+        Engine::Docker => (
+            "--mount",
+            format!(
+                "type=bind,source={src},target={dest}{}",
+                if ro { ",readonly" } else { "" }
+            ),
+        ),
+    };
+    Opt {
+        args: vec![arg.0.to_string(), arg.1],
+        closure: false,
+    }
 }
 
 /// The run's environment: what pot sets (bwrap's `run_env`, less what this slice does not place), then the
@@ -605,6 +709,8 @@ mod tests {
         dirs: Vec<&'static str>,
         files: Vec<&'static str>,
         socks: Vec<&'static str>,
+        /// (path, its real path): a link, or a path with `..`
+        links: Vec<(&'static str, &'static str)>,
     }
 
     impl Host for Fake {
@@ -621,6 +727,14 @@ mod tests {
                 .map(|s| (*s).to_string())
                 .collect()
         }
+        fn realpath(&self, p: &str) -> Option<String> {
+            for (from, to) in &self.links {
+                if at_or_under(p, from) {
+                    return Some(format!("{to}{}", &p[from.len()..]));
+                }
+            }
+            self.lexists(p).then(|| p.to_string())
+        }
     }
 
     fn nothing() -> Fake {
@@ -628,6 +742,7 @@ mod tests {
             dirs: vec![],
             files: vec![],
             socks: vec![],
+            links: vec![],
         }
     }
 
@@ -697,6 +812,7 @@ mod tests {
                 "/home/u/src/notes/.direnv/s.sock",
                 "/home/u/src/notes/secrets/x.sock",
             ],
+            links: vec![],
         };
         let mut p = p;
         // hide a folder in the workspace, and paths under the read folder (one folder, one file)
@@ -718,7 +834,7 @@ mod tests {
             "--volume /r/empty:/home/u/src/notes/.direnv/s.sock:ro",
             "--volume /home/u/.local/state/pot/state/9f2e/notes:/home/u/.cache/notes:rw",
             "--volume /nix/store/0aqd4v7xhp2c9z2lfy5h4v0rdf3q4k8n-config.toml:/home/u/.config/notes/config.toml:ro",
-            "--tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U",
+            "--tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U,notmpcopyup",
             "--network none",
             "--cap-drop all",
             "--security-opt no-new-privileges",
@@ -774,6 +890,7 @@ mod tests {
             dirs: vec!["/home/u", "/home/u/docs"],
             files: vec![],
             socks: vec![],
+            links: vec![],
         };
         let plan = go(&p, &l, Engine::Podman, &host).unwrap();
         assert!(
@@ -840,10 +957,7 @@ mod tests {
         p.workspace[0].path = "/home/u/src/a:b".into();
         p.workspace[0].common = "/home/u/src/a:b/.git".into();
         let gaps = go(&p, &l, Engine::Podman, &nothing()).unwrap_err();
-        assert_eq!(
-            gaps,
-            ["paths a --volume can't name (':' or ','): /home/u/src/a:b"]
-        );
+        assert_eq!(gaps, ["paths a bind can't name (':' or ','): /home/u/src/a:b"]);
     }
 
     #[test]
@@ -996,5 +1110,158 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, expect.len());
+    }
+
+    fn existing(dirs: Vec<&'static str>) -> Fake {
+        Fake {
+            dirs,
+            files: vec![],
+            socks: vec![],
+            links: vec![],
+        }
+    }
+
+    /// F1: with access none, a bound folder above the workspace shows neither the workspace nor its git
+    /// directory (bwrap's `unseen`), and the command starts in the home wherever it was started.
+    #[test]
+    fn access_none_masks_the_workspace_under_a_bound_folder_and_starts_in_the_home() {
+        let (mut p, mut l) = run_dir("access-none");
+        p.items.push(read_item("/home/u/src"));
+        p.workspace[0].common = "/home/u/wt/notes.git".into();
+        p.items.push(read_item("/home/u/wt"));
+        l.cwd = "/tmp".into();
+        let host = existing(vec![
+            "/home/u/src",
+            "/home/u/src/notes",
+            "/home/u/wt",
+            "/home/u/wt/notes.git",
+        ]);
+        let plan = go(&p, &l, Engine::Podman, &host).unwrap();
+        assert!(has(&plan, "--volume /home/u/src:/home/u/src:ro"));
+        assert!(
+            has(&plan, "--volume /r/emptydir:/home/u/src/notes:ro"),
+            "{:#?}",
+            lines(&plan)
+        );
+        assert!(has(&plan, "--volume /r/emptydir:/home/u/wt/notes.git:ro"));
+        assert_eq!(plan.entry[..3], ["/usr/bin/env", "-C", "/home/u"]);
+    }
+
+    fn read_item(path: &str) -> crate::policy::Item {
+        let v = serde_json::json!({ "kind": "read", "value": path, "class": "reach", "sources": [ { "flag": "--read" } ],
+                                    "effective": true, "path": path });
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// F3: a bound path, a workspace or a hidden path that is not its own real path (a link, `..`) is refused:
+    /// masking compares paths as strings.
+    #[test]
+    fn a_path_that_is_not_its_real_path_is_refused() {
+        let (mut p, l) = run_dir("read-only");
+        p.items.push(read_item("/home/u/docs/../src"));
+        let host = Fake {
+            dirs: vec!["/home/u/docs", "/home/u/src", "/home/u/src/notes", "/home/u/link"],
+            files: vec![],
+            socks: vec![],
+            links: vec![
+                ("/home/u/docs/../src", "/home/u/src"),
+                ("/home/u/link", "/home/u/src/notes"),
+            ],
+        };
+        let gaps = go(&p, &l, Engine::Podman, &host).unwrap_err();
+        assert_eq!(gaps, ["/home/u/docs/../src is not its real path (/home/u/src)"]);
+        let (mut p, l) = run_dir("read-only");
+        p.workspace[0].path = "/home/u/link".into();
+        p.workspace[0].common = "/home/u/link/.git".into();
+        let gaps = go(&p, &l, Engine::Podman, &host).unwrap_err();
+        assert_eq!(gaps, ["/home/u/link is not its real path (/home/u/src/notes)"]);
+        // a hidden path that is a link to a file under a bound folder
+        let (mut p, l) = run_dir("read-only");
+        for it in p.items.iter_mut().filter(|i| i.kind == "hidden") {
+            it.paths = Some(vec!["/home/u/.ssh".into()]);
+        }
+        let host = Fake {
+            dirs: vec!["/home/u/docs", "/home/u/docs/ssh", "/home/u/.ssh"],
+            files: vec![],
+            socks: vec![],
+            links: vec![("/home/u/.ssh", "/home/u/docs/ssh")],
+        };
+        let gaps = go(&p, &l, Engine::Podman, &host).unwrap_err();
+        assert_eq!(gaps, ["/home/u/.ssh is not its real path (/home/u/docs/ssh)"]);
+    }
+
+    /// F10: a git common directory outside the workspace (a worktree's) gets the workspace's masking and socket search.
+    #[test]
+    fn a_common_outside_the_workspace_is_masked_and_searched_like_it() {
+        let (mut p, l) = run_dir("read-only");
+        p.workspace[0].common = "/home/u/wt/notes.git".into();
+        for it in p.items.iter_mut().filter(|i| i.kind == "hidden") {
+            it.paths = Some(vec!["/home/u/wt/notes.git/secret".into()]);
+        }
+        let host = Fake {
+            dirs: vec!["/home/u/wt/notes.git"],
+            files: vec!["/home/u/wt/notes.git/secret"],
+            socks: vec!["/home/u/wt/notes.git/fsmonitor.sock"],
+            links: vec![],
+        };
+        let plan = go(&p, &l, Engine::Podman, &host).unwrap();
+        assert!(has(
+            &plan,
+            "--volume /home/u/wt/notes.git:/home/u/wt/notes.git:ro"
+        ));
+        assert!(
+            has(&plan, "--volume /r/empty:/home/u/wt/notes.git/secret:ro"),
+            "{:#?}",
+            lines(&plan)
+        );
+        assert!(has(
+            &plan,
+            "--volume /r/empty:/home/u/wt/notes.git/fsmonitor.sock:ro"
+        ));
+    }
+
+    /// F6: podman copies a tmpfs's underlying folder into it by default (tmpcopyup): every tmpfs says notmpcopyup.
+    #[test]
+    fn podman_tmpfs_never_copies_up() {
+        let (p, l) = run_dir("read-only");
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        let tmpfs: Vec<String> = lines(&plan)
+            .into_iter()
+            .filter(|x| x.starts_with("--tmpfs"))
+            .collect();
+        assert_eq!(tmpfs.len(), 3);
+        assert!(tmpfs.iter().all(|t| t.ends_with(",notmpcopyup")), "{tmpfs:#?}");
+    }
+
+    /// F5: docker creates a missing bind source (as root): it gets --mount, and prepare checks every source exists.
+    #[test]
+    fn docker_binds_with_mount_and_missing_sources_are_found() {
+        let (p, l) = run_dir("access-none");
+        let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
+        assert!(
+            has(
+                &plan,
+                "--mount type=bind,source=/r/passwd,target=/etc/passwd,readonly"
+            ),
+            "{:#?}",
+            lines(&plan)
+        );
+        assert!(has(
+            &plan,
+            "--mount type=bind,source=/home/u/.local/state/pot/state/9f2e/notes,target=/home/u/.cache/notes"
+        ));
+        assert!(!lines(&plan).iter().any(|x| x.starts_with("--volume")));
+        let host = existing(vec!["/nix/store/b-bash"]);
+        let missing = missing_sources(&plan, "/r", &host);
+        assert!(
+            missing.contains(&"/nix/store/c-coreutils/bin/env".to_string()),
+            "{missing:#?}"
+        );
+        assert!(
+            !missing
+                .iter()
+                .any(|m| m.starts_with("/r/") || m.contains("state/9f2e")),
+            "{missing:#?}"
+        );
     }
 }
