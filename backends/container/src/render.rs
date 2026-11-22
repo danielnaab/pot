@@ -56,28 +56,33 @@ pub const PROXY_URL: &str = "http://127.0.0.1:3128";
 
 /// The run's bash, before the command (R3, S1, S3, T1), with a secret or the network. It starts in an environment
 /// `env -i` cleared. It opens the named pipe (its first argument) read-write, so the open never waits for a writer,
-/// and reads `NAME=value` records, each ended by a NUL, up to the sentinel record `.`, each within 30 s; unless the
-/// stream was whole it refuses, and nothing runs. With the network (its second argument, socat's path, not empty), it
+/// and reads records, each ended by a NUL and within 30 s: exactly one for each planned name (its third argument is
+/// their count, the names follow: they are not secret), in the planned order, `NAME=value`, or the bare `NAME` for one
+/// the host has unset (it stays unset), then the sentinel record `.`. Any other stream (a name not planned, one twice,
+/// one missing, an early sentinel: V1, records a process of the same user wrote first) refuses, and nothing runs. With the network (its second argument, socat's path, not empty), it
 /// starts socat on 127.0.0.1:3128 towards the proxy's socket, its streams /dev/null and its environment bash's own
 /// (no record is declared yet), and waits until it listens (`0100007F:0C38 0A` in /proc/net/tcp, bwrap's netwrap).
 /// Each record is then declared in bash (`unset -v NAME`, which drops a special meaning such as RANDOM's, then
 /// `declare -x`), never passed as an argument, and bash execs the last hop: `env -u` what bash adds,
 /// `-C CWD -- POT'S VALUES… ARGV`.
 pub const ENTRY_SCRIPT: &str = concat!(
-    r#"__pot_fifo=$1 __pot_socat=$2; shift 2; __pot_recs=(); __pot_whole=; "#,
+    r#"__pot_fifo=$1 __pot_socat=$2 __pot_n=$3; shift 3; __pot_names=("${@:1:__pot_n}"); shift "$__pot_n"; "#,
+    r#"__pot_recs=(); __pot_whole=; __pot_i=0; "#,
     r#"exec {__pot_fd}<>"$__pot_fifo" || exit 125; "#,
-    r#"while IFS= read -r -d '' -t 30 -u "$__pot_fd" __pot_r; do if [ "$__pot_r" = . ]; then __pot_whole=1; break; fi; "#,
-    r#"case $__pot_r in [A-Za-z_]*=*) __pot_recs+=("$__pot_r") ;; *) break ;; esac; done; "#,
-    r#"[ "$__pot_whole" = 1 ] || { echo "pot: the run's variables did not arrive whole: nothing runs" >&2; exit 125; }; "#,
+    r#"while IFS= read -r -d '' -t 30 -u "$__pot_fd" __pot_r; do "#,
+    r#"if [ "$__pot_r" = . ]; then [ "$__pot_i" = "$__pot_n" ] && __pot_whole=1; break; fi; "#,
+    r#"[ "$__pot_i" -lt "$__pot_n" ] && [ "${__pot_r%%=*}" = "${__pot_names[__pot_i]}" ] || break; "#,
+    r#"case $__pot_r in *=*) __pot_recs+=("$__pot_r") ;; esac; __pot_i=$((__pot_i + 1)); done; "#,
+    r#"[ "$__pot_whole" = 1 ] || { echo "pot: the run's variables did not arrive as planned: nothing runs" >&2; exit 125; }; "#,
     r#"if [ -n "$__pot_socat" ]; then "#,
     r#""$__pot_socat" -lf /dev/null TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/pot/proxy.sock </dev/null >/dev/null 2>&1 & "#,
-    r#"__pot_up=; for __pot_i in {1..300}; do "#,
+    r#"__pot_up=; for __pot_x in {1..300}; do "#,
     r#"while read -r __pot_x __pot_l __pot_x __pot_s __pot_x; do [ "$__pot_l $__pot_s" != "0100007F:0C38 0A" ] || { __pot_up=1; break; }; done </proc/net/tcp; "#,
     r#"[ -z "$__pot_up" ] || break; read -r -t 0.01 -u "$__pot_fd" __pot_x; done; "#,
     r#"[ -n "$__pot_up" ] || { echo "pot: the network relay (socat) did not start" >&2; exit 125; }; fi; "#,
     r#"exec {__pot_fd}<&-; "#,
     r#"for __pot_r in "${__pot_recs[@]}"; do unset -v "${__pot_r%%=*}" && declare -x -- "$__pot_r" || exit 125; done; "#,
-    r#"unset -v __pot_r __pot_recs __pot_whole __pot_fd __pot_fifo __pot_socat __pot_up __pot_i __pot_l __pot_s __pot_x; exec "$@""#
+    r#"unset -v __pot_r __pot_recs __pot_whole __pot_fd __pot_fifo __pot_socat __pot_n __pot_names __pot_i __pot_up __pot_l __pot_s __pot_x; exec "$@""#
 );
 
 /// What bash adds to the environment of what it execs: the last hop's `env -u` removes it (T1).
@@ -86,31 +91,53 @@ pub const BASH_ADDS: &[&str] = &["_", "SHLVL", "PWD", "OLDPWD"];
 /// What the engines add to the command's environment that pot does not plan: `env -u` removes it (S3).
 pub const ENGINE_ADDS: &[&str] = &["HOSTNAME"];
 
-/// S5: the programs the entry runs in the run must be real files (not links) under a path the plan binds: the
-/// config's shell with the entry script (a secret or the network), and socat with the network. Otherwise the gaps.
+/// S5: with the entry script (a secret or the network), the config's shell must be a real file (not a link) under a
+/// path the plan binds. Otherwise the gap.
 pub fn program_gaps(plan: &Plan, shell: &str, host: &dyn Host) -> Vec<String> {
-    let mut want: Vec<(&str, &str)> = vec![];
-    if plan.fifo {
-        want.push((shell, "shell"));
+    let bound = plan
+        .sources
+        .iter()
+        .any(|s| shell == s || shell.starts_with(&format!("{}/", s.trim_end_matches('/'))));
+    if !plan.fifo || (real_file(shell, host) && bound) {
+        return vec![];
     }
-    if let Some(s) = &plan.socat {
-        want.push((s.as_str(), "socat"));
+    vec![format!(
+        "the config's shell {shell} (the run's entry runs it: it must be a real file under a path the run binds)"
+    )]
+}
+
+/// A real file: it exists, is not a folder, and is its own real path (no link, no `..`).
+fn real_file(p: &str, host: &dyn Host) -> bool {
+    host.realpath(p).is_some_and(|r| r == p) && !host.is_real_dir(p) && host.lexists(p)
+}
+
+/// V2: the one test of the network's programs, which probe (for private-proxy) and prepare (for the network and
+/// private-proxy; not `--print`, which reads no host file) share:
+/// python and proxy.py files (they run on the host), and socat a real file, not a link, under a path of `netClosure`,
+/// which the run binds with the network (required: without it the run could not see socat's closure).
+pub fn net_gaps(t: &NetTools, host: &dyn Host) -> Vec<String> {
+    let mut out = vec![];
+    for (what, f) in [("python", &t.python), ("proxy", &t.proxy)] {
+        let file = host
+            .realpath(f)
+            .is_some_and(|r| host.lexists(&r) && !host.is_real_dir(&r));
+        if !file {
+            out.push(format!(
+                "the config's {what} {f} (the network's proxy runs it: it must be a file)"
+            ));
+        }
     }
-    want.into_iter()
-        .filter(|(p, _)| {
-            let real = host.realpath(p).is_some_and(|r| r == *p) && !host.is_real_dir(p) && host.lexists(p);
-            let bound = plan
-                .sources
-                .iter()
-                .any(|s| p == s || p.starts_with(&format!("{}/", s.trim_end_matches('/'))));
-            !(real && bound)
-        })
-        .map(|(p, what)| {
-            format!(
-                "the config's {what} {p} (the run's entry runs it: it must be a real file under a path the run binds)"
-            )
-        })
-        .collect()
+    let under = t
+        .closure
+        .iter()
+        .any(|c| t.socat.starts_with(&format!("{}/", c.trim_end_matches('/'))));
+    if !(real_file(&t.socat, host) && under) {
+        out.push(format!(
+            "the config's socat {} (the run's entry runs it: it must be a real file under a path of netClosure)",
+            t.socat
+        ));
+    }
+    out
 }
 
 /// podman's global options for a run: its store, its runtime state (runroot: the conmon sockets, the mount
@@ -197,9 +224,7 @@ pub struct Plan {
     pub piped: Vec<String>,
     /// Whether the entry reads the named pipe (a secret or the network): `run` makes `secrets.fifo` and writes it.
     pub fifo: bool,
-    /// With the network: socat's path, which the entry starts, and the proxy's command, which `run` starts on the host
-    /// in the run folder.
-    pub socat: Option<String>,
+    /// With the network: the proxy's command, which `run` starts on the host in the run folder.
     pub proxy: Option<Vec<String>>,
 }
 
@@ -288,8 +313,7 @@ fn gaps(i: &Inputs) -> Vec<String> {
                     "resource-limits under docker (a container is not in pot's scope)".to_string()
                 }
                 "private-proxy" => {
-                    "the private-proxy guarantee (the backend's --config names no python, proxy and socat)"
-                        .to_string()
+                    "the private-proxy guarantee (the backend's --config names no python, proxy, socat and netClosure)".to_string()
                 }
                 _ => format!("the {g} guarantee"),
             });
@@ -308,11 +332,13 @@ fn gaps(i: &Inputs) -> Vec<String> {
         .filter(|n| n.class == "reach")
         .map(|n| n.value.as_str())
         .collect();
-    if !net.is_empty() && i.net.is_none() {
-        out.push(format!(
-            "the network through pot's proxy ({}): the backend's --config names no python, proxy and socat",
+    match i.net {
+        _ if net.is_empty() => {}
+        None => out.push(format!(
+            "the network through pot's proxy ({}): the backend's --config names no python, proxy, socat and netClosure",
             net.join(", ")
-        ));
+        )),
+        Some(_) => {}
     }
     let caps: BTreeSet<&str> = p.bindings.iter().map(|b| b.capability.as_str()).collect();
     for c in caps {
@@ -823,10 +849,13 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 "pot-entry",
                 FIFO,
                 net_tools.map_or("", |t| t.socat.as_str()),
-                "/usr/bin/env",
             ]
             .map(String::from),
         );
+        // V1: the planned names, which the script holds the records to
+        entry.push(piped.len().to_string());
+        entry.extend(piped.iter().cloned());
+        entry.push("/usr/bin/env".into());
         for n in BASH_ADDS {
             entry.extend(["-u".to_string(), (*n).to_string()]);
         }
@@ -857,7 +886,6 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         piped,
         defaults,
         fifo,
-        socat: net_tools.map(|t| t.socat.clone()),
         proxy: net_tools.map(|t| proxy_argv(t, &p.context, l, &rd("denials"), &net)),
     })
 }
@@ -1201,11 +1229,11 @@ mod tests {
         assert_eq!(plan.piped, ["TERM", "COLORTERM", "NOTES_TOKEN"]);
         assert!(!has(&plan, "--env TERM"));
         // T1: env -i, then bash, then the last hop with pot's values; the records are declared in bash
-        assert!(plan.fifo && plan.socat.is_none() && plan.proxy.is_none());
+        assert!(plan.fifo && plan.entry[10].is_empty() && plan.proxy.is_none());
         assert!(has(&plan, "--volume /r/secrets.fifo:/run/pot/secrets.fifo:ro"));
         assert!(!lines(&plan).iter().any(|x| x.contains("--preserve-fd")));
         assert_eq!(
-            plan.entry[..20],
+            plan.entry[..24],
             [
                 "/usr/bin/env",
                 "-i",
@@ -1218,6 +1246,10 @@ mod tests {
                 "pot-entry",
                 "/run/pot/secrets.fifo",
                 "",
+                "3",
+                "TERM",
+                "COLORTERM",
+                "NOTES_TOKEN",
                 "/usr/bin/env",
                 "-u",
                 "_",
@@ -1229,8 +1261,9 @@ mod tests {
                 "OLDPWD"
             ]
         );
-        assert_eq!(plan.entry[20..23], ["-C", "/home/u/src/notes", "--"]);
-        let last = &plan.entry[23..];
+        // V1: the planned names (not secret) are the script's arguments: their count, then each, in the pipe's order
+        assert_eq!(plan.entry[24..27], ["-C", "/home/u/src/notes", "--"]);
+        let last = &plan.entry[27..];
         assert!(last.contains(&"NOTES_CACHE=/home/u/.cache/notes".to_string()));
         assert!(
             last.contains(&"PS1=(pot:review) \\w \\$ ".to_string()),
@@ -1832,18 +1865,44 @@ mod tests {
         let (p, l) = run_dir("access-none");
         let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
         assert_eq!(program_gaps(&plan, "/opt/bash", &nothing()), Vec::<String>::new());
-        // the network: bash and socat, socat under the net closure
-        let mut p = p;
-        p.items.push(net_item("example.com:443"));
-        let plan = go_net(&p, &l, Engine::Podman, &nothing()).unwrap();
-        let mut host = nothing();
-        host.files = vec![bash];
-        assert_eq!(
-            program_gaps(&plan, bash, &host),
-            gap("socat", "/nix/store/s-socat/bin/socat")
+    }
+
+    /// V2: probe and prepare share one test of the network's programs: python and proxy files, socat a real file (not a
+    /// link) under a path of `netClosure`.
+    #[test]
+    fn the_networks_programs_are_tested_once_for_probe_and_prepare() {
+        let t = net_tools();
+        let (py, px, so) = (
+            "/nix/store/p-python/bin/python3",
+            "/nix/store/q-pot/proxy.py",
+            "/nix/store/s-socat/bin/socat",
         );
-        host.files.push("/nix/store/s-socat/bin/socat");
-        assert_eq!(program_gaps(&plan, bash, &host), Vec::<String>::new());
+        let mut host = nothing();
+        host.files = vec![py, px, so];
+        assert_eq!(net_gaps(&t, &host), Vec::<String>::new());
+        let gap = |s: &str| {
+            format!(
+                "the config's socat {s} (the run's entry runs it: it must be a real file under a path of netClosure)"
+            )
+        };
+        host.links = vec![(so, "/opt/socat")];
+        assert_eq!(net_gaps(&t, &host), [gap(so)]);
+        host.links = vec![];
+        let mut out = t.clone();
+        out.socat = "/opt/socat".into();
+        host.files.push("/opt/socat");
+        assert_eq!(net_gaps(&out, &host), [gap("/opt/socat")]);
+        let mut none = t.clone();
+        none.closure = vec![];
+        assert_eq!(net_gaps(&none, &host), [gap(so)]);
+        host.files = vec![so];
+        assert_eq!(
+            net_gaps(&t, &host),
+            [
+                format!("the config's python {py} (the network's proxy runs it: it must be a file)"),
+                format!("the config's proxy {px} (the network's proxy runs it: it must be a file)")
+            ]
+        );
     }
 
     fn net_item(v: &str) -> crate::policy::Item {
@@ -1892,13 +1951,13 @@ mod tests {
             assert!(has(&plan, "--env no_proxy=localhost,127.0.0.1,::1"));
             // every variable passed by name goes over the named pipe; the entry starts socat
             assert!(plan.fifo && plan.piped.contains(&"NOTES_TOKEN".to_string()));
-            assert_eq!(plan.socat.as_deref(), Some("/nix/store/s-socat/bin/socat"));
             assert_eq!(
-                plan.entry[8..11],
+                plan.entry[8..12],
                 [
                     "pot-entry",
                     "/run/pot/secrets.fifo",
-                    "/nix/store/s-socat/bin/socat"
+                    "/nix/store/s-socat/bin/socat",
+                    "3"
                 ]
             );
             assert_eq!(
@@ -1941,7 +2000,7 @@ mod tests {
         // no network item: no proxy, no socat, no socket
         let (p, l) = run_dir("access-none");
         let plan = go_net(&p, &l, Engine::Podman, &nothing()).unwrap();
-        assert!(plan.proxy.is_none() && plan.socat.is_none() && !plan.fifo);
+        assert!(plan.proxy.is_none() && !plan.fifo);
         assert!(
             !lines(&plan)
                 .iter()
@@ -1985,8 +2044,8 @@ mod tests {
         assert_eq!(
             go(&p, &l, Engine::Podman, &nothing()).unwrap_err(),
             [
-                "the private-proxy guarantee (the backend's --config names no python, proxy and socat)",
-                "the network through pot's proxy (example.com:443): the backend's --config names no python, proxy and socat"
+                "the private-proxy guarantee (the backend's --config names no python, proxy, socat and netClosure)",
+                "the network through pot's proxy (example.com:443): the backend's --config names no python, proxy, socat and netClosure"
             ]
         );
         assert!(go_net(&p, &l, Engine::Docker, &nothing()).is_ok());

@@ -387,14 +387,10 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
         &cfg.paths().map_err(|m| Refusal::new(&p.context, m))?.shell,
         &host::RealHost,
     );
-    // the proxy runs on the host: its python and proxy.py must be files
-    if let Some(argv) = &plan.proxy {
-        for (what, f) in [("python", &argv[0]), ("proxy", &argv[3])] {
-            if !Path::new(f).is_file() {
-                gaps.push(format!(
-                    "the config's {what} {f} (the network's proxy runs it: it must be a file)"
-                ));
-            }
+    // V2: the network and private-proxy on probe's own test of the network's programs
+    if plan.proxy.is_some() || p.proves("private-proxy") {
+        if let Some(t) = cfg.net_tools().map_err(|m| Refusal::new(&p.context, m))? {
+            gaps.extend(render::net_gaps(&t, &host::RealHost));
         }
     }
     if !gaps.is_empty() {
@@ -712,6 +708,16 @@ fn feed_fifo(
                 }
                 Err(_) => return,
             }
+        }
+        // V3: delivered, the sentinel included: the pipe leaves the run folder (the container's bind keeps its own
+        // inode, and the entry has it open), so no host process can open it any more
+        let still = path.symlink_metadata().is_ok_and(|m| {
+            use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+            m.file_type().is_fifo()
+                && rustix::fs::fstat(&fd).is_ok_and(|st| st.st_ino == m.ino() && st.st_dev == m.dev())
+        });
+        if still {
+            let _ = fs::remove_file(&path);
         }
     })
 }
@@ -1403,10 +1409,12 @@ fn main() -> ExitCode {
     let result = match &cli.verb {
         Verb::Probe { .. } => {
             let doc = match cfg.and_then(|c| {
-                // private-proxy: the config's python, proxy.py and socat are files
-                let net = [&c.python, &c.proxy, &c.socat]
-                    .iter()
-                    .all(|f| f.as_ref().is_some_and(|f| Path::new(f).is_file()));
+                // V2: private-proxy exactly where prepare carries the network out (render::net_gaps)
+                let net = c
+                    .net_tools()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|t| render::net_gaps(&t, &host::RealHost).is_empty());
                 engine(&c).and_then(|(e, program)| probe_now(e, &program, net))
             }) {
                 Ok(g) => serde_json::json!({ "guarantees": g }),

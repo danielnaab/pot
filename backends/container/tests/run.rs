@@ -956,11 +956,37 @@ fn the_secrets_script_refuses_an_incomplete_stream() {
         })
         .collect();
     for (name, stream, ran) in [
-        ("complete", &b"NOTES_TOKEN=v\0.\0"[..], true),
-        ("no sentinel", &b"NOTES_TOKEN=v\0"[..], false),
-        ("short", &b"NOTES_TOKEN=v"[..], false),
+        ("complete", &b"TERM\0COLORTERM\0NOTES_TOKEN=v\0.\0"[..], true),
+        ("no sentinel", &b"TERM\0COLORTERM\0NOTES_TOKEN=v\0"[..], false),
+        ("short", &b"TERM\0COLORTERM\0NOTES_TOKEN=v"[..], false),
         ("empty", &b""[..], false),
-        ("not a record", &b"NOTES_TOKEN\0.\0"[..], false),
+        ("a name short", &b"TERM\0NOTES_TOKEN=v\0.\0"[..], false),
+        // V1: a name that is not planned, a planned one twice, and a sentinel before the planned names
+        (
+            "not planned",
+            &b"TERM\0COLORTERM\0NOTES_TOKEN=v\0LD_PRELOAD=/x.so\0.\0"[..],
+            false,
+        ),
+        (
+            "not planned first",
+            &b"LD_PRELOAD=/x.so\0TERM\0COLORTERM\0NOTES_TOKEN=v\0.\0"[..],
+            false,
+        ),
+        (
+            "a repeat",
+            &b"TERM\0COLORTERM\0NOTES_TOKEN=v\0NOTES_TOKEN=w\0.\0"[..],
+            false,
+        ),
+        (
+            "an early sentinel",
+            &b".\0TERM\0COLORTERM\0NOTES_TOKEN=v\0.\0"[..],
+            false,
+        ),
+        (
+            "an early sentinel after one",
+            &b"TERM\0.\0COLORTERM\0NOTES_TOKEN=v\0.\0"[..],
+            false,
+        ),
     ] {
         fs::write(&f, stream).unwrap();
         let out = Command::new(&entry[0])
@@ -1211,7 +1237,7 @@ fn no_exec_in_the_entry_is_given_a_value() {
             _ => w.clone(),
         })
         .collect();
-    fs::write(&stream, b"NOTES_TOKEN=t1-value\0.\0").unwrap();
+    fs::write(&stream, b"TERM\0COLORTERM\0NOTES_TOKEN=t1-value\0.\0").unwrap();
     let out = Command::new(&entry[0])
         .args(&entry[1..])
         .env_clear()
@@ -2079,4 +2105,178 @@ fn podman_the_commands_environment_with_the_network_is_the_plan() {
 #[test]
 fn docker_the_commands_environment_with_the_network_is_the_plan() {
     net_env_case("docker");
+}
+
+// ---------------------------------------------------------------- the QA round's findings V1-V3
+
+/// V1: a host process of the same user that opens the named pipe before run, and writes records of its own (a name
+/// that is not planned, then the sentinel), never widens the run: the entry refuses (125, nothing runs), or, when
+/// run's records came first, the injected ones after the sentinel are never read. Under both engines.
+fn injected_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let envp = coreutils("env");
+    let (top, run) = world(&format!("{engine}-inject"), engine, &program, &[&envp, "-0"]);
+    prepare(&top, &run);
+    let fifo = run.join("secrets.fifo");
+    let injector = std::thread::spawn(move || {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            // O_NONBLOCK: ENXIO until a reader has it open
+            if let Ok(mut f) = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(0o4000)
+                .open(&fifo)
+            {
+                let _ = f.write_all(b"LD_PRELOAD=/nonexistent-qa.so\0QA_INJECTED=yes\0.\0");
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
+    });
+    let out = verb(&top, &run, "run")
+        .env("NOTES_TOKEN", "inject-real")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(injector.join().unwrap(), "the injector never opened the pipe");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !said.contains("QA_INJECTED") && !said.contains("LD_PRELOAD"),
+        "an injected record reached the command: {said}"
+    );
+    eprintln!("{engine}: the injected stream gave exit {:?}", out.status.code());
+    match out.status.code() {
+        Some(125) => assert_eq!(said, "", "something ran"),
+        Some(0) => assert!(said.contains("NOTES_TOKEN=inject-real"), "{said}"),
+        other => panic!("exit {other:?}: {}", String::from_utf8_lossy(&out.stderr)),
+    }
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_an_injected_record_never_widens_the_run() {
+    injected_case("podman");
+}
+
+#[test]
+fn docker_an_injected_record_never_widens_the_run() {
+    injected_case("docker");
+}
+
+/// V2: probe proves private-proxy only where prepare carries the network out: the same test (socat a real file, not a
+/// link, under a path of `netClosure`; python and proxy files). A socat that is a link, one outside `netClosure`, or
+/// no `netClosure`: neither probe nor prepare.
+#[test]
+fn podman_probe_and_prepare_agree_on_private_proxy() {
+    let Some(program) = engine_program("podman") else {
+        return;
+    };
+    let Some((top, run)) = net_world(
+        "podman-agree",
+        "podman",
+        &program,
+        &["/bin/sh", "-c", "true"],
+        &["example.com:443"],
+    ) else {
+        return;
+    };
+    let cfg_path = top.join("config.json");
+    let good: serde_json::Value = serde_json::from_str(&fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    let link = top.join("socat-link");
+    symlink(good["socat"].as_str().unwrap(), &link).unwrap();
+    let outside = top.join("store").join("socat");
+    fs::copy(good["socat"].as_str().unwrap(), &outside).unwrap();
+    let mut no_closure = good.clone();
+    no_closure.as_object_mut().unwrap().remove("netClosure");
+    let mut linked = good.clone();
+    linked["socat"] = link.display().to_string().into();
+    let mut unbound = good.clone();
+    unbound["socat"] = outside.display().to_string().into();
+    for (name, cfg, proves) in [
+        ("good", &good, true),
+        ("a link", &linked, false),
+        ("outside netClosure", &unbound, false),
+        ("no netClosure", &no_closure, false),
+    ] {
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+        let probe = verb(&top, &run, "probe").output().unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+        let has = doc["guarantees"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g == "private-proxy");
+        assert_eq!(has, proves, "{name}: probe {doc}");
+        let prep = verb(&top, &run, "prepare").output().unwrap();
+        assert_eq!(
+            prep.status.success(),
+            proves,
+            "{name}: prepare {}",
+            String::from_utf8_lossy(&prep.stderr)
+        );
+    }
+    fs::write(&cfg_path, good.to_string()).unwrap();
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// V3: the named pipe leaves the run folder as soon as run has delivered the records (the container's bind keeps its
+/// own inode): while the command still runs, `secrets.fifo` is gone. Under both engines.
+fn unlinked_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let sleep = coreutils("sleep");
+    let script = format!("echo \"[$NOTES_TOKEN]\"; {sleep} 4");
+    let (top, run) = world(
+        &format!("{engine}-unlink"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+    );
+    prepare(&top, &run);
+    let mut child = verb(&top, &run, "run")
+        .env("NOTES_TOKEN", "v3-value")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for("the named pipe", || {
+        run.join("secrets.fifo").symlink_metadata().is_ok()
+    });
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.as_mut().unwrap()),
+        &mut line,
+    )
+    .unwrap();
+    assert_eq!(line, "[v3-value]\n");
+    let start = Instant::now();
+    while run.join("secrets.fifo").symlink_metadata().is_ok() {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the named pipe is still in the run folder"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the command had already ended"
+    );
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_the_named_pipe_is_unlinked_once_delivered() {
+    unlinked_case("podman");
+}
+
+#[test]
+fn docker_the_named_pipe_is_unlinked_once_delivered() {
+    unlinked_case("docker");
 }

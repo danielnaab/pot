@@ -127,17 +127,18 @@ pub fn image_gaps(inspect: &serde_json::Value) -> Vec<String> {
     gaps
 }
 
-/// The secret variables' records for the pipe: `NAME=value` and a NUL each, for the names that are set.
+/// The records for the named pipe: one for each planned name, in the planned order (V1: the entry holds the stream to
+/// exactly these), `NAME=value` for one that is set and the bare `NAME` for one that is not, each ended by a NUL.
 pub fn secret_records(names: &[String], get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
     let mut out = vec![];
     for n in names {
+        out.extend_from_slice(n.as_bytes());
         if let Some(v) = get(n) {
-            out.extend_from_slice(n.as_bytes());
             out.push(b'=');
             out.extend_from_slice(v.as_bytes());
-            out.push(0);
         }
+        out.push(0);
     }
     // the sentinel: the script runs nothing unless the stream ends with it (S1)
     out.extend_from_slice(b".\0");
@@ -478,9 +479,10 @@ mod tests {
             "B" => Some(String::new().into()),
             _ => None,
         };
+        // V1: every planned name, in the planned order; an unset one as its bare name (it stays unset in the run)
         assert_eq!(
             secret_records(&s(&["A", "C", "B"]), get),
-            b"A=one\ntwo=three\0B=\0.\0".to_vec()
+            b"A=one\ntwo=three\0C\0B=\0.\0".to_vec()
         );
     }
 

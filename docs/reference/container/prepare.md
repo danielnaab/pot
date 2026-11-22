@@ -74,7 +74,7 @@ podman
   --env TZDIR=/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo
   --env USER=u
   --rootfs [CWD]/read-only/rootfs:O
-  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-entry /run/pot/secrets.fifo '' /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u/src/notes -- [..] notes check --all
+  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-entry /run/pot/secrets.fifo '' 3 TERM COLORTERM NOTES_TOKEN /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u/src/notes -- [..] notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
 # and writes the variables passed by name to the run folder's named pipe, secrets.fifo: TERM COLORTERM NOTES_TOKEN
 
@@ -225,7 +225,7 @@ podman
   --env https_proxy=http://127.0.0.1:3128
   --env no_proxy=localhost,127.0.0.1,::1
   --rootfs [CWD]/network/rootfs:O
-  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-entry /run/pot/secrets.fifo /nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u -- [..] notes check --all
+  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-entry /run/pot/secrets.fifo /nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat 3 TERM COLORTERM NOTES_TOKEN /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u -- [..] notes check --all
 # and before the root: --volume P:P:ro for each of 9 store paths (the closure)
 # before the engine, run starts pot's proxy in the run folder: /nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3 -I -S /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/proxy.py proxy.sock --denials [CWD]/network/denials --context review --fix 'the repo kit'/''s requests.network' api.example.com:443
 # and writes the variables passed by name to the run folder's named pipe, secrets.fifo: TERM COLORTERM NOTES_TOKEN

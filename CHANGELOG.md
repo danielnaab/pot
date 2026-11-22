@@ -54,7 +54,11 @@ v2.14.0's `sandbox` on).
   `/run/pot/proxy.sock`), the container keeps `--network none`, socat in the run serves it as 127.0.0.1:3128, the
   proxy's variables are bwrap's, `after` reports `denials` and `loopback`, and `cleanup` stops a proxy still running.
   `probe` proves `private-proxy` when the backend's config names `python`, `proxy` and `socat` (new config keys,
-  with `netClosure`; no contract change). The dev shell gains socat, curl and strace for the backend's tests.
+  with `netClosure`; no contract change). The dev shell gains socat, curl and strace for the backend's tests. After
+  its QA (V1-V3): the entry holds the pipe's stream to the planned names, given as its arguments (one record per name,
+  in order, then the sentinel), so records a same-user process wrote first never widen the run; probe and prepare
+  share one test of the network's programs (socat a real file under `netClosure`); the pipe is unlinked from the run
+  folder once the records are delivered.
 
 ### Changed
 

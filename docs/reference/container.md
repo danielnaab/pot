@@ -33,8 +33,9 @@ and the store paths bound into every run, named as bwrap's config names them: `s
 `terminfo`, `tzdir` and `baseClosure` (a file of store paths). `prepare` needs all of the store paths. The network's
 programs, also named as bwrap's config names them: `python` and `proxy` (pot's `proxy.py`), which run on the host,
 `socat`, which runs in the run, and `netClosure` (a file of store paths: socat's closure, bound into a run with the
-network under `closure-store`). Without `python`, `proxy` and `socat`, `probe` does not prove `private-proxy` and
-`prepare` refuses the network. No contract field is added: these are the backend's own config, and the proxy's other
+network under `closure-store`). Unless `python` and `proxy` are files and `socat` a real file under a path of
+`netClosure` (one test, which `probe` and `prepare` share), `probe` does not prove `private-proxy` and `prepare`
+refuses the network and `private-proxy`. No contract field is added: these are the backend's own config, and the proxy's other
 inputs are launch.json/1's existing fields (below).
 
 **`launch.json`** ([launch.json/1](../../contracts/launch-1.md)) is read leniently, and only these fields:
@@ -76,7 +77,7 @@ Guarantees, in bubblewrap's vocabulary (no new names):
 | `in-place` | The workspace at its own path |
 | `root-files` | A `file` item at `/…`, bound into the container's own root |
 | `resource-limits` | podman only: `--cgroups=split` keeps the container in the cgroup of the pot that starts it, so the scope's `MemoryMax` and `TasksMax` apply (seen in a smoke run: the container's cgroup is a child of its caller's) |
-| `private-proxy` | When the config names `python`, `proxy` and `socat` (each a file): the proxy listens on a socket in the run folder, which only the caller can reach, and the run serves it on 127.0.0.1:3128 in its own network namespace ([The network](#the-network)) |
+| `private-proxy` | When the config's network programs pass the one test `prepare` applies too (`render::net_gaps`, V2): `python` and `proxy` files, `socat` a real file (not a link) under a path of `netClosure`, which is required. The proxy listens on a socket in the run folder, which only the caller can reach, and the run serves it on 127.0.0.1:3128 in its own network namespace ([The network](#the-network)) |
 
 Not proved yet: `protected-as-mounts`, `same-path-clone` (see [What's next](#whats-next)); never: `nest`,
 `separate-kernel`.
@@ -127,11 +128,20 @@ it is a pipe of the caller's with that mode. The plan binds it read-only at `/ru
 user is the caller (podman's `keep-id`, docker's `--user` with no user namespace), so it can open it under both
 engines. `run` opens it without following a link and without blocking (retried until the container has it open), and
 writes in a thread without blocking, until the engine exits, so `run` never waits on a container that ended before it
-read. It removes the pipe when the command ends, and `cleanup` does too. No fd of the caller's reaches the container.
+read. Once it has written the sentinel it unlinks the pipe from the run folder (V3): the container's bind holds the
+pipe's own inode and the entry has it open, so the run is unaffected, and no host process can open it any more. It
+removes the pipe when the command ends if it is still there, and `cleanup` does too. No fd of the caller's reaches the
+container. The read-only bind does not stop a process in the container from opening the pipe for writing (a mount's
+read-only flag does not apply to a pipe's I/O); that is harmless: the command starts only after the entry has read
+every record and closed the pipe, so nothing in the run reads what is written there afterwards, and `run` has
+finished with it (a blocking open waits for a reader that never comes; a non-blocking one fails).
 The entry starts with `/usr/bin/env -i --`, which clears what the engine set. Then the run's bash (the config's `shell`) opens the pipe read-write
-(so its open never waits for `run`), collects the records up to the sentinel, each within 30 s, and closes it. If the
-stream is not whole (no pipe, a short read, a timeout, a record that is not `NAME=value`), it exits 125 and nothing
-runs. Otherwise it declares each record in bash (`unset -v NAME`, which drops
+(so its open never waits for `run`), collects the records up to the sentinel, each within 30 s, and closes it. It holds
+the stream to the planned names (V1), which it is given as arguments (their count, then each: names are not secret):
+exactly one record per planned name, in the planned order, `NAME=value`, or the bare `NAME` for a variable the host has
+unset (it stays unset in the run), then the sentinel. `run` writes every planned name so. Any other stream exits 125
+and nothing runs: no pipe, a short read, a timeout, a name not planned (`LD_PRELOAD` written by a process of the same
+user that opened the pipe first), a name twice, a name missing, or a sentinel before the last planned name. Otherwise it declares each record in bash (`unset -v NAME`, which drops
 a special meaning such as `RANDOM`'s, then `declare -x`). A record is never an argument: an earlier version passed
 the records to `env -i`, and the audit read a secret in that process's `/proc/PID/cmdline` (T1). Bash then execs the
 last hop, `/usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV`, whose arguments hold only names
@@ -169,7 +179,7 @@ the plan binds, but for the pipe and the proxy's socket, which `run` makes. It h
 | (always) | `run --interactive --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same, and `--name pot-HASH` (16 hex digits of the run folder's path, FNV-1a) |
 | (always) | `--init`: the engine's init is PID 1 (catatonit, or docker's `docker-init`), a read-only bind of the engine's own file; the command is never PID 1, which ignores a signal it has no handler for | the same |
 | stdin a terminal | `--tty`, added by `run` | the same |
-| a secret `env` item, or the network | `--volume RUNDIR/secrets.fifo:/run/pot/secrets.fifo:ro`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-entry /run/pot/secrets.fifo SOCAT /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` (`SOCAT` empty without the network) | the same, with `--mount` |
+| a secret `env` item, or the network | `--volume RUNDIR/secrets.fifo:/run/pot/secrets.fifo:ro`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-entry /run/pot/secrets.fifo SOCAT N NAMES… /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` (`SOCAT` empty without the network) | the same, with `--mount` |
 | (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never --entrypoint ""` |
@@ -323,7 +333,8 @@ refused, since a field this backend does not know could narrow the run):
 - write access in place: the workspace's pins (git directories, `config`, hooks and the protected paths as read-only
   mounts, links and hard links refused, the placeholders), as bwrap's `Pins`;
 - clone mode: the clone at its original path, its pins, proposal links, and the `after` staging fetch;
-- the network when the config names no `python`, `proxy` and `socat` (and `private-proxy` proved then);
+- the network, and `private-proxy`, when the config's `python`, `proxy`, `socat` and `netClosure` do not pass
+  `probe`'s test (above);
 - every binding: `status.relay`, `git.fetch`, `nix`, `credential`, `mcp` (with `via: file` as a 0400 file under
   `/run/pot`, decided 2026-11-21);
 - a children table with a `sibling` row (the run's children broker);
