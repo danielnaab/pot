@@ -61,8 +61,10 @@
         pot = default;
       });
 
+      # socat, curl and strace: the container backend's network tests (the run's socat, a client in the run) and its
+      # check that no exec is handed a secret
       devShells = forAll (pkgs: { default = pkgs.mkShell { packages = [ pkgs.shellcheck pkgs.jq pkgs.python3 ]
-        ++ (with pkgs; [ cargo rustc clippy rustfmt cargo-deny ]); }; });
+        ++ (with pkgs; [ cargo rustc clippy rustfmt cargo-deny socat curl ]) ++ lib.optional pkgs.stdenv.isLinux pkgs.strace; }; });
 
       checks = forAll (pkgs: (rust pkgs).checks // {
         # bash -n first: bash's own parser, so a script bash can't run fails even where shellcheck's

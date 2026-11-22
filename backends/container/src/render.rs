@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::host::Host;
-use crate::launch::{Launch, Paths};
+use crate::launch::{Launch, NetTools, Paths};
 use crate::policy::{Policy, known_kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,8 +27,9 @@ impl Engine {
 
 /// The guarantees this slice upholds when a policy's `backend.proved` names them (rule 2). resource-limits only
 /// under podman: `--cgroups=split` keeps the container in the cgroup of the pot that started it, the user systemd
-/// scope pot proves resource-limits by (pot.py `scope_for`).
-pub fn upholds(engine: Engine, g: &str) -> bool {
+/// scope pot proves resource-limits by (pot.py `scope_for`). private-proxy only when the config names the network's
+/// programs (`NET`): the proxy's socket is in the run folder, served in the run's own network namespace.
+pub fn upholds(engine: Engine, net: bool, g: &str) -> bool {
     matches!(
         g,
         "closure-store"
@@ -39,22 +40,44 @@ pub fn upholds(engine: Engine, g: &str) -> bool {
             | "in-place"
             | "root-files"
     ) || (g == "resource-limits" && engine == Engine::Podman)
+        || (g == "private-proxy" && net)
 }
 
 pub const DOCKER_IMAGE: &str = "localhost/pot-empty:1";
 
-/// The run's bash, before the command (R3, S1, S3, T1). It starts in an environment `env -i` cleared, reads
-/// `NAME=value` records, each ended by a NUL, from the pipe's fd (its first argument; `run` gives the number), up to the
-/// sentinel record `.`, and closes the fd; unless the stream was whole it refuses, and nothing runs. Each record is
-/// then declared in bash (`unset -v NAME`, which drops a special meaning such as RANDOM's, then `declare -x`), never
-/// passed as an argument, and bash execs the last hop: `env -u` what bash adds, `-C CWD -- POT'S VALUES… ARGV`.
-pub const SECRETS_SCRIPT: &str = concat!(
-    r#"__pot_fd=$1; shift; __pot_recs=(); __pot_whole=; "#,
-    r#"while IFS= read -r -d '' __pot_r <&"$__pot_fd"; do if [ "$__pot_r" = . ]; then __pot_whole=1; break; fi; "#,
-    r#"case $__pot_r in [A-Za-z_]*=*) __pot_recs+=("$__pot_r") ;; *) break ;; esac; done; exec {__pot_fd}<&-; "#,
+/// Where the run reads its variables: the named pipe `run` makes in the run folder (`secrets.fifo`), bound read-only.
+pub const FIFO: &str = "/run/pot/secrets.fifo";
+
+/// Where the run reaches pot's proxy: the run folder's `proxy.sock`, bound read-only (bwrap's path).
+pub const PROXY_SOCK: &str = "/run/pot/proxy.sock";
+
+/// The proxy's address in the run, as bwrap's `run_env` gives it.
+pub const PROXY_URL: &str = "http://127.0.0.1:3128";
+
+/// The run's bash, before the command (R3, S1, S3, T1), with a secret or the network. It starts in an environment
+/// `env -i` cleared. It opens the named pipe (its first argument) read-write, so the open never waits for a writer,
+/// and reads `NAME=value` records, each ended by a NUL, up to the sentinel record `.`, each within 30 s; unless the
+/// stream was whole it refuses, and nothing runs. With the network (its second argument, socat's path, not empty), it
+/// starts socat on 127.0.0.1:3128 towards the proxy's socket, its streams /dev/null and its environment bash's own
+/// (no record is declared yet), and waits until it listens (`0100007F:0C38 0A` in /proc/net/tcp, bwrap's netwrap).
+/// Each record is then declared in bash (`unset -v NAME`, which drops a special meaning such as RANDOM's, then
+/// `declare -x`), never passed as an argument, and bash execs the last hop: `env -u` what bash adds,
+/// `-C CWD -- POT'S VALUES… ARGV`.
+pub const ENTRY_SCRIPT: &str = concat!(
+    r#"__pot_fifo=$1 __pot_socat=$2; shift 2; __pot_recs=(); __pot_whole=; "#,
+    r#"exec {__pot_fd}<>"$__pot_fifo" || exit 125; "#,
+    r#"while IFS= read -r -d '' -t 30 -u "$__pot_fd" __pot_r; do if [ "$__pot_r" = . ]; then __pot_whole=1; break; fi; "#,
+    r#"case $__pot_r in [A-Za-z_]*=*) __pot_recs+=("$__pot_r") ;; *) break ;; esac; done; "#,
     r#"[ "$__pot_whole" = 1 ] || { echo "pot: the run's variables did not arrive whole: nothing runs" >&2; exit 125; }; "#,
+    r#"if [ -n "$__pot_socat" ]; then "#,
+    r#""$__pot_socat" -lf /dev/null TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/pot/proxy.sock </dev/null >/dev/null 2>&1 & "#,
+    r#"__pot_up=; for __pot_i in {1..300}; do "#,
+    r#"while read -r __pot_x __pot_l __pot_x __pot_s __pot_x; do [ "$__pot_l $__pot_s" != "0100007F:0C38 0A" ] || { __pot_up=1; break; }; done </proc/net/tcp; "#,
+    r#"[ -z "$__pot_up" ] || break; read -r -t 0.01 -u "$__pot_fd" __pot_x; done; "#,
+    r#"[ -n "$__pot_up" ] || { echo "pot: the network relay (socat) did not start" >&2; exit 125; }; fi; "#,
+    r#"exec {__pot_fd}<&-; "#,
     r#"for __pot_r in "${__pot_recs[@]}"; do unset -v "${__pot_r%%=*}" && declare -x -- "$__pot_r" || exit 125; done; "#,
-    r#"unset -v __pot_r __pot_recs __pot_whole __pot_fd; exec "$@""#
+    r#"unset -v __pot_r __pot_recs __pot_whole __pot_fd __pot_fifo __pot_socat __pot_up __pot_i __pot_l __pot_s __pot_x; exec "$@""#
 );
 
 /// What bash adds to the environment of what it execs: the last hop's `env -u` removes it (T1).
@@ -63,23 +86,31 @@ pub const BASH_ADDS: &[&str] = &["_", "SHLVL", "PWD", "OLDPWD"];
 /// What the engines add to the command's environment that pot does not plan: `env -u` removes it (S3).
 pub const ENGINE_ADDS: &[&str] = &["HOSTNAME"];
 
-/// S5: with secrets, the config's shell reads them in the run, so it must be a real file (not a link) under a path
-/// the plan binds; otherwise the gap.
-pub fn shell_gap(plan: &Plan, shell: &str, host: &dyn Host) -> Option<String> {
-    if plan.piped.is_empty() {
-        return None;
+/// S5: the programs the entry runs in the run must be real files (not links) under a path the plan binds: the
+/// config's shell with the entry script (a secret or the network), and socat with the network. Otherwise the gaps.
+pub fn program_gaps(plan: &Plan, shell: &str, host: &dyn Host) -> Vec<String> {
+    let mut want: Vec<(&str, &str)> = vec![];
+    if plan.fifo {
+        want.push((shell, "shell"));
     }
-    let real =
-        host.realpath(shell).is_some_and(|r| r == shell) && !host.is_real_dir(shell) && host.lexists(shell);
-    let bound = plan
-        .sources
-        .iter()
-        .any(|s| shell == s || shell.starts_with(&format!("{}/", s.trim_end_matches('/'))));
-    (!(real && bound)).then(|| {
-        format!(
-            "the config's shell {shell} (to hand the secret variables over, it must be a real file under a path the run binds)"
-        )
-    })
+    if let Some(s) = &plan.socat {
+        want.push((s.as_str(), "socat"));
+    }
+    want.into_iter()
+        .filter(|(p, _)| {
+            let real = host.realpath(p).is_some_and(|r| r == *p) && !host.is_real_dir(p) && host.lexists(p);
+            let bound = plan
+                .sources
+                .iter()
+                .any(|s| p == s || p.starts_with(&format!("{}/", s.trim_end_matches('/'))));
+            !(real && bound)
+        })
+        .map(|(p, what)| {
+            format!(
+                "the config's {what} {p} (the run's entry runs it: it must be a real file under a path the run binds)"
+            )
+        })
+        .collect()
 }
 
 /// podman's global options for a run: its store, its runtime state (runroot: the conmon sockets, the mount
@@ -110,6 +141,8 @@ pub struct Inputs<'a> {
     pub rundir: &'a str,
     /// The config's base closure (its file's lines).
     pub base_closure: &'a [String],
+    /// The config's programs for the network, when it names them.
+    pub net: Option<&'a NetTools>,
     pub host: &'a dyn Host,
 }
 
@@ -159,9 +192,15 @@ pub struct Plan {
     /// U2: pot's values for variables passed by name (an env item named like one): run's value when the host has
     /// the variable unset.
     pub defaults: BTreeMap<String, String>,
-    /// The variables `run` hands over its pipe (podman only), by name: the secret ones, and with them every one
-    /// passed by name.
+    /// The variables `run` hands over the named pipe, by name: with a secret or the network, every one passed by
+    /// name.
     pub piped: Vec<String>,
+    /// Whether the entry reads the named pipe (a secret or the network): `run` makes `secrets.fifo` and writes it.
+    pub fifo: bool,
+    /// With the network: socat's path, which the entry starts, and the proxy's command, which `run` starts on the host
+    /// in the run folder.
+    pub socat: Option<String>,
+    pub proxy: Option<Vec<String>>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -243,11 +282,16 @@ fn gaps(i: &Inputs) -> Vec<String> {
     let p = i.policy;
     let mut out = vec![];
     for g in &p.backend.proved {
-        if !upholds(i.engine, g) {
-            out.push(if g == "resource-limits" {
-                "resource-limits under docker (a container is not in pot's scope)".to_string()
-            } else {
-                format!("the {g} guarantee")
+        if !upholds(i.engine, i.net.is_some(), g) {
+            out.push(match g.as_str() {
+                "resource-limits" => {
+                    "resource-limits under docker (a container is not in pot's scope)".to_string()
+                }
+                "private-proxy" => {
+                    "the private-proxy guarantee (the backend's --config names no python, proxy and socat)"
+                        .to_string()
+                }
+                _ => format!("the {g} guarantee"),
             });
         }
     }
@@ -264,8 +308,11 @@ fn gaps(i: &Inputs) -> Vec<String> {
         .filter(|n| n.class == "reach")
         .map(|n| n.value.as_str())
         .collect();
-    if !net.is_empty() {
-        out.push(format!("the network through pot's proxy ({})", net.join(", ")));
+    if !net.is_empty() && i.net.is_none() {
+        out.push(format!(
+            "the network through pot's proxy ({}): the backend's --config names no python, proxy and socat",
+            net.join(", ")
+        ));
     }
     let caps: BTreeSet<&str> = p.bindings.iter().map(|b| b.capability.as_str()).collect();
     for c in caps {
@@ -294,14 +341,6 @@ fn gaps(i: &Inputs) -> Vec<String> {
             "the variable {}, which configures the container engine, as a run's variable",
             e.value
         ));
-    }
-    if i.engine == Engine::Docker {
-        for e in p.effective("env").filter(|e| e.secret == Some(true)) {
-            out.push(format!(
-                "the secret variable {} under docker (it passes no file descriptor: the value would be in the container's configuration)",
-                e.value
-            ));
-        }
     }
     for e in p.effective("env").filter(|e| crate::engine::bash_sets(&e.value)) {
         out.push(format!(
@@ -567,6 +606,21 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     for n in ["policy.json", "denials"] {
         m.bind(&rd(n), &format!("{run}/{n}"), READ, true);
     }
+    // the network: pot's proxy listens on the run folder's proxy.sock (run starts it before the engine), bound where
+    // the run's socat reaches it; the variables, with a secret or the network, over the run folder's named pipe
+    let net: Vec<String> = p
+        .effective("network")
+        .filter(|n| n.class == "reach")
+        .map(|n| n.value.clone())
+        .collect();
+    let net_tools = i.net.filter(|_| !net.is_empty());
+    let fifo = net_tools.is_some() || p.effective("env").any(|e| e.secret == Some(true));
+    if net_tools.is_some() {
+        m.bind(&rd("proxy.sock"), PROXY_SOCK, READ, true);
+    }
+    if fifo {
+        m.bind(&rd("secrets.fifo"), FIFO, READ, true);
+    }
     let hidden_txt: String = p
         .effective("hidden")
         .flat_map(|h| [h.value.as_str(), "\n"])
@@ -597,7 +651,13 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
 
     // the closure: each store path read-only (closure-store), or the whole store read-only
     let closure: Vec<String> = if p.proves("closure-store") {
-        let set: BTreeSet<&String> = l.closure.iter().chain(i.base_closure).collect();
+        let net_closure = net_tools.map(|t| t.closure.as_slice()).unwrap_or_default();
+        let set: BTreeSet<&String> = l
+            .closure
+            .iter()
+            .chain(i.base_closure)
+            .chain(net_closure)
+            .collect();
         set.into_iter().cloned().collect()
     } else {
         vec!["/nix/store".into()]
@@ -687,21 +747,12 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         })
         .collect();
     sources.extend(closure.iter().cloned());
-    let (set, mut pass, defaults) = environment(i);
-    // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration):
-    // run hands it over a pipe, fd 3 in the container (podman; docker refuses it above)
-    let secret: BTreeSet<&str> = p
-        .effective("env")
-        .filter(|e| e.secret == Some(true))
-        .map(|e| e.value.as_str())
-        .collect();
-    // S3: with secrets, every variable passed by name goes over the pipe too, and the command starts from an empty
-    // environment (env -i) with pot's values and the pipe's: the run's bash and the engine add nothing to it
-    let piped: Vec<String> = if pass.iter().any(|n| secret.contains(n.as_str())) {
-        std::mem::take(&mut pass)
-    } else {
-        vec![]
-    };
+    let (set, mut pass, defaults) = environment(i, net_tools.is_some());
+    // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration).
+    // S3: with a secret or the network, every variable passed by name goes over the named pipe, and the command
+    // starts from an empty environment (env -i) with pot's values and the pipe's: the run's bash and the engine add
+    // nothing to it
+    let piped: Vec<String> = if fifo { std::mem::take(&mut pass) } else { vec![] };
     for (k, v) in &set {
         opts.push(o(&["--env", &format!("{k}={v}")]));
     }
@@ -758,19 +809,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     };
     // podman can't take -w with --rootfs (the spike): coreutils env changes directory, then execs the command
     let mut entry = vec![];
-    if piped.is_empty() {
-        // what the engine adds to the command's environment, unless the plan sets it (S3)
-        entry.extend(["/usr/bin/env".to_string(), "-C".into(), cwd]);
-        for n in ENGINE_ADDS
-            .iter()
-            .filter(|n| !set.contains_key(**n) && !pass.iter().any(|x| x == *n))
-        {
-            entry.extend(["-u".to_string(), (*n).to_string()]);
-        }
-        entry.push("--".into());
-    } else {
-        // T1: env -i clears what the engine set; bash reads the pipe and declares the records; the last hop drops
-        // what bash adds and adds pot's values. No record is ever an argument
+    if fifo {
+        // T1: env -i clears what the engine set; bash reads the pipe, starts socat with the network, and declares the
+        // records; the last hop drops what bash adds and adds pot's values. No record is ever an argument
         entry.extend(["/usr/bin/env", "-i", "--"].map(String::from));
         entry.extend(
             [
@@ -778,9 +819,10 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 "--noprofile",
                 "--norc",
                 "-c",
-                SECRETS_SCRIPT,
-                "pot-secrets",
-                "3",
+                ENTRY_SCRIPT,
+                "pot-entry",
+                FIFO,
+                net_tools.map_or("", |t| t.socat.as_str()),
                 "/usr/bin/env",
             ]
             .map(String::from),
@@ -790,6 +832,16 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         }
         entry.extend(["-C".to_string(), cwd, "--".into()]);
         entry.extend(set.iter().map(|(k, v)| format!("{k}={v}")));
+    } else {
+        // what the engine adds to the command's environment, unless the plan sets it (S3)
+        entry.extend(["/usr/bin/env".to_string(), "-C".into(), cwd]);
+        for n in ENGINE_ADDS
+            .iter()
+            .filter(|n| !set.contains_key(**n) && !pass.iter().any(|x| x == *n))
+        {
+            entry.extend(["-u".to_string(), (*n).to_string()]);
+        }
+        entry.push("--".into());
     }
     entry.extend(l.argv.iter().cloned());
     Ok(Plan {
@@ -804,7 +856,44 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         engine_set,
         piped,
         defaults,
+        fifo,
+        socat: net_tools.map(|t| t.socat.clone()),
+        proxy: net_tools.map(|t| proxy_argv(t, &p.context, l, &rd("denials"), &net)),
     })
+}
+
+/// pot's proxy as bwrap's `run` starts it, in the run folder (its socket `proxy.sock`, relative: a run folder's
+/// path may be longer than `sun_path`'s 108 bytes), with the run's denials file, its tmux notices, the fix a denial
+/// names, and the allowlist: the effective network reach items.
+fn proxy_argv(t: &NetTools, context: &str, l: &Launch, denials: &str, allow: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = [
+        t.python.as_str(),
+        "-I",
+        "-S",
+        t.proxy.as_str(),
+        "proxy.sock",
+        "--denials",
+        denials,
+        "--context",
+        context,
+    ]
+    .map(String::from)
+    .to_vec();
+    if let (Some(tmux), Some(pane)) = (&l.host_tools.tmux, &l.pane) {
+        v.extend(["--tmux".to_string(), tmux.clone(), "--pane".into(), pane.clone()]);
+    }
+    v.extend([
+        "--fix".to_string(),
+        l.net_fix
+            .clone()
+            .unwrap_or_else(|| "the repo kit's requests.network".into()),
+    ]);
+    if l.sibling_of.as_ref().is_some_and(|s| !s.is_null()) {
+        // no one-run line: pot --net is the host's
+        v.extend(["--sibling".to_string(), "1".into()]);
+    }
+    v.extend(allow.iter().cloned());
+    v
 }
 
 /// A bind: podman's `--volume`; docker's `--mount`, since docker's `--volume` creates a missing source as root.
@@ -828,9 +917,23 @@ fn bind_opt(engine: Engine, src: &str, dest: &str, ro: bool) -> Opt {
     }
 }
 
+/// The variables bwrap's `run_env` sets to the proxy's URL in a run with the network.
+const PROXY_VARS: &[&str] = &[
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+fn is_proxy_var(n: &str) -> bool {
+    PROXY_VARS.contains(&n) || n == "NO_PROXY" || n == "no_proxy"
+}
+
 /// The run's environment: what pot sets (bwrap's `run_env`, less what this slice does not place), then the
 /// names passed from the host by name only (`--env NAME`: the engine reads the value, so no value is in argv).
-fn environment(i: &Inputs) -> (BTreeMap<String, String>, Vec<String>, BTreeMap<String, String>) {
+fn environment(i: &Inputs, net: bool) -> (BTreeMap<String, String>, Vec<String>, BTreeMap<String, String>) {
     let (p, l) = (i.policy, i.launch);
     let home = l.home.trim_end_matches('/');
     let mut path: Vec<String> = vec![];
@@ -891,6 +994,17 @@ fn environment(i: &Inputs) -> (BTreeMap<String, String>, Vec<String>, BTreeMap<S
         if !pass.contains(&n) {
             pass.push(n);
         }
+    }
+    // the network last, as bwrap's run_env: the proxy's variables beat env.set and the items (an item of the same
+    // name is not passed)
+    if net {
+        for v in PROXY_VARS {
+            env.insert((*v).to_string(), PROXY_URL.into());
+        }
+        for v in ["NO_PROXY", "no_proxy"] {
+            env.insert(v.to_string(), "localhost,127.0.0.1,::1".into());
+        }
+        pass.retain(|n| !is_proxy_var(n));
     }
     let defaults = pass
         .iter()
@@ -977,6 +1091,30 @@ mod tests {
     }
 
     fn go(p: &Policy, l: &Launch, engine: Engine, host: &dyn Host) -> Result<Plan, Vec<String>> {
+        go_with(p, l, engine, host, None)
+    }
+
+    /// The config's network programs, as a test names them.
+    fn net_tools() -> NetTools {
+        NetTools {
+            python: "/nix/store/p-python/bin/python3".into(),
+            proxy: "/nix/store/q-pot/proxy.py".into(),
+            socat: "/nix/store/s-socat/bin/socat".into(),
+            closure: vec!["/nix/store/s-socat".into(), "/nix/store/o-openssl".into()],
+        }
+    }
+
+    fn go_net(p: &Policy, l: &Launch, engine: Engine, host: &dyn Host) -> Result<Plan, Vec<String>> {
+        go_with(p, l, engine, host, Some(&net_tools()))
+    }
+
+    fn go_with(
+        p: &Policy,
+        l: &Launch,
+        engine: Engine,
+        host: &dyn Host,
+        net: Option<&NetTools>,
+    ) -> Result<Plan, Vec<String>> {
         let paths = paths();
         let base = vec![
             "/nix/store/b-bash".to_string(),
@@ -991,6 +1129,7 @@ mod tests {
             image: DOCKER_IMAGE,
             rundir: "/r",
             base_closure: &base,
+            net,
             host,
         })
     }
@@ -1005,6 +1144,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one plan, every flag it must carry
     fn read_access_binds_the_workspace_read_only_and_masks_what_is_hidden() {
         let (p, l) = run_dir("read-only");
         let host = Fake {
@@ -1051,8 +1191,8 @@ mod tests {
         // K4: nothing is bound inside a hidden folder (its socket is not masked: the whole folder is)
         assert!(!lines(&plan).iter().any(|x| x.contains("secrets/x.sock")));
         // R3: a secret variable never reaches the engine: not in argv, not as --env NAME (the engine would write
-        // its value into the container's configuration), not in the engine's environment. run hands it over a pipe
-        // the engine passes on (fd 3), and the run's bash sets it before the command starts
+        // its value into the container's configuration), not in the engine's environment. run hands it over the run
+        // folder's named pipe, bound read-only, and the run's bash sets it before the command starts
         assert!(!has(&plan, "--env NOTES_TOKEN"));
         assert!(!plan.argv().iter().any(|a| a.starts_with("NOTES_TOKEN=")));
         assert!(!plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
@@ -1061,8 +1201,11 @@ mod tests {
         assert_eq!(plan.piped, ["TERM", "COLORTERM", "NOTES_TOKEN"]);
         assert!(!has(&plan, "--env TERM"));
         // T1: env -i, then bash, then the last hop with pot's values; the records are declared in bash
+        assert!(plan.fifo && plan.socat.is_none() && plan.proxy.is_none());
+        assert!(has(&plan, "--volume /r/secrets.fifo:/run/pot/secrets.fifo:ro"));
+        assert!(!lines(&plan).iter().any(|x| x.contains("--preserve-fd")));
         assert_eq!(
-            plan.entry[..18],
+            plan.entry[..20],
             [
                 "/usr/bin/env",
                 "-i",
@@ -1071,9 +1214,10 @@ mod tests {
                 "--noprofile",
                 "--norc",
                 "-c",
-                SECRETS_SCRIPT,
-                "pot-secrets",
-                "3",
+                ENTRY_SCRIPT,
+                "pot-entry",
+                "/run/pot/secrets.fifo",
+                "",
                 "/usr/bin/env",
                 "-u",
                 "_",
@@ -1081,11 +1225,12 @@ mod tests {
                 "SHLVL",
                 "-u",
                 "PWD",
-                "-u"
+                "-u",
+                "OLDPWD"
             ]
         );
-        assert_eq!(plan.entry[18..22], ["OLDPWD", "-C", "/home/u/src/notes", "--"]);
-        let last = &plan.entry[22..];
+        assert_eq!(plan.entry[20..23], ["-C", "/home/u/src/notes", "--"]);
+        let last = &plan.entry[23..];
         assert!(last.contains(&"NOTES_CACHE=/home/u/.cache/notes".to_string()));
         assert!(
             last.contains(&"PS1=(pot:review) \\w \\$ ".to_string()),
@@ -1170,11 +1315,19 @@ mod tests {
         let gaps = go(&p, &l, Engine::Docker, &nothing()).unwrap_err();
         assert_eq!(
             gaps,
-            [
-                "resource-limits under docker (a container is not in pot's scope)",
-                "the secret variable NOTES_TOKEN under docker (it passes no file descriptor: the value would be in the container's configuration)"
-            ]
+            ["resource-limits under docker (a container is not in pot's scope)"]
         );
+        // a secret under docker, as under podman: the named pipe, never --env NAME
+        let (mut p, l) = run_dir("read-only");
+        p.backend.proved.retain(|g| g != "resource-limits");
+        let plan = go(&p, &l, Engine::Docker, &nothing()).unwrap();
+        assert!(plan.fifo && plan.piped.contains(&"NOTES_TOKEN".to_string()));
+        assert!(has(
+            &plan,
+            "--mount type=bind,source=/r/secrets.fifo,target=/run/pot/secrets.fifo,readonly"
+        ));
+        assert!(!has(&plan, "--env NOTES_TOKEN") && !plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
+        assert_eq!(plan.entry[..2], ["/usr/bin/env", "-i"]);
     }
 
     #[test]
@@ -1222,7 +1375,6 @@ mod tests {
                 "dispatch-clone",
                 &[
                     "clone mode (the clone at its original path, its pins, the staging fetch)",
-                    "the network through pot's proxy (nothing.invalid:1, nothing.invalid:2)",
                     "sibling children (the run's children broker)",
                 ],
             ),
@@ -1230,7 +1382,6 @@ mod tests {
                 "git-fetch",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the network through pot's proxy (nothing.invalid:1)",
                     "the git.fetch binding",
                 ],
             ),
@@ -1239,7 +1390,6 @@ mod tests {
                 "nix",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the network through pot's proxy (inline.example:443, nothing.invalid:1)",
                     "the nix binding",
                 ],
             ),
@@ -1247,7 +1397,6 @@ mod tests {
                 "pi-agent",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the network through pot's proxy (api.pi-test.example:443, lan.pi-test.example:11434)",
                     "the credential binding",
                     "the status.relay binding",
                     "dir ~/.pi/agent/extensions (a folder of links)",
@@ -1262,22 +1411,14 @@ mod tests {
                 "seatbelt",
                 &[
                     "clone mode (the clone at its original path, its pins, the staging fetch)",
-                    "the network through pot's proxy (api.x:443)",
                     "sibling children (the run's children broker)",
                 ],
             ),
-            (
-                "sibling",
-                &[
-                    "the network through pot's proxy (nothing.invalid:1)",
-                    "sibling children (the run's children broker)",
-                ],
-            ),
+            ("sibling", &["sibling children (the run's children broker)"]),
             (
                 "work-bindings",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the network through pot's proxy (nothing.invalid:1, mcp.example:443)",
                     "the credential binding",
                     "the mcp binding",
                     "the status.relay binding",
@@ -1288,7 +1429,6 @@ mod tests {
                 "work-siblings",
                 &[
                     "write access (the workspace's pins: git directories, hooks, protected paths)",
-                    "the network through pot's proxy (nothing.invalid:1, nothing.invalid:2, nothing.invalid:3)",
                     "sibling children (the run's children broker)",
                 ],
             ),
@@ -1303,7 +1443,7 @@ mod tests {
                 .filter(|g| had_store || **g != "closure-store")
                 .map(|g| (*g).to_string())
                 .collect();
-            let got = go(&p, &l, Engine::Podman, &nothing()).unwrap_err();
+            let got = go_net(&p, &l, Engine::Podman, &nothing()).unwrap_err();
             assert_eq!(&got, want, "{name}");
         }
     }
@@ -1588,14 +1728,23 @@ mod tests {
         for w in plan.argv() {
             assert!(!plan.piped.iter().any(|n| w.starts_with(&format!("{n}="))), "{w}");
         }
-        let execs: Vec<&str> = SECRETS_SCRIPT
+        let execs: Vec<&str> = ENTRY_SCRIPT
             .match_indices("exec ")
-            .map(|(i, _)| &SECRETS_SCRIPT[i..])
+            .map(|(i, _)| &ENTRY_SCRIPT[i..])
             .collect();
-        assert_eq!(execs.len(), 2, "{SECRETS_SCRIPT}");
-        assert!(execs[0].starts_with("exec {__pot_fd}<&-;"), "{}", execs[0]);
-        assert_eq!(execs[1], r#"exec "$@""#);
-        assert!(!SECRETS_SCRIPT.contains("recs[@]}\" \"$@"));
+        assert_eq!(execs.len(), 3, "{ENTRY_SCRIPT}");
+        assert!(
+            execs[0].starts_with("exec {__pot_fd}<>\"$__pot_fifo\""),
+            "{}",
+            execs[0]
+        );
+        assert!(execs[1].starts_with("exec {__pot_fd}<&-;"), "{}", execs[1]);
+        assert_eq!(execs[2], r#"exec "$@""#);
+        assert!(!ENTRY_SCRIPT.contains("recs[@]}\" \"$@"));
+        // socat starts before any record is declared, so its environment holds none
+        assert!(
+            ENTRY_SCRIPT.find("\"$__pot_socat\" -lf").unwrap() < ENTRY_SCRIPT.find("declare -x").unwrap()
+        );
     }
 
     /// U2: as bwrap's `run_env`, an env item comes last: named like one of pot's values (fixed or env.set), it is
@@ -1660,28 +1809,187 @@ mod tests {
         }
     }
 
-    /// S5: with secrets the run's bash reads them, so it must be a real file under a path the plan binds.
+    /// S5: the entry's programs (bash with a secret or the network, socat with the network) must be real files
+    /// under a path the plan binds.
     #[test]
-    fn the_shell_for_secrets_is_a_real_file_the_run_sees() {
+    fn the_entrys_programs_are_real_files_the_run_sees() {
         let (p, l) = run_dir("read-only");
         let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
         let bash = "/nix/store/b-bash/bin/bash";
         let mut host = nothing();
         host.files = vec![bash, "/opt/bash"];
-        assert_eq!(shell_gap(&plan, bash, &host), None);
-        let gap = |s: &str| {
-            Some(format!(
-                "the config's shell {s} (to hand the secret variables over, it must be a real file under a path the run binds)"
-            ))
+        assert_eq!(program_gaps(&plan, bash, &host), Vec::<String>::new());
+        let gap = |what: &str, s: &str| {
+            vec![format!(
+                "the config's {what} {s} (the run's entry runs it: it must be a real file under a path the run binds)"
+            )]
         };
-        assert_eq!(shell_gap(&plan, "/opt/bash", &host), gap("/opt/bash"));
-        assert_eq!(shell_gap(&plan, bash, &nothing()), gap(bash));
+        assert_eq!(program_gaps(&plan, "/opt/bash", &host), gap("shell", "/opt/bash"));
+        assert_eq!(program_gaps(&plan, bash, &nothing()), gap("shell", bash));
         host.links = vec![(bash, "/opt/bash")];
-        assert_eq!(shell_gap(&plan, bash, &host), gap(bash));
-        // no secrets: no shell needed
+        assert_eq!(program_gaps(&plan, bash, &host), gap("shell", bash));
+        // no secret and no network: no program needed
         let (p, l) = run_dir("access-none");
         let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
-        assert_eq!(shell_gap(&plan, "/opt/bash", &nothing()), None);
+        assert_eq!(program_gaps(&plan, "/opt/bash", &nothing()), Vec::<String>::new());
+        // the network: bash and socat, socat under the net closure
+        let mut p = p;
+        p.items.push(net_item("example.com:443"));
+        let plan = go_net(&p, &l, Engine::Podman, &nothing()).unwrap();
+        let mut host = nothing();
+        host.files = vec![bash];
+        assert_eq!(
+            program_gaps(&plan, bash, &host),
+            gap("socat", "/nix/store/s-socat/bin/socat")
+        );
+        host.files.push("/nix/store/s-socat/bin/socat");
+        assert_eq!(program_gaps(&plan, bash, &host), Vec::<String>::new());
+    }
+
+    fn net_item(v: &str) -> crate::policy::Item {
+        let it = serde_json::json!({ "kind": "network", "value": v, "class": "reach",
+            "sources": [ { "flag": "--net" } ], "effective": true, "request": format!("network {v}"),
+            "requestClass": "ordinary" });
+        serde_json::from_value(it).unwrap()
+    }
+
+    /// The network: carried out under either engine. The container keeps `--network none`; the run folder's
+    /// proxy.sock is bound at /run/pot/proxy.sock, socat's closure is bound, the entry starts socat, the proxy's
+    /// variables are bwrap's, and the proxy's command is bwrap's (relative socket, the run's denials, the allowlist).
+    #[test]
+    fn the_network_is_pots_proxy_over_the_run_folders_socket() {
+        let (mut p, mut l) = run_dir("access-none");
+        p.items.push(net_item("example.com:443"));
+        p.items.push(net_item("*.example.net:8443"));
+        p.backend.proved.push("private-proxy".into());
+        l.net_fix = Some("the repo kit's requests.network".into());
+        for engine in [Engine::Podman, Engine::Docker] {
+            let plan = go_net(&p, &l, engine, &nothing()).unwrap();
+            assert!(has(&plan, "--network none"));
+            let bind = |src: &str, dest: &str| match engine {
+                Engine::Podman => format!("--volume {src}:{dest}:ro"),
+                Engine::Docker => format!("--mount type=bind,source={src},target={dest},readonly"),
+            };
+            assert!(
+                has(&plan, &bind("/r/proxy.sock", "/run/pot/proxy.sock")),
+                "{:#?}",
+                lines(&plan)
+            );
+            assert!(has(&plan, &bind("/r/secrets.fifo", "/run/pot/secrets.fifo")));
+            assert!(has(&plan, &bind("/nix/store/s-socat", "/nix/store/s-socat")));
+            assert!(has(&plan, &bind("/nix/store/o-openssl", "/nix/store/o-openssl")));
+            for v in [
+                "HTTPS_PROXY",
+                "https_proxy",
+                "HTTP_PROXY",
+                "http_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+            ] {
+                assert!(has(&plan, &format!("--env {v}=http://127.0.0.1:3128")), "{v}");
+            }
+            assert!(has(&plan, "--env NO_PROXY=localhost,127.0.0.1,::1"));
+            assert!(has(&plan, "--env no_proxy=localhost,127.0.0.1,::1"));
+            // every variable passed by name goes over the named pipe; the entry starts socat
+            assert!(plan.fifo && plan.piped.contains(&"NOTES_TOKEN".to_string()));
+            assert_eq!(plan.socat.as_deref(), Some("/nix/store/s-socat/bin/socat"));
+            assert_eq!(
+                plan.entry[8..11],
+                [
+                    "pot-entry",
+                    "/run/pot/secrets.fifo",
+                    "/nix/store/s-socat/bin/socat"
+                ]
+            );
+            assert_eq!(
+                plan.proxy.as_deref().unwrap(),
+                [
+                    "/nix/store/p-python/bin/python3",
+                    "-I",
+                    "-S",
+                    "/nix/store/q-pot/proxy.py",
+                    "proxy.sock",
+                    "--denials",
+                    "/r/denials",
+                    "--context",
+                    "review",
+                    "--fix",
+                    "the repo kit's requests.network",
+                    "example.com:443",
+                    "*.example.net:8443"
+                ]
+            );
+        }
+        // tmux notices and a sibling's proxy, as bwrap starts them
+        l.pane = Some("%3".into());
+        l.host_tools.tmux = Some("/nix/store/t-tmux/bin/tmux".into());
+        l.sibling_of = Some(serde_json::json!("7f3a"));
+        let proxy = go_net(&p, &l, Engine::Podman, &nothing()).unwrap().proxy.unwrap();
+        assert_eq!(
+            proxy[9..17],
+            [
+                "--tmux",
+                "/nix/store/t-tmux/bin/tmux",
+                "--pane",
+                "%3",
+                "--fix",
+                "the repo kit's requests.network",
+                "--sibling",
+                "1"
+            ]
+        );
+        // no network item: no proxy, no socat, no socket
+        let (p, l) = run_dir("access-none");
+        let plan = go_net(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(plan.proxy.is_none() && plan.socat.is_none() && !plan.fifo);
+        assert!(
+            !lines(&plan)
+                .iter()
+                .any(|x| x.contains("proxy.sock") || x.contains("s-socat"))
+        );
+    }
+
+    /// bwrap's `run_env` sets the proxy's variables last: they beat `env.set` and an item of the same name.
+    #[test]
+    fn the_proxys_variables_beat_env_set_and_items() {
+        let (mut p, l) = run_dir("access-none");
+        p.items.push(net_item("example.com:443"));
+        for it in p.items.iter_mut().filter(|i| i.kind == "env") {
+            it.value = "HTTPS_PROXY".into();
+        }
+        for it in p.items.iter_mut().filter(|i| i.kind == "env.set") {
+            it.value = "NO_PROXY=everything".into();
+        }
+        let plan = go_net(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(!plan.piped.iter().any(|n| n == "HTTPS_PROXY") && !plan.defaults.contains_key("HTTPS_PROXY"));
+        assert!(has(&plan, "--env HTTPS_PROXY=http://127.0.0.1:3128"));
+        assert!(has(&plan, "--env NO_PROXY=localhost,127.0.0.1,::1"));
+        assert!(!has(&plan, "--env NO_PROXY=everything"));
+        // without the network, the item is passed as any other
+        let (mut p, l) = run_dir("access-none");
+        for it in p.items.iter_mut().filter(|i| i.kind == "env") {
+            it.value = "HTTPS_PROXY".into();
+        }
+        assert!(has(
+            &go_net(&p, &l, Engine::Podman, &nothing()).unwrap(),
+            "--env HTTPS_PROXY"
+        ));
+    }
+
+    /// Without the config's network programs, the network and private-proxy are refused, never dropped.
+    #[test]
+    fn the_network_without_the_configs_programs_is_refused() {
+        let (mut p, l) = run_dir("access-none");
+        p.items.push(net_item("example.com:443"));
+        p.backend.proved.push("private-proxy".into());
+        assert_eq!(
+            go(&p, &l, Engine::Podman, &nothing()).unwrap_err(),
+            [
+                "the private-proxy guarantee (the backend's --config names no python, proxy and socat)",
+                "the network through pot's proxy (example.com:443): the backend's --config names no python, proxy and socat"
+            ]
+        );
+        assert!(go_net(&p, &l, Engine::Docker, &nothing()).is_ok());
     }
 
     /// F2: the engine reads only pot's configuration: podman a containers.conf of the run's own (no default mounts,

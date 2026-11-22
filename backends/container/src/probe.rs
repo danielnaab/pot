@@ -43,7 +43,9 @@ fn version_of(s: &str) -> Option<(u32, u32)> {
 }
 
 /// The guarantees, or why the engine can't run pot's runs here.
-pub fn assess(engine: Engine, f: &Facts) -> Result<Vec<&'static str>, String> {
+/// NET: the config names the network's programs (python, proxy.py and socat), so a run's network is pot's proxy on a
+/// socket in the run folder, served in the container's own network namespace: private-proxy.
+pub fn assess(engine: Engine, f: &Facts, net: bool) -> Result<Vec<&'static str>, String> {
     let name = engine.name();
     let v = f.version.as_ref().map_err(|e| format!("{name}: {e}"))?;
     let min = if engine == Engine::Podman {
@@ -72,6 +74,9 @@ pub fn assess(engine: Engine, f: &Facts) -> Result<Vec<&'static str>, String> {
         return Err(format!("{name} has no seccomp filter here"));
     }
     let mut g = GUARANTEES.to_vec();
+    if net {
+        g.push("private-proxy");
+    }
     // resource-limits only under podman, whose --cgroups=split keeps the container in pot's scope; prepare
     // refuses it under docker, so docker never claims it
     if engine == Engine::Podman
@@ -204,14 +209,18 @@ mod tests {
 
     #[test]
     fn rootless_podman_proves_the_slice_and_limits_with_controllers() {
-        let g = assess(Engine::Podman, &ok_podman()).unwrap();
+        let g = assess(Engine::Podman, &ok_podman(), false).unwrap();
         assert_eq!(g.last(), Some(&"resource-limits"));
         assert!(g.contains(&"closure-store") && g.contains(&"own-netns"));
         let f = Facts {
             controllers: vec!["cpu".into()],
             ..ok_podman()
         };
-        assert!(!assess(Engine::Podman, &f).unwrap().contains(&"resource-limits"));
+        assert!(
+            !assess(Engine::Podman, &f, false)
+                .unwrap()
+                .contains(&"resource-limits")
+        );
     }
 
     #[test]
@@ -222,6 +231,7 @@ mod tests {
                 rootless: false,
                 ..ok_podman()
             },
+            false,
         )
         .unwrap_err();
         assert!(e.contains("rootless podman only"), "{e}");
@@ -231,6 +241,7 @@ mod tests {
                 no_new_privs: true,
                 ..ok_podman()
             },
+            false,
         )
         .unwrap_err();
         assert!(e.contains("NoNewPrivileges"), "{e}");
@@ -240,6 +251,7 @@ mod tests {
                 version: Ok("4.3.1".into()),
                 ..ok_podman()
             },
+            false,
         )
         .unwrap_err();
         assert_eq!(e, "podman 4.3.1 is older than 4.4");
@@ -249,6 +261,7 @@ mod tests {
                 seccomp: false,
                 ..ok_podman()
             },
+            false,
         )
         .unwrap_err();
         assert_eq!(e, "podman has no seccomp filter here");
@@ -258,6 +271,7 @@ mod tests {
                 version: Err("can't run podman: not found".into()),
                 ..ok_podman()
             },
+            false,
         );
         assert_eq!(e.unwrap_err(), "podman: can't run podman: not found");
     }
@@ -270,7 +284,7 @@ mod tests {
             no_new_privs: true,
             ..ok_podman()
         };
-        assert!(assess(Engine::Docker, &f).is_ok());
+        assert!(assess(Engine::Docker, &f, false).is_ok());
         assert_eq!(version_of("v28.0.4"), Some((28, 0)));
         assert_eq!(version_of("4.9.3-dev"), Some((4, 9)));
     }
@@ -290,6 +304,19 @@ mod tests {
         assert!(!docker_seccomp("not json"));
     }
 
+    /// private-proxy only when the config names the network's programs, under either engine.
+    #[test]
+    fn private_proxy_needs_the_networks_programs() {
+        let docker = Facts {
+            version: Ok("27.5.1".into()),
+            ..ok_podman()
+        };
+        for (e, f) in [(Engine::Podman, ok_podman()), (Engine::Docker, docker)] {
+            assert!(!assess(e, &f, false).unwrap().contains(&"private-proxy"));
+            assert!(assess(e, &f, true).unwrap().contains(&"private-proxy"));
+        }
+    }
+
     /// F8: docker never lists resource-limits, which prepare refuses under docker.
     #[test]
     fn docker_never_lists_resource_limits() {
@@ -297,6 +324,10 @@ mod tests {
             version: Ok("27.5.1".into()),
             ..ok_podman()
         };
-        assert!(!assess(Engine::Docker, &f).unwrap().contains(&"resource-limits"));
+        assert!(
+            !assess(Engine::Docker, &f, false)
+                .unwrap()
+                .contains(&"resource-limits")
+        );
     }
 }

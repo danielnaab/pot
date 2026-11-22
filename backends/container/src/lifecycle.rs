@@ -12,28 +12,13 @@ use crate::render::{Engine, podman_globals};
 /// image has exactly this one layer.
 pub const EMPTY_LAYER: &str = "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef";
 
-/// The engine's command with the options `run` adds after `run`: `--tty` when stdin is a terminal (the engine then
-/// relays through a pty of its own, never the host's terminal), and `--preserve-fd FD` for the pipe that carries the
-/// secret variables (fd 3 in the container).
-pub fn run_argv(argv: &[String], tty: bool, fd: Option<i32>) -> Vec<String> {
+/// The engine's command with the option `run` adds after `run`: `--tty` when stdin is a terminal (the engine then
+/// relays through a pty of its own, never the host's terminal). No fd of the caller's reaches the container: the
+/// variables go over a named pipe the plan binds.
+pub fn run_argv(argv: &[String], tty: bool) -> Vec<String> {
     let mut v = argv.to_vec();
-    if let Some(i) = v.iter().position(|a| a == "run") {
-        let mut add: Vec<String> = vec![];
-        if tty {
-            add.push("--tty".into());
-        }
-        if let Some(fd) = fd {
-            add.extend(["--preserve-fd".to_string(), fd.to_string()]);
-        }
-        for a in add.into_iter().rev() {
-            v.insert(i + 1, a);
-        }
-    }
-    // S1: the script reads the fd it is given after `pot-secrets`: the pipe's own number, which --preserve-fd keeps
-    if let (Some(fd), Some(i)) = (fd, v.iter().position(|a| a == "pot-secrets")) {
-        if let Some(slot) = v.get_mut(i + 1) {
-            *slot = fd.to_string();
-        }
+    if let (true, Some(i)) = (tty, v.iter().position(|a| a == "run")) {
+        v.insert(i + 1, "--tty".into());
     }
     v
 }
@@ -162,18 +147,62 @@ pub fn secret_records(names: &[String], get: impl Fn(&str) -> Option<std::ffi::O
 /// The `after` event for what this backend carries out, in place with read access or none: nothing the run can
 /// leave (bwrap's event, empty: no commits, no host-run files, no sealed leftovers, no proxy). Clone mode and write
 /// access are refused, as `prepare` refuses them.
-pub fn after_event(p: &Policy, l: &Launch) -> Result<serde_json::Value, String> {
+pub fn after_event(p: &Policy, l: &Launch, proxy_log: &str) -> Result<serde_json::Value, String> {
     if p.mode == "clone" {
         return Err("clone mode is not in this slice".into());
     }
     if p.access == "write" {
         return Err("write access is not in this slice".into());
     }
+    let (denials, loopback) = proxy_refusals(proxy_log);
     Ok(
         serde_json::json!({ "ev": "after", "by": "host", "commits": [], "unsigned": 0, "touches_host_run": [],
-        "repo_kit_change": [], "root_repo_change": false, "new_git_metadata": [], "denials": [], "loopback": [],
-        "agent_config": [], "signs": l.host_signs, "sealed_left": [] }),
+        "repo_kit_change": [], "root_repo_change": false, "new_git_metadata": [], "denials": denials,
+        "loopback": loopback, "agent_config": [], "signs": l.host_signs, "sealed_left": [] }),
     )
+}
+
+/// What the proxy refused, from its log (bwrap's `after`): each `DENY host:port` (or `DENY (malformed)`) counted, and
+/// each `LOOPBACK host:port address` (a host that resolved to the host's own loopback), sorted. Run-chosen text is
+/// made safe for a terminal.
+pub fn proxy_refusals(log: &str) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    use std::collections::BTreeMap;
+    let mut denied: BTreeMap<String, u64> = BTreeMap::new();
+    let mut local: BTreeMap<(String, String), u64> = BTreeMap::new();
+    for line in log.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts.first() {
+            Some(&"DENY") => *denied.entry(parts[1..].join(" ")).or_default() += 1,
+            Some(&"LOOPBACK") if parts.len() == 3 => {
+                *local
+                    .entry((parts[1].to_string(), parts[2].to_string()))
+                    .or_default() += 1;
+            }
+            _ => {}
+        }
+    }
+    (
+        denied
+            .into_iter()
+            .map(|(h, n)| serde_json::json!({ "host": crate::visible(&h), "count": n }))
+            .collect(),
+        local
+            .into_iter()
+            .map(|((h, a), n)| serde_json::json!({ "host": crate::visible(&h), "address": crate::visible(&a), "count": n }))
+            .collect(),
+    )
+}
+
+/// Whether CMDLINE is pot's proxy for this run: started in the run folder with its socket `proxy.sock` and the run's
+/// own `--denials RUNDIR/denials` (main.rs checks its working folder too).
+pub fn names_proxy(cmdline: &[u8], rundir: &str) -> bool {
+    let r = rundir.trim_end_matches('/');
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    let denials = format!("{r}/denials");
+    args.iter().any(|a| *a == b"proxy.sock")
+        && args
+            .windows(2)
+            .any(|w| w[0] == b"--denials" && w[1] == denials.as_bytes())
 }
 
 /// The names the configured engine program runs under: its own name, its real file's, and nix's wrapped name
@@ -236,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn tty_and_the_secrets_fd_go_after_run() {
+    fn tty_goes_after_run_and_no_fd_is_passed() {
         let argv = s(&[
             "podman",
             "--root",
@@ -247,7 +276,7 @@ mod tests {
             "run",
         ]);
         assert_eq!(
-            run_argv(&argv, true, None),
+            run_argv(&argv, true),
             s(&[
                 "podman",
                 "--root",
@@ -258,23 +287,47 @@ mod tests {
                 "/usr/bin/env",
                 "run"
             ])
+        );
+        assert_eq!(run_argv(&argv, false), argv);
+        assert!(!run_argv(&argv, true).iter().any(|a| a == "--preserve-fd"));
+    }
+
+    /// bwrap's after: DENY lines counted per host:port, LOOPBACK lines per host and address; other lines ignored;
+    /// run-chosen text made safe for a terminal.
+    #[test]
+    fn the_proxy_log_gives_denials_and_loopback() {
+        let log = "ALLOW example.com:443\nDENY example.org:443\nDENY example.org:443\nDENY (malformed)\n\
+                   LOOPBACK localhost:8080 127.0.0.1\nLOOPBACK localhost:8080 127.0.0.1\nNOTOKEN\nDENY a\u{1b}b:1\n";
+        let (d, l) = proxy_refusals(log);
+        assert_eq!(
+            d,
+            [
+                serde_json::json!({ "host": "(malformed)", "count": 1 }),
+                serde_json::json!({ "host": "a\\x1bb:1", "count": 1 }),
+                serde_json::json!({ "host": "example.org:443", "count": 2 }),
+            ]
         );
         assert_eq!(
-            run_argv(&argv, true, Some(7)),
-            s(&[
-                "podman",
-                "--root",
-                "/r/run",
-                "run",
-                "--tty",
-                "--preserve-fd",
-                "7",
-                "--interactive",
-                "/usr/bin/env",
-                "run"
-            ])
+            l,
+            [serde_json::json!({ "host": "localhost:8080", "address": "127.0.0.1", "count": 2 })]
         );
-        assert_eq!(run_argv(&argv, false, None), argv);
+        assert_eq!(proxy_refusals(""), (vec![], vec![]));
+    }
+
+    #[test]
+    fn the_runs_proxy_is_known_by_its_socket_and_denials() {
+        let c = b"/nix/store/p/bin/python3\0-I\0-S\0/x/proxy.py\0proxy.sock\0--denials\0/s/runs/abc/denials\0--context\0w\0";
+        assert!(names_proxy(c, "/s/runs/abc"));
+        assert!(names_proxy(c, "/s/runs/abc/"));
+        assert!(!names_proxy(c, "/s/runs/ab"));
+        assert!(!names_proxy(
+            b"tail\0-f\0/s/runs/abc/denials\0proxy.sock\0",
+            "/s/runs/abc"
+        ));
+        assert!(!names_proxy(
+            b"python3\0proxy.py\0x.sock\0--denials\0/s/runs/abc/denials\0",
+            "/s/runs/abc"
+        ));
     }
 
     #[test]
@@ -444,7 +497,7 @@ mod tests {
     #[test]
     fn after_is_bwraps_empty_event_and_refuses_what_prepare_refuses() {
         let (p, mut l) = fixture("read-only");
-        let ev = after_event(&p, &l).unwrap();
+        let ev = after_event(&p, &l, "").unwrap();
         assert_eq!(
             ev,
             serde_json::json!({ "ev": "after", "by": "host", "commits": [], "unsigned": 0, "touches_host_run": [],
@@ -452,17 +505,26 @@ mod tests {
                 "agent_config": [], "signs": false, "sealed_left": [] })
         );
         l.host_signs = true;
-        assert_eq!(after_event(&p, &l).unwrap()["signs"], true);
+        assert_eq!(after_event(&p, &l, "").unwrap()["signs"], true);
+        let ev = after_event(&p, &l, "DENY example.org:443\nLOOPBACK localhost:1 ::1\n").unwrap();
+        assert_eq!(
+            ev["denials"],
+            serde_json::json!([{ "host": "example.org:443", "count": 1 }])
+        );
+        assert_eq!(
+            ev["loopback"],
+            serde_json::json!([{ "host": "localhost:1", "address": "::1", "count": 1 }])
+        );
         let (p, l) = fixture("access-none");
-        assert!(after_event(&p, &l).is_ok());
+        assert!(after_event(&p, &l, "").is_ok());
         let (mut p, l) = fixture("write");
         assert_eq!(
-            after_event(&p, &l).unwrap_err(),
+            after_event(&p, &l, "").unwrap_err(),
             "write access is not in this slice"
         );
         p.mode = "clone".into();
         assert_eq!(
-            after_event(&p, &l).unwrap_err(),
+            after_event(&p, &l, "").unwrap_err(),
             "clone mode is not in this slice"
         );
     }

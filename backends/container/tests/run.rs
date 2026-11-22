@@ -20,12 +20,33 @@ fn id(field: &str) -> u64 {
 }
 
 fn which(name: &str) -> PathBuf {
-    let path = std::env::var_os("PATH").unwrap();
+    find(name).unwrap_or_else(|| panic!("{name} is not on PATH"))
+}
+
+/// NAME on PATH, as its real path; None when it is not there (the flake's sandbox has no socat or python).
+fn find(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
     let found = std::env::split_paths(&path)
         .map(|d| d.join(name))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| panic!("{name} is not on PATH"));
-    fs::canonicalize(found).unwrap()
+        .find(|p| p.is_file())?;
+    fs::canonicalize(found).ok()
+}
+
+/// The store paths P needs (`nix-store -qR`), when nix-store is there.
+fn closure_of(paths: &[&Path]) -> Vec<u8> {
+    Command::new("nix-store")
+        .arg("-qR")
+        .args(paths)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+        .unwrap_or_default()
+}
+
+/// pot's proxy, the repository's.
+fn proxy_py() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/proxy.py")
 }
 
 /// The coreutils program NAME, as a store path the run sees (its closure is bound).
@@ -79,8 +100,17 @@ fn world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, Pa
     };
     fs::write(store.join("base.txt"), &closure).unwrap();
     let s = |f: &str| store.join(f).display().to_string();
-    let config = serde_json::json!({ "engine": engine, engine: program, "sh": sh, "shell": sh, "env": env,
+    let mut config = serde_json::json!({ "engine": engine, engine: program, "sh": sh, "shell": sh, "env": env,
         "cacert": s("ca.crt"), "terminfo": s("terminfo"), "tzdir": s("zoneinfo"), "baseClosure": s("base.txt") });
+    // the network's programs, where they are (not in the flake's sandbox): the host's python runs pot's proxy, socat
+    // serves it in the run
+    if let (Some(python), Some(socat)) = (find("python3"), find("socat")) {
+        fs::write(store.join("net.txt"), closure_of(&[&socat])).unwrap();
+        config["python"] = python.display().to_string().into();
+        config["proxy"] = fs::canonicalize(proxy_py()).unwrap().display().to_string().into();
+        config["socat"] = socat.display().to_string().into();
+        config["netClosure"] = s("net.txt").into();
+    }
     fs::write(top.join("config.json"), config.to_string()).unwrap();
     let docs =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/reference/container/prepare.in/read-only");
@@ -99,14 +129,6 @@ fn world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, Pa
         .cloned()
         .collect();
     p["items"] = items.into();
-    // docker can't be handed a secret (R3): its runs pass the variable by name, as a plain one
-    if engine == "docker" {
-        for it in p["items"].as_array_mut().unwrap() {
-            if it["kind"] == "env" {
-                it["secret"] = false.into();
-            }
-        }
-    }
     // the test is not in pot's systemd scope
     let proved: Vec<serde_json::Value> = p["backend"]["proved"]
         .as_array()
@@ -921,7 +943,18 @@ fn the_secrets_script_refuses_an_incomplete_stream() {
         .map(|w| String::from_utf8_lossy(w).into_owned())
         .collect();
     let at = words.iter().position(|w| w == "--noprofile").unwrap() - 1;
-    let entry = &words[at..];
+    let f = top.join("stream");
+    // the stream is the file the entry is given in place of the run's named pipe
+    let entry: Vec<String> = words[at..]
+        .iter()
+        .map(|w| {
+            if w == "/run/pot/secrets.fifo" {
+                f.display().to_string()
+            } else {
+                w.clone()
+            }
+        })
+        .collect();
     for (name, stream, ran) in [
         ("complete", &b"NOTES_TOKEN=v\0.\0"[..], true),
         ("no sentinel", &b"NOTES_TOKEN=v\0"[..], false),
@@ -929,13 +962,9 @@ fn the_secrets_script_refuses_an_incomplete_stream() {
         ("empty", &b""[..], false),
         ("not a record", &b"NOTES_TOKEN\0.\0"[..], false),
     ] {
-        let f = top.join("stream");
         fs::write(&f, stream).unwrap();
-        let out = Command::new("sh")
-            .arg("-c")
-            .arg(r#"exec 3<"$0"; exec "$@""#)
-            .arg(&f)
-            .args(entry)
+        let out = Command::new(&entry[0])
+            .args(&entry[1..])
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -1107,7 +1136,7 @@ fn podman_no_value_is_ever_in_an_argument() {
                 }
                 // the run's bash: watched closely until it has exec'd the command (the audit's catch.py)
                 let words: Vec<&[u8]> = c.split(|b| *b == 0).collect();
-                if words.get(1) == Some(&&b"--noprofile"[..]) && words.contains(&&b"pot-secrets"[..]) {
+                if words.get(1) == Some(&&b"--noprofile"[..]) && words.contains(&&b"pot-entry"[..]) {
                     loop {
                         scans += 1;
                         let Ok(c) = fs::read(e.path().join("cmdline")) else {
@@ -1119,8 +1148,7 @@ fn podman_no_value_is_ever_in_an_argument() {
                         }
                         // gone (a zombie's is empty), or the command itself
                         if c.is_empty()
-                            || (!c.windows(11).any(|w| w == b"pot-secrets")
-                                && !c.starts_with(b"/usr/bin/env"))
+                            || (!c.windows(9).any(|w| w == b"pot-entry") && !c.starts_with(b"/usr/bin/env"))
                         {
                             break;
                         }
@@ -1174,23 +1202,18 @@ fn no_exec_in_the_entry_is_given_a_value() {
     )
     .unwrap();
     Command::new("chmod").arg("755").arg(&rec).status().unwrap();
+    let stream = top.join("stream");
     let entry: Vec<String> = words[at..]
         .iter()
-        .map(|w| {
-            if w == "/usr/bin/env" {
-                rec.display().to_string()
-            } else {
-                w.clone()
-            }
+        .map(|w| match w.as_str() {
+            "/usr/bin/env" => rec.display().to_string(),
+            "/run/pot/secrets.fifo" => stream.display().to_string(),
+            _ => w.clone(),
         })
         .collect();
-    let stream = top.join("stream");
     fs::write(&stream, b"NOTES_TOKEN=t1-value\0.\0").unwrap();
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(r#"exec 3<"$0"; exec "$@""#)
-        .arg(&stream)
-        .args(&entry)
+    let out = Command::new(&entry[0])
+        .args(&entry[1..])
         .env_clear()
         .stdin(Stdio::null())
         .output()
@@ -1493,4 +1516,567 @@ fn docker_an_item_set_on_the_host_wins_over_pots_value() {
         );
         ok(&verb(&top, &run, "cleanup").output().unwrap());
     }
+}
+
+// ---------------------------------------------------------------- the named pipe under both engines, and the network
+
+/// The engine program a test runs under ENGINE, or None (the variable unset: no container started).
+fn engine_program(engine: &str) -> Option<String> {
+    let var = if engine == "podman" {
+        "POT_TEST_PODMAN"
+    } else {
+        "POT_TEST_DOCKER"
+    };
+    let p = std::env::var(var).ok();
+    if p.is_none() {
+        eprintln!("{var} is not set: no {engine} container started");
+    }
+    p
+}
+
+/// The words of `container.argv`.
+fn argv_words(run: &Path) -> Vec<String> {
+    let argv = fs::read(run.join("container.argv")).unwrap();
+    argv.strip_suffix(&[0])
+        .unwrap()
+        .split(|b| *b == 0)
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect()
+}
+
+/// Whether any file under DIR (never through a link) holds NEEDLE; the files that do.
+fn files_holding(dir: &Path, needle: &str) -> Vec<String> {
+    let mut found = vec![];
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let Ok(entries) = fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let Ok(m) = e.path().symlink_metadata() else {
+                continue;
+            };
+            if m.is_dir() {
+                todo.push(e.path());
+            } else if m.is_file()
+                && fs::read(e.path()).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+            {
+                found.push(e.path().display().to_string());
+            }
+        }
+    }
+    found
+}
+
+/// A run folder with the network: the policy's network reach items ALLOW (and private-proxy proved), curl's closure
+/// in the run's, and the host's CA bundle as the run's. None where the config has no network programs.
+fn net_world(
+    name: &str,
+    engine: &str,
+    program: &str,
+    argv: &[&str],
+    allow: &[&str],
+) -> Option<(PathBuf, PathBuf)> {
+    let (top, run) = world(name, engine, program, argv);
+    let cfg_path = top.join("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_str(&fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    if cfg.get("socat").is_none() {
+        eprintln!("no python3 or socat on PATH: no network run");
+        return None;
+    }
+    cfg["cacert"] = fs::canonicalize("/etc/ssl/certs/ca-certificates.crt")
+        .unwrap()
+        .display()
+        .to_string()
+        .into();
+    fs::write(&cfg_path, cfg.to_string()).unwrap();
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for a in allow {
+        p["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "kind": "network", "value": a,
+            "class": "reach", "sources": [ { "flag": "--net" } ], "effective": true,
+            "request": format!("network {a}"), "requestClass": "ordinary" }));
+    }
+    p["backend"]["proved"]
+        .as_array_mut()
+        .unwrap()
+        .push("private-proxy".into());
+    fs::write(&path, p.to_string()).unwrap();
+    let curl = which("curl");
+    let lpath = run.join("launch.json");
+    let mut l: serde_json::Value = serde_json::from_str(&fs::read_to_string(&lpath).unwrap()).unwrap();
+    let closure: Vec<String> = String::from_utf8(closure_of(&[&curl]))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    l["closure"] = closure.into();
+    fs::write(&lpath, l.to_string()).unwrap();
+    Some((top, run))
+}
+
+/// The pids of pot's proxy for RUN (its socket proxy.sock and the run's denials).
+fn proxies(run: &Path) -> Vec<String> {
+    let denials = format!("{}/denials", fs::canonicalize(run).unwrap().display());
+    let mut out = vec![];
+    for e in fs::read_dir("/proc").unwrap().flatten() {
+        if let Ok(c) = fs::read(e.path().join("cmdline")) {
+            let words: Vec<&[u8]> = c.split(|b| *b == 0).collect();
+            if words.contains(&&b"proxy.sock"[..]) && words.contains(&denials.as_bytes()) {
+                out.push(e.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    out
+}
+
+/// The network under ENGINE: an allowed host is reached over HTTPS through pot's proxy; a host not allowed is refused
+/// (403) and recorded in the run's denials and the after event; a connection that bypasses the proxy has no route
+/// (only `lo`); the host's loopback is never reached, through the proxy (LOOPBACK, in the after event) or directly
+/// (the run's own loopback); the proxy and the run's socket and named pipe are gone when run returns.
+fn network_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let host_lo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    host_lo.set_nonblocking(true).unwrap();
+    let port = host_lo.local_addr().unwrap().port();
+    let curl = which("curl").display().to_string();
+    let script = format!(
+        r#"c={curl}
+$c -sS -o /dev/null --max-time 20 -w 'allowed=%{{http_code}}\n' https://example.com/
+$c -sS -o /dev/null --max-time 20 -w 'denied=%{{http_connect}}\n' https://example.org/ 2>/dev/null
+$c --noproxy '*' -sS -o /dev/null --max-time 5 https://example.com/ 2>/dev/null; echo "direct=$?"
+$c --noproxy '' -sS -o /dev/null --max-time 5 -w 'loopback=%{{http_code}}\n' http://localhost:{port}/
+$c --noproxy '*' -sS -o /dev/null --max-time 5 http://127.0.0.1:{port}/ 2>/dev/null; echo "hostlo=$?"
+while read -r l; do case $l in *:*) echo "if=${{l%%:*}}" ;; esac; done </proc/net/dev
+echo "proxy=$HTTPS_PROXY"
+"#
+    );
+    let Some((top, run)) = net_world(
+        &format!("{engine}-net"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+        &["example.com:443", &format!("localhost:{port}")],
+    ) else {
+        return;
+    };
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}{err}");
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(lines.contains(&"allowed=200"), "{said}{err}");
+    assert!(lines.contains(&"denied=403"), "{said}");
+    assert!(
+        !lines.contains(&"direct=0") && lines.iter().any(|l| l.starts_with("direct=")),
+        "{said}"
+    );
+    assert!(lines.contains(&"loopback=403"), "{said}");
+    assert!(
+        !lines.contains(&"hostlo=0") && lines.iter().any(|l| l.starts_with("hostlo=")),
+        "{said}"
+    );
+    let ifs: Vec<&&str> = lines.iter().filter(|l| l.starts_with("if=")).collect();
+    assert_eq!(ifs, [&"if=lo"], "only lo: {said}");
+    assert!(lines.contains(&"proxy=http://127.0.0.1:3128"), "{said}");
+    // the host's listener was never reached
+    assert!(
+        host_lo
+            .accept()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    // the run's own record of the refusal, and the after event's
+    let denials = fs::read_to_string(run.join("denials")).unwrap();
+    assert!(
+        denials.contains("the run tried example.org:443 (not in this run)"),
+        "{denials}"
+    );
+    assert!(
+        denials.contains(&format!("localhost:{port}, the host's loopback")),
+        "{denials}"
+    );
+    let after = verb(&top, &run, "after").output().unwrap();
+    ok(&after);
+    let ev: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(
+        ev["denials"],
+        serde_json::json!([{ "host": "example.org:443", "count": 1 }])
+    );
+    let lo = ev["loopback"].as_array().unwrap();
+    assert_eq!(lo.len(), 1, "{ev}");
+    assert_eq!(lo[0]["host"], format!("localhost:{port}"));
+    assert!(
+        ["127.0.0.1", "::1"].contains(&lo[0]["address"].as_str().unwrap()),
+        "{ev}"
+    );
+    // run stopped the proxy and removed its socket and the named pipe
+    assert_eq!(proxies(&run), Vec::<String>::new());
+    assert!(run.join("proxy.sock").symlink_metadata().is_err());
+    assert!(run.join("secrets.fifo").symlink_metadata().is_err());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    let mut left = set(LEFT);
+    left.extend(["status".to_string(), "proxy.log".to_string()]);
+    assert_eq!(names(&run), left);
+}
+
+#[test]
+fn podman_network_reaches_only_the_allowlist_through_pots_proxy() {
+    network_case("podman");
+}
+
+#[test]
+fn docker_network_reaches_only_the_allowlist_through_pots_proxy() {
+    network_case("docker");
+}
+
+/// The proxy stops when run is killed with SIGKILL (its parent is gone: `proxy.py`'s `orphaned`), and cleanup removes the
+/// container, the socket and the named pipe.
+fn killed_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let sleep = coreutils("sleep");
+    let Some((top, run)) = net_world(
+        &format!("{engine}-net-killed"),
+        engine,
+        &program,
+        &[&sleep, "60"],
+        &["example.com:443"],
+    ) else {
+        return;
+    };
+    prepare(&top, &run);
+    let mut child = verb(&top, &run, "run").stdin(Stdio::null()).spawn().unwrap();
+    wait_for("the container", || {
+        run.join("container.id").exists() && !proxies(&run).is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let pids = proxies(&run);
+    assert_eq!(pids.len(), 1, "{pids:?}");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let killed = Instant::now();
+    wait_for("the proxy to stop itself", || proxies(&run).is_empty());
+    assert!(killed.elapsed() < Duration::from_secs(5));
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    let mut left = set(LEFT);
+    left.insert("proxy.log".into());
+    assert_eq!(names(&run), left);
+    if engine == "podman" {
+        assert_eq!(engine_processes(&run), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn podman_proxy_stops_when_run_is_killed() {
+    killed_case("podman");
+}
+
+#[test]
+fn docker_proxy_stops_when_run_is_killed() {
+    killed_case("docker");
+}
+
+/// cleanup stops a live proxy of the run's (here one this test started, so it is not orphaned) and removes its
+/// socket. No engine is needed.
+#[test]
+fn cleanup_stops_a_live_proxy_and_removes_its_socket() {
+    let Some((top, run)) = net_world(
+        "net-cleanup",
+        "podman",
+        "podman",
+        &["/bin/sh", "-c", "true"],
+        &["example.com:443"],
+    ) else {
+        return;
+    };
+    let curl = find("curl");
+    if curl.is_none() || find("nix-store").is_none() {
+        return;
+    }
+    prepare(&top, &run);
+    let cenv: serde_json::Value =
+        serde_json::from_slice(&fs::read(run.join("container.env")).unwrap()).unwrap();
+    let argv: Vec<String> = cenv["proxy"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    let mut proxy = Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(&run)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the proxy's socket", || run.join("proxy.sock").exists());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    let start = Instant::now();
+    let status = loop {
+        if let Some(s) = proxy.try_wait().unwrap() {
+            break s;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "the proxy still runs");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success() || status.code().is_some());
+    assert!(run.join("proxy.sock").symlink_metadata().is_err());
+    assert_eq!(names(&run), set(LEFT));
+}
+
+/// The decision of 2026-11-22: a secret under docker too, over the named pipe. It arrives exactly; the marker is in no
+/// file of the run folder, no engine argument and not in docker's configuration of the container; the container's
+/// user (the run's uid, no user namespace) can open the pipe; and the pipe is gone when run returns. A link planted at
+/// the pipe's path is removed, never written through.
+#[test]
+fn docker_secrets_arrive_exactly_and_nowhere_else() {
+    secret_case("docker");
+}
+
+#[test]
+fn podman_secrets_arrive_exactly_and_nowhere_else() {
+    secret_case("podman");
+}
+
+fn secret_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let marker = "pot-fifo-marker-5d2c8e";
+    let sleep = coreutils("sleep");
+    let script = format!("printf '[%s]\\n' \"$NOTES_TOKEN\"; {sleep} 2");
+    let (top, run) = world(
+        &format!("{engine}-fifo"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+    );
+    prepare(&top, &run);
+    // a link at the pipe's path, to a file outside the run folder
+    let outside = top.join("outside");
+    fs::write(&outside, "").unwrap();
+    symlink(&outside, run.join("secrets.fifo")).unwrap();
+    let child = verb(&top, &run, "run")
+        .env("NOTES_TOKEN", marker)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for("the container", || {
+        run.join("container.id").exists()
+            && !fs::read_to_string(run.join("container.id"))
+                .unwrap_or_default()
+                .is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(700));
+    let cid = fs::read_to_string(run.join("container.id")).unwrap();
+    // the engine's own record of the container (docker inspect; podman's in the run's store, checked below)
+    let inspect = if engine == "docker" {
+        Command::new(&program)
+            .args(["container", "inspect", cid.trim()])
+            .output()
+            .unwrap()
+    } else {
+        podman(&program, &run, &["container", "inspect", cid.trim()])
+    };
+    ok(&inspect);
+    assert!(
+        !String::from_utf8_lossy(&inspect.stdout).contains(marker),
+        "the marker is in the engine's config"
+    );
+    let mut found = files_holding(&run, marker);
+    let xdg = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap()).join("crun");
+    found.extend(files_holding(&xdg, marker));
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("[{marker}]\n"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(found, Vec::<String>::new(), "the secret's value is there");
+    assert_eq!(
+        fs::read_to_string(&outside).unwrap(),
+        "",
+        "written through the planted link"
+    );
+    assert!(
+        run.join("secrets.fifo").symlink_metadata().is_err(),
+        "the named pipe is left"
+    );
+    assert!(!argv_words(&run).iter().any(|w| w.contains(marker)));
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// No exec on the host is ever handed a value (strace follows every exec of run and its children: the engine, conmon,
+/// the OCI runtime and, under podman, the run's own processes), while the command has the value.
+fn strace_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(strace) = find("strace") else {
+        eprintln!("no strace on PATH");
+        return;
+    };
+    let marker = "pot-strace-marker-9a41f0";
+    let (top, run) = world(
+        &format!("{engine}-strace"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", "echo \"[$NOTES_TOKEN]\""],
+    );
+    prepare(&top, &run);
+    let log = top.join("strace.log");
+    let out = Command::new(&strace)
+        .args(["-f", "-qq", "-e", "trace=execve,execveat", "-s", "1000000", "-o"])
+        .arg(&log)
+        .arg(BIN)
+        .arg("--config")
+        .arg(top.join("config.json"))
+        .arg("run")
+        .arg(&run)
+        .env("NOTES_TOKEN", marker)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("[{marker}]\n"));
+    let execs = fs::read_to_string(&log).unwrap();
+    // the trace saw the engine (and, under podman, the run's bash and its last hop)
+    assert!(execs.contains("execve("), "{execs}");
+    if engine == "podman" {
+        assert!(
+            execs.contains("pot-entry"),
+            "strace did not follow into the container"
+        );
+    }
+    let bad: Vec<&str> = execs.lines().filter(|l| l.contains(marker)).collect();
+    assert!(bad.is_empty(), "a value in an exec's arguments: {bad:?}");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_no_exec_is_handed_a_value() {
+    strace_case("podman");
+}
+
+#[test]
+fn docker_no_exec_is_handed_a_value() {
+    strace_case("docker");
+}
+
+/// A container that ends before it opens the named pipe: run does not hang, and returns its status.
+#[test]
+fn podman_run_returns_when_the_container_never_reads_the_pipe() {
+    let Some(program) = engine_program("podman") else {
+        return;
+    };
+    let (top, run) = world("podman-noread", "podman", &program, &["/bin/sh", "-c", "true"]);
+    prepare(&top, &run);
+    // the entry's script replaced by one that exits at once (container.argv is the run's own file)
+    let words: Vec<String> = argv_words(&run)
+        .into_iter()
+        .map(|w| {
+            if w.starts_with("__pot_fifo=") {
+                "exit 7".to_string()
+            } else {
+                w
+            }
+        })
+        .collect();
+    let mut bytes = vec![];
+    for w in &words {
+        bytes.extend_from_slice(w.as_bytes());
+        bytes.push(0);
+    }
+    fs::write(run.join("container.argv"), bytes).unwrap();
+    let start = Instant::now();
+    let out = verb(&top, &run, "run")
+        .env("NOTES_TOKEN", "x")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(start.elapsed() < Duration::from_secs(20), "run hung");
+    assert!(run.join("secrets.fifo").symlink_metadata().is_err());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// The command's environment with the network is exactly bwrap's `run_env`: pot's values, the proxy's variables, the
+/// items; nothing the engine, bash or socat adds. Under both engines.
+fn net_env_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let envp = coreutils("env");
+    let Some((top, run)) = net_world(
+        &format!("{engine}-net-env"),
+        engine,
+        &program,
+        &[&envp, "-0"],
+        &["example.com:443"],
+    ) else {
+        return;
+    };
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run")
+        .env("NOTES_TOKEN", "net-value")
+        .env("TERM", "xterm")
+        .env_remove("COLORTERM")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    let got: BTreeSet<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    let words = argv_words(&run);
+    let mut want: BTreeSet<String> = words
+        .windows(2)
+        .filter(|w| w[0] == "--env" && w[1].contains('='))
+        .map(|w| w[1].clone())
+        .collect();
+    want.insert("NOTES_TOKEN=net-value".into());
+    want.insert("TERM=xterm".into());
+    for v in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        assert!(want.contains(&format!("{v}=http://127.0.0.1:3128")), "{v}");
+    }
+    assert!(
+        want.contains("NO_PROXY=localhost,127.0.0.1,::1")
+            && want.contains("no_proxy=localhost,127.0.0.1,::1")
+    );
+    assert_eq!(got, want);
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_the_commands_environment_with_the_network_is_the_plan() {
+    net_env_case("podman");
+}
+
+#[test]
+fn docker_the_commands_environment_with_the_network_is_the_plan() {
+    net_env_case("docker");
 }

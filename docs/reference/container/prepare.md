@@ -9,9 +9,11 @@ engine's command instead and writes nothing (`pot explain --backend-command`). T
 [the container backend](../container.md#policy-to-flags).
 
 These transcripts run in `prepare.in/`. `read-only/` is a review context: read access to `~/src/notes`, a read
-path, a hidden folder, a state mount, a fixed file, a secret variable (handed over a pipe under podman, refused under docker), and `resource-limits` proved
-(the run is in pot's systemd scope). `config-podman.json` and `config-docker.json` name the store paths this
-backend binds into every run. None of the host paths exist here, so no read path, mask or socket is bound.
+path, a hidden folder, a state mount, a fixed file, a secret variable (handed over the run folder's named pipe), and
+`resource-limits` proved (the run is in pot's systemd scope). `network/` is `access-none/` with the network: one host
+through pot's proxy, and `private-proxy` proved. `config-podman.json` and `config-docker.json` name the store paths
+this backend binds into every run, and the network's programs (`python`, `proxy`, `socat`, `netClosure`). None of
+the host paths exist here, so no read path, mask or socket is bound.
 
 ## podman
 
@@ -47,6 +49,7 @@ podman
   --volume [CWD]/read-only/denials:/run/pot/denials:ro
   --volume /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot:/run/pot/launcher:ro
   --volume [CWD]/read-only/policy.json:/run/pot/policy.json:ro
+  --volume [CWD]/read-only/secrets.fifo:/run/pot/secrets.fifo:ro
   --volume /nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/env:/usr/bin/env:ro
   --volume /nix/store/7f6kqbjr4l3qkl1m2s0a9hb3s5z7r0bq-nss-cacert-3.111/etc/ssl/certs/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
   --volume /home/u/.local/state/pot/state/9f2e/notes:/home/u/.cache/notes:rw
@@ -71,24 +74,24 @@ podman
   --env TZDIR=/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo
   --env USER=u
   --rootfs [CWD]/read-only/rootfs:O
-  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-secrets 3 /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u/src/notes -- [..] notes check --all
+  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-entry /run/pot/secrets.fifo '' /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u/src/notes -- [..] notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
+# and writes the variables passed by name to the run folder's named pipe, secrets.fifo: TERM COLORTERM NOTES_TOKEN
 
 ```
 
 ## docker
 
-docker can't keep a container in pot's scope, so it refuses a run that has `resource-limits`; and it passes no file
-descriptor, so it refuses a secret variable:
+docker can't keep a container in pot's scope, so it refuses a run that has `resource-limits`:
 
 ```console
 $ pot-container --config config-docker.json prepare --print read-only
 ? 1
-pot (review): the container backend does not carry out yet: resource-limits under docker (a container is not in pot's scope); the secret variable NOTES_TOKEN under docker (it passes no file descriptor: the value would be in the container's configuration)
+pot (review): the container backend does not carry out yet: resource-limits under docker (a container is not in pot's scope)
 
 ```
 
-Without them (`access-none/`: no workspace at all, so the command starts in the home; `NOTES_TOKEN` a plain variable):
+Without it (`access-none/`: no workspace at all, so the command starts in the home; `NOTES_TOKEN` a plain variable):
 
 ```console
 $ pot-container --config config-docker.json prepare --print access-none
@@ -149,6 +152,83 @@ docker
   localhost/pot-empty:1
   /usr/bin/env -C /home/u -u HOSTNAME -- notes check --all
 # and before the root: --volume P:P:ro for each of 7 store paths (the closure)
+
+```
+
+## The network
+
+The container keeps `--network none`. `run` starts pot's proxy on the host, listening on the run folder's
+`proxy.sock`, bound at `/run/pot/proxy.sock`; the entry starts socat (its closure bound) on 127.0.0.1:3128 before the
+command; the proxy's variables are bwrap's. The variables passed by name go over the named pipe:
+
+```console
+$ pot-container --config config-podman.json prepare --print network
+# the podman command for this run, an option a line (pot explain --backend-command)
+# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM; and CONTAINERS_CONF=[CWD]/network/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/network/storage.conf HOME=[CWD]/network/enginehome
+podman
+  --root [CWD]/network/enginestore --runroot [CWD]/network/engineroot --tmpdir [CWD]/network/enginetmp
+  run --interactive
+  --init
+  --log-driver none
+  --cidfile [CWD]/network/container.id
+  --hostname pot
+  --network none
+  --ipc private
+  --cgroupns private
+  --cap-drop all
+  --security-opt no-new-privileges
+  --read-only
+  --userns keep-id
+  --user 1000:100
+  --passwd=false
+  --tmpfs /run:rw,nosuid,nodev,mode=0755,notmpcopyup
+  --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,notmpcopyup
+  --volume /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh:/bin/sh:ro
+  --volume [CWD]/network/group:/etc/group:ro
+  --volume [CWD]/network/hosts:/etc/hosts:ro
+  --volume [CWD]/network/passwd:/etc/passwd:ro
+  --tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U,notmpcopyup
+  --volume [CWD]/network/hidden.txt:/home/u/.pot-hidden:ro
+  --volume [CWD]/network/denials:/run/pot/denials:ro
+  --volume /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot:/run/pot/launcher:ro
+  --volume [CWD]/network/policy.json:/run/pot/policy.json:ro
+  --volume [CWD]/network/proxy.sock:/run/pot/proxy.sock:ro
+  --volume [CWD]/network/secrets.fifo:/run/pot/secrets.fifo:ro
+  --volume /nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/env:/usr/bin/env:ro
+  --volume /nix/store/7f6kqbjr4l3qkl1m2s0a9hb3s5z7r0bq-nss-cacert-3.111/etc/ssl/certs/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
+  --volume /home/u/.local/state/pot/state/9f2e/notes:/home/u/.cache/notes:rw
+  --volume [CWD]/network/potcfg:/home/u/.config/pot:ro
+  --volume /nix/store/0aqd4v7xhp2c9z2lfy5h4v0rdf3q4k8n-config.toml:/home/u/.config/notes/config.toml:ro
+  --env ALL_PROXY=http://127.0.0.1:3128
+  --env HOME=/home/u
+  --env HTTPS_PROXY=http://127.0.0.1:3128
+  --env HTTP_PROXY=http://127.0.0.1:3128
+  --env LANG=C.UTF-8
+  --env LOGNAME=u
+  --env NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+  --env NOTES_CACHE=/home/u/.cache/notes
+  --env NO_PROXY=localhost,127.0.0.1,::1
+  --env PATH=/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin:/nix/store/scikhwasnkiqmjsi9iczrrx59bwbn379-pot-kits/bin:/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin
+  --env POT=review
+  --env POT_POLICY=/run/pot/policy.json
+  --env POT_RUN=3c1a
+  --env POT_TOOLS=/nix/store/scikhwasnkiqmjsi9iczrrx59bwbn379-pot-kits/bin
+  --env 'PS1=(pot:review) [..]
+  --env SHELL=/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash
+  --env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+  --env TERMINFO_DIRS=/nix/store/1ylb9cjvz6p8pjkl3l4bl6wq0b1hd8xm-ncurses-6.5/share/terminfo
+  --env TZ=America/Chicago
+  --env TZDIR=/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo
+  --env USER=u
+  --env all_proxy=http://127.0.0.1:3128
+  --env http_proxy=http://127.0.0.1:3128
+  --env https_proxy=http://127.0.0.1:3128
+  --env no_proxy=localhost,127.0.0.1,::1
+  --rootfs [CWD]/network/rootfs:O
+  /usr/bin/env -i -- /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-entry /run/pot/secrets.fifo /nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u -- [..] notes check --all
+# and before the root: --volume P:P:ro for each of 9 store paths (the closure)
+# before the engine, run starts pot's proxy in the run folder: /nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3 -I -S /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/proxy.py proxy.sock --denials [CWD]/network/denials --context review --fix 'the repo kit'/''s requests.network' api.example.com:443
+# and writes the variables passed by name to the run folder's named pipe, secrets.fifo: TERM COLORTERM NOTES_TOKEN
 
 ```
 

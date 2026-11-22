@@ -154,6 +154,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
     let abs = fs::canonicalize(rundir)
         .map_err(|e| refuse(format!("the run directory {}: {e}", rundir.display())))?;
     let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
+    let net = cfg.net_tools().map_err(refuse)?;
     let inputs = Inputs {
         policy: &p,
         launch: &l,
@@ -163,6 +164,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
         image: &image,
         rundir: &abs.to_string_lossy(),
         base_closure: &base,
+        net: net.as_ref(),
         host: &host::RealHost,
     };
     let plan = render::render(&inputs).map_err(|gaps| {
@@ -217,6 +219,24 @@ fn print_plan(engine: &str, p: &Plan) -> String {
             "# and before the root: --volume P:P:ro for each of {closure} store paths (the closure)"
         );
     }
+    if let Some(proxy) = &p.proxy {
+        let _ = writeln!(
+            out,
+            "# before the engine, run starts pot's proxy in the run folder: {}",
+            words(proxy)
+        );
+    }
+    if p.fifo {
+        let _ = writeln!(
+            out,
+            "# and writes the variables passed by name to the run folder's named pipe, secrets.fifo: {}",
+            if p.piped.is_empty() {
+                "none".to_string()
+            } else {
+                p.piped.join(" ")
+            }
+        );
+    }
     out
 }
 
@@ -264,11 +284,18 @@ fn dir_new(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// What `run` makes in the run folder just before the engine starts, and removes when the command ends: the named pipe
+/// for the variables and the proxy's socket. `prepare` records no kind for them.
+const RUNTIME: &[&str] = &["secrets.fifo", "proxy.sock"];
+
 fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
-    // the engines refuse a cidfile that exists: one left from before goes (a link: the link)
-    let cid = rundir.join("container.id");
-    if cid.symlink_metadata().is_ok() {
-        fs::remove_file(&cid).map_err(at(&cid))?;
+    // the engines refuse a cidfile that exists: one left from before goes (a link: the link); so does what an earlier
+    // run left of its own (never a folder)
+    for n in std::iter::once(&"container.id").chain(RUNTIME) {
+        let f = rundir.join(n);
+        if f.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+            fs::remove_file(&f).map_err(at(&f))?;
+        }
     }
     for f in &p.files {
         match f {
@@ -305,7 +332,11 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     let abs = fs::canonicalize(rundir).map_err(at(rundir))?;
     let prefix = format!("{}/", abs.display());
     let mut own = std::collections::BTreeMap::new();
-    for src in p.sources.iter().filter(|s| s.starts_with(&prefix)) {
+    for src in p
+        .sources
+        .iter()
+        .filter(|s| s.starts_with(&prefix) && !RUNTIME.contains(&&s[prefix.len()..]))
+    {
         let path = Path::new(src);
         let kind = match path.symlink_metadata() {
             Ok(m) if m.is_dir() => "dir",
@@ -322,7 +353,8 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     }
     // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
-    let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults });
+    let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults,
+        "fifo": p.fifo, "proxy": p.proxy });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -350,12 +382,23 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
             format!("a bind's source does not exist: {}", missing.join(", ")),
         ));
     }
-    if let Some(gap) = render::shell_gap(
+    let mut gaps = render::program_gaps(
         &plan,
         &cfg.paths().map_err(|m| Refusal::new(&p.context, m))?.shell,
         &host::RealHost,
-    ) {
-        return Err(Refusal::new(&p.context, gap));
+    );
+    // the proxy runs on the host: its python and proxy.py must be files
+    if let Some(argv) = &plan.proxy {
+        for (what, f) in [("python", &argv[0]), ("proxy", &argv[3])] {
+            if !Path::new(f).is_file() {
+                gaps.push(format!(
+                    "the config's {what} {f} (the network's proxy runs it: it must be a file)"
+                ));
+            }
+        }
+    }
+    if !gaps.is_empty() {
+        return Err(Refusal::new(&p.context, gaps.join("; ")));
     }
     if host::euid() != Some(l.uid) {
         return Err(Refusal::new(
@@ -511,6 +554,12 @@ struct EngineEnv {
     own: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     defaults: std::collections::BTreeMap<String, String>,
+    /// Whether the entry reads the named pipe: `run` makes it and writes the records.
+    #[serde(default)]
+    fifo: bool,
+    /// With the network: pot's proxy, started in the run folder before the engine.
+    #[serde(default)]
+    proxy: Option<Vec<String>>,
 }
 
 /// R2: the run folder's engine paths as `prepare` left them, checked just before the engine starts: the engine
@@ -595,12 +644,216 @@ fn engine_paths(
     }
 }
 
-/// The pipe that carries the secret variables to the container, at an fd the engine passes on (`--preserve-fd`):
-/// its read end inheritable, its write end not. No value is in a file, an argument or the engine's environment.
-fn secrets_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
-    let (r, w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
-    rustix::io::fcntl_setfd(&r, rustix::io::FdFlags::empty())?;
-    Ok((r, w))
+/// The named pipe that carries the run's variables (a secret's among them) to the container: made afresh in the run
+/// folder, mode 0600, never through a link (whatever is at its path is removed first; mkfifo follows no link), and
+/// checked: a pipe of this user's, mode 0600. No value is in a file, an argument or the engine's environment.
+fn make_fifo(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    match path.symlink_metadata() {
+        Ok(m) if m.is_dir() => return Err(format!("{}: a folder is in the way", path.display())),
+        Ok(_) => fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(_) => {}
+    }
+    rustix::fs::mkfifoat(rustix::fs::CWD, path, rustix::fs::Mode::from_raw_mode(0o600))
+        .map_err(|e| format!("can't make the named pipe {}: {e}", path.display()))?;
+    let ok = path.symlink_metadata().is_ok_and(|m| {
+        m.file_type().is_fifo() && Some(m.uid()) == host::euid() && m.mode() & 0o7777 == 0o600
+    });
+    if ok {
+        Ok(())
+    } else {
+        let _ = fs::remove_file(path);
+        Err(format!(
+            "{}: not the named pipe run made (mode 0600, this user's)",
+            path.display()
+        ))
+    }
+}
+
+/// How long `run` waits for the container to open the named pipe, at most, while the engine runs.
+const FIFO_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Write the records to the named pipe once the container has opened it, in a thread: the open is non-blocking
+/// (ENXIO until a reader has it open: the entry opens it read-write, so it never waits for this writer) and retried,
+/// and so are the writes, until DONE (the engine has exited) or `FIFO_WAIT`: `run` never hangs on a container that
+/// died before it read. The pipe is opened without following a link, and must be one.
+fn feed_fifo(
+    path: PathBuf,
+    data: Vec<u8>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::sync::atomic::Ordering;
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let give_up = || done.load(Ordering::Relaxed) || start.elapsed() > FIFO_WAIT;
+        let fd = loop {
+            match rustix::fs::open(
+                &path,
+                OFlags::WRONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(fd) => break fd,
+                Err(rustix::io::Errno::NXIO | rustix::io::Errno::INTR) if !give_up() => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
+        };
+        if !rustix::fs::fstat(&fd).is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::Fifo) {
+            return;
+        }
+        let mut off = 0;
+        while off < data.len() {
+            match rustix::io::write(&fd, &data[off..]) {
+                Ok(n) => off += n,
+                Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) if !give_up() => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        }
+    })
+}
+
+/// The caller's variables pot's proxy keeps (when set): what it needs to show a denial on the caller's tmux pane. The
+/// rest of the caller's environment (its secrets among them) never reaches the proxy.
+const PROXY_KEEP: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "TMUX",
+    "TMUX_TMPDIR",
+    "XDG_RUNTIME_DIR",
+];
+
+/// Start pot's proxy (ARGV, which `prepare` wrote) in the run folder, as bwrap's `run` does: its log `proxy.log`
+/// (written afresh, never through a link), its socket `proxy.sock` (whatever is there removed first, never a folder).
+/// It is this process's child: when `run` is gone (even killed with SIGKILL), the proxy stops itself (`proxy.py`'s `orphaned`).
+fn start_proxy(abs: &Path, argv: &[String]) -> Result<std::process::Child, String> {
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+    let sock = abs.join("proxy.sock");
+    match sock.symlink_metadata() {
+        Ok(m) if m.is_dir() => return Err(format!("{}: a folder is in the way", sock.display())),
+        Ok(_) => fs::remove_file(&sock).map_err(|e| format!("{}: {e}", sock.display()))?,
+        Err(_) => {}
+    }
+    let log_path = abs.join("proxy.log");
+    match log_path.symlink_metadata() {
+        Ok(m) if m.is_dir() => return Err(format!("{}: a folder is in the way", log_path.display())),
+        Ok(_) => fs::remove_file(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?,
+        Err(_) => {}
+    }
+    // created exclusively: never through a link
+    let log = fs::OpenOptions::new()
+        .append(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&log_path)
+        .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let err = log
+        .try_clone()
+        .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let mut c = std::process::Command::new(&argv[0]);
+    c.args(&argv[1..]).current_dir(abs).env_clear();
+    for k in PROXY_KEEP {
+        if let Some(v) = std::env::var_os(k) {
+            c.env(k, v);
+        }
+    }
+    let mut child = c
+        .stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(err)
+        .spawn()
+        .map_err(|e| format!("can't start the network proxy ({}): {e}", argv[0]))?;
+    let start = std::time::Instant::now();
+    let listening = || sock.symlink_metadata().is_ok_and(|m| m.file_type().is_socket());
+    while !listening() && start.elapsed() < std::time::Duration::from_secs(5) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if listening() {
+        return Ok(child);
+    }
+    stop_process(&mut child);
+    let said = read_own(&log_path).unwrap_or_default();
+    let said = String::from_utf8_lossy(&said);
+    Err(format!(
+        "the network proxy did not start: {}",
+        said.lines().last().unwrap_or("(nothing in its log)")
+    ))
+}
+
+/// SIGTERM, then SIGKILL after 2 s (bwrap's `stop_helpers`); the child is reaped.
+fn stop_process(child: &mut std::process::Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if let Some(pid) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    }
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(2) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// What `run` started beside the engine, stopped and removed when the command ends (and on every early return): the
+/// proxy, its socket and the named pipe. A `run` killed with SIGKILL leaves them to the proxy itself (it stops when its parent
+/// is gone) and to `cleanup`.
+#[derive(Default)]
+struct Helpers {
+    proxy: Option<std::process::Child>,
+    files: Vec<PathBuf>,
+}
+
+impl Drop for Helpers {
+    fn drop(&mut self) {
+        if let Some(c) = self.proxy.as_mut() {
+            stop_process(c);
+        }
+        for f in &self.files {
+            if f.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+                let _ = fs::remove_file(f);
+            }
+        }
+    }
+}
+
+/// Just before the engine starts: the named pipe and the proxy's socket are what `run` made (a link or another kind of
+/// file in their place is refused).
+fn runtime_paths(abs: &Path, fifo: bool, proxy: bool) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let mut bad = vec![];
+    let check = |n: &str, ok: &dyn Fn(&fs::FileType) -> bool, bad: &mut Vec<String>| {
+        if !abs.join(n).symlink_metadata().is_ok_and(|m| ok(&m.file_type())) {
+            bad.push(abs.join(n).display().to_string());
+        }
+    };
+    if fifo {
+        check("secrets.fifo", &|t| t.is_fifo(), &mut bad);
+    }
+    if proxy {
+        check("proxy.sock", &|t| t.is_socket(), &mut bad);
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("not what run made just now: {}", bad.join(", ")))
+    }
 }
 
 /// Wait for the engine; on SIGTERM or SIGHUP, stop the container through the engine. R1: a stop before the container
@@ -669,7 +922,6 @@ fn wait_engine(
 /// command's (the terminal sends it to the engine too, which passes it on), as bwrap's run ignores it.
 fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     use std::io::IsTerminal as _;
-    use std::os::fd::AsRawFd as _;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     let ctx = context_of(rundir);
@@ -706,11 +958,6 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
             "container.argv was not prepared for {program}: run prepare again"
         )));
     }
-    if e == Engine::Docker && !env.piped.is_empty() {
-        return Err(refuse(
-            "docker can't be handed a secret variable: run prepare again".into(),
-        ));
-    }
     let set: Vec<(String, String)> = env.set.into_iter().collect();
     if e == Engine::Docker {
         let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
@@ -727,21 +974,25 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
             .map_err(|err| refuse(format!("can't record the status: {err}")))?;
         return Ok(143);
     }
-    let pipe = if env.piped.is_empty() {
-        None
-    } else {
-        Some(secrets_pipe().map_err(|err| refuse(format!("can't make the secrets' pipe: {err}")))?)
-    };
-    let argv = lifecycle::run_argv(
-        &argv,
-        std::io::stdin().is_terminal(),
-        pipe.as_ref().map(|(rd, _)| rd.as_raw_fd()),
-    );
+    // the named pipe and the proxy, just before the engine; stopped and removed when the command ends (Helpers' drop)
+    let mut helpers = Helpers::default();
+    if env.fifo {
+        helpers.files.push(abs.join("secrets.fifo"));
+        make_fifo(&abs.join("secrets.fifo")).map_err(refuse)?;
+    }
+    if let Some(proxy) = &env.proxy {
+        helpers.files.push(abs.join("proxy.sock"));
+        helpers.proxy = Some(start_proxy(&abs, proxy).map_err(refuse)?);
+    }
+    // R2 again, now that the proxy runs: every path the engine is handed is as prepare left it, or as run made it
+    engine_paths(&abs, e, &env.own).map_err(refuse)?;
+    runtime_paths(&abs, env.fifo, env.proxy.is_some()).map_err(refuse)?;
+    let argv = lifecycle::run_argv(&argv, std::io::stdin().is_terminal());
 
     // U2: a variable passed by name that the host has unset takes pot's value: in the engine's environment (the
     // engine reads it for --env NAME), or as its record on the pipe
     let mut engine_set = set.clone();
-    if env.piped.is_empty() {
+    if !env.fifo {
         engine_set.extend(
             env.defaults
                 .iter()
@@ -753,19 +1004,20 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         .args(&argv[1..])
         .spawn()
         .map_err(|err| refuse(format!("can't run {program}: {err}")))?;
-    if let Some((rd, wr)) = pipe {
-        drop(rd);
+    let done = Arc::new(AtomicBool::new(false));
+    let feeder = env.fifo.then(|| {
         let data = lifecycle::secret_records(&env.piped, |n| {
             std::env::var_os(n).or_else(|| env.defaults.get(n).map(Into::into))
         });
-        // a thread: the container reads the pipe once it starts; a failed write is the run's own failure to start
-        std::thread::spawn(move || {
-            let mut f = fs::File::from(wr);
-            let _ = std::io::Write::write_all(&mut f, &data);
-        });
+        feed_fifo(abs.join("secrets.fifo"), data, Arc::clone(&done))
+    });
+    let status = wait_engine(&mut child, &stop, e, &program, &abs, &set);
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(f) = feeder {
+        let _ = f.join();
     }
-    let status = wait_engine(&mut child, &stop, e, &program, &abs, &set).map_err(refuse)?;
-    let code = lifecycle::exit_code(status);
+    drop(helpers);
+    let code = lifecycle::exit_code(status.map_err(refuse)?);
     let gone = remove_container(e, &program, &r, &set);
     write_new(&abs.join("status"), code.to_string().as_bytes(), 0o644)
         .map_err(|err| refuse(format!("can't record the status: {err}")))?;
@@ -777,7 +1029,19 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
 
 fn after(rundir: &Path) -> Result<(), Refusal> {
     let (p, l) = load(rundir)?;
-    let ev = lifecycle::after_event(&p, &l)
+    // the proxy's log, when the run had the network: a regular file only, never through a link
+    let log = rundir.join("proxy.log");
+    let log = match read_own(&log) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(_) if log.symlink_metadata().is_err() => String::new(),
+        Err(e) => {
+            return Err(Refusal::new(
+                &p.context,
+                format!("the container backend's after: {e}"),
+            ));
+        }
+    };
+    let ev = lifecycle::after_event(&p, &l, &log)
         .map_err(|m| Refusal::new(&p.context, format!("the container backend's after: {m}")))?;
     let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{ev}\n").as_bytes());
     Ok(())
@@ -979,7 +1243,8 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         }
     };
     let rd = |n: &str| abs.join(n);
-    let mut failed = cleanup_engine(cfg, &abs);
+    let mut failed = stop_proxies(&abs);
+    failed.extend(cleanup_engine(cfg, &abs));
     for n in ["enginehome", "dockercfg"] {
         if let Err(e) = remove_tree(&rd(n)) {
             failed.push(format!("{}: {e}", rd(n).display()));
@@ -1006,6 +1271,8 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "hosts",
         "empty",
         "hidden.txt",
+        "secrets.fifo",
+        "proxy.sock",
     ] {
         match fs::remove_file(rd(n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -1037,9 +1304,55 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     }
 }
 
+/// pot's proxies for this run still alive (a `run` killed with SIGKILL a moment ago leaves its proxy for up to a second):
+/// stopped, SIGTERM then SIGKILL after 2 s. Returns those that would not stop.
+fn stop_proxies(abs: &Path) -> Vec<String> {
+    let r = abs.to_string_lossy().into_owned();
+    let me = std::process::id().to_string();
+    let find = || -> Vec<rustix::process::Pid> {
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return vec![];
+        };
+        entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|pid| pid.bytes().all(|b| b.is_ascii_digit()) && *pid != me)
+            .filter(|pid| {
+                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| lifecycle::names_proxy(&c, &r))
+                    && fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|c| c == abs)
+            })
+            .filter_map(|pid| pid.parse().ok().and_then(rustix::process::Pid::from_raw))
+            .collect()
+    };
+    // a zombie's cmdline is empty: a stopped proxy is no longer found
+    let gone_within = |d: std::time::Duration| {
+        let start = std::time::Instant::now();
+        while start.elapsed() < d {
+            if find().is_empty() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        find().is_empty()
+    };
+    for sig in [rustix::process::Signal::TERM, rustix::process::Signal::KILL] {
+        let left = find();
+        if left.is_empty() {
+            return vec![];
+        }
+        for pid in &left {
+            let _ = rustix::process::kill_process(*pid, sig);
+        }
+        if gone_within(std::time::Duration::from_secs(2)) {
+            return vec![];
+        }
+    }
+    vec![format!("the network proxy of {} would not stop", abs.display())]
+}
+
 /// probe's engine, in a temporary folder of its own (podman's home, its storage.conf and store), removed after:
 /// probe leaves nothing in the folder pot gives it, often pot's state (audit N3).
-fn probe_now(e: Engine, program: &str) -> Result<Vec<&'static str>, String> {
+fn probe_now(e: Engine, program: &str, net: bool) -> Result<Vec<&'static str>, String> {
     use std::os::unix::fs::DirBuilderExt;
     let found = if program.contains('/') {
         Path::new(program).is_file()
@@ -1068,7 +1381,7 @@ fn probe_now(e: Engine, program: &str) -> Result<Vec<&'static str>, String> {
     });
     let result = made
         .map_err(|err| err.to_string())
-        .and_then(|()| probe::assess(e, &probe::facts(e, program, &engine::probe_set(e, &d))));
+        .and_then(|()| probe::assess(e, &probe::facts(e, program, &engine::probe_set(e, &d)), net));
     let _ = fs::remove_dir_all(&dir);
     result
 }
@@ -1089,10 +1402,13 @@ fn main() -> ExitCode {
     let mut exit = 0;
     let result = match &cli.verb {
         Verb::Probe { .. } => {
-            let doc = match cfg
-                .and_then(|c| engine(&c))
-                .and_then(|(e, program)| probe_now(e, &program))
-            {
+            let doc = match cfg.and_then(|c| {
+                // private-proxy: the config's python, proxy.py and socat are files
+                let net = [&c.python, &c.proxy, &c.socat]
+                    .iter()
+                    .all(|f| f.as_ref().is_some_and(|f| Path::new(f).is_file()));
+                engine(&c).and_then(|(e, program)| probe_now(e, &program, net))
+            }) {
                 Ok(g) => serde_json::json!({ "guarantees": g }),
                 Err(err) => serde_json::json!({ "guarantees": [], "error": err }),
             };

@@ -31,6 +31,25 @@ pub struct Launch {
     /// Whether the host signs commits: the `after` event's `signs`.
     #[serde(default)]
     pub host_signs: bool,
+    /// The caller's tmux pane, where the proxy shows a denial (with `hostTools.tmux`).
+    #[serde(default)]
+    pub pane: Option<String>,
+    /// The host programs the helpers run: `tmux`, for the proxy's notices.
+    #[serde(default)]
+    pub host_tools: HostTools,
+    /// The permanent fix a denial names (Info): the proxy's `--fix`.
+    #[serde(default)]
+    pub net_fix: Option<String>,
+    /// A sibling's caller's run id: its proxy shows no one-run fix (`--sibling`).
+    #[serde(default)]
+    pub sibling_of: Option<serde_json::Value>,
+}
+
+/// launch.json's `hostTools`, of which the backend reads `tmux` (the proxy's notices).
+#[derive(Debug, Default, Deserialize)]
+pub struct HostTools {
+    #[serde(default)]
+    pub tmux: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -52,6 +71,23 @@ pub struct Config {
     pub tzdir: Option<String>,
     /// A file of store paths, one a line: the closure of the above, bound beside the run's own.
     pub base_closure: Option<String>,
+    /// The network (bwrap's names): pot's proxy, run on the host by `python` (`proxy.py`), and `socat`, which serves
+    /// it in the run as 127.0.0.1:3128; `netClosure` a file of store paths, socat's closure, bound into a run with
+    /// the network.
+    pub python: Option<String>,
+    pub proxy: Option<String>,
+    pub socat: Option<String>,
+    pub net_closure: Option<String>,
+}
+
+/// The config's programs for the network, all present.
+#[derive(Debug, Clone)]
+pub struct NetTools {
+    pub python: String,
+    pub proxy: String,
+    pub socat: String,
+    /// The lines of `netClosure`.
+    pub closure: Vec<String>,
 }
 
 /// The config's store paths `prepare` needs, all present.
@@ -66,6 +102,30 @@ pub struct Paths {
 }
 
 impl Config {
+    /// The network's programs, when the config names `python`, `proxy` and `socat` (`netClosure` may be absent: the
+    /// whole store is bound without closure-store). `Err` when the closure file can't be read.
+    pub fn net_tools(&self) -> Result<Option<NetTools>, String> {
+        let (Some(python), Some(proxy), Some(socat)) = (&self.python, &self.proxy, &self.socat) else {
+            return Ok(None);
+        };
+        let closure = match &self.net_closure {
+            Some(f) => std::fs::read_to_string(f)
+                .map_err(|e| format!("can't read the net closure {f}: {e}"))?
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+            None => vec![],
+        };
+        Ok(Some(NetTools {
+            python: python.clone(),
+            proxy: proxy.clone(),
+            socat: socat.clone(),
+            closure,
+        }))
+    }
+
     pub fn paths(&self) -> Result<Paths, String> {
         let get = |v: &Option<String>, k: &str| {
             v.clone()
