@@ -180,18 +180,19 @@ fn quote(s: &str) -> String {
 }
 
 fn print_plan(engine: &str, p: &Plan) -> String {
-    let mut out = format!("# the {engine} command for this run (pot explain --backend-command)\n");
+    let mut out =
+        format!("# the {engine} command for this run, an option a line (pot explain --backend-command)\n");
     let words = |a: &[String]| a.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
-    let _ = writeln!(out, "{} \\", quote(&p.program));
+    let _ = writeln!(out, "{}", quote(&p.program));
     let mut closure = 0;
     for o in &p.opts {
         if o.closure {
             closure += 1;
         } else {
-            let _ = writeln!(out, "  {} \\", words(&o.args));
+            let _ = writeln!(out, "  {}", words(&o.args));
         }
     }
-    let _ = writeln!(out, "  {} \\", words(&p.root));
+    let _ = writeln!(out, "  {}", words(&p.root));
     let _ = writeln!(out, "  {}", words(&p.entry));
     if closure > 0 {
         let _ = writeln!(

@@ -16,9 +16,11 @@ let
       ../contracts/fixtures/policy-1
     ];
   };
+  # pname and version from the member's Cargo.toml (the workspace's root manifest has neither)
+  crate = craneLib.crateNameFromCargoToml { cargoToml = ../backends/container/Cargo.toml; };
   commonArgs = {
     inherit src;
-    pname = "pot-container";
+    inherit (crate) pname version;
     strictDeps = true;
   };
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
@@ -37,12 +39,12 @@ in
       inherit cargoArtifacts;
       cargoClippyExtraArgs = "--all-targets -- --deny warnings";
     });
-    pot-container-fmt = craneLib.cargoFmt { inherit src; pname = "pot-container"; };
+    pot-container-fmt = craneLib.cargoFmt { inherit src; inherit (crate) pname version; };
     # Advisories need the network, which the build sandbox does not have: run `cargo deny check advisories`
     # in `nix develop`.
     pot-container-deny = craneLib.cargoDeny {
       inherit src;
-      pname = "pot-container";
+      inherit (crate) pname version;
       cargoDenyChecks = "bans licenses sources";
     };
   };

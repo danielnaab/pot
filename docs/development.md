@@ -19,7 +19,11 @@ How to change pot, test it, and release it.
 | `dev/flake.nix` | Development-only inputs (knowledge-base-kit) and the docs check, kept out of pot's lock and so out of every root's and producer's. |
 | `docs/`, `README.md`, `AGENTS.md` | Documentation, checked against knowledge-base-kit's conventions. |
 
-A Rust backend (pot's phase 2) will go in a crate folder of its own beside `core/` (such as `crates/`).
+`backends/container/` is pot's first Rust code, the [container backend](reference/container.md) (draft): a member of
+the Cargo workspace at the root (`Cargo.toml`, `Cargo.lock`, `deny.toml`, `rustfmt.toml`), built by `nix/rust.nix`
+with crane, on grove's conventions (clippy pedantic with warnings denied, `unsafe` forbidden, few dependencies with
+a reason each, trycmd transcripts under `docs/reference/container/`). `nix develop` has cargo, clippy, rustfmt and
+cargo-deny.
 
 ## Test
 
@@ -36,7 +40,9 @@ KEEP=1 tests/run.sh              # the same, and keep the work directory to debu
 parts that start runs are skipped, saying so. On macOS the `pot` section runs the Seatbelt backend's own part
 (`pot_seatbelt`).
 
-`nix flake check` runs `shellcheck`, the unit tests (`pot-unit`), the golden grant test (`pot-golden`: the
+`nix flake check` runs `shellcheck`, the container backend's build, tests (its unit tests and transcripts),
+clippy, rustfmt and cargo-deny (`pot-container`, `-test`, `-clippy`, `-fmt`, `-deny`; in `nix develop`, `cargo test`
+and `TRYCMD=overwrite cargo test` to rewrite a transcript's output), the unit tests (`pot-unit`), the golden grant test (`pot-golden`: the
 canonical grant items and digests of the default root's `claude-code@personal` and of `tests/golden.nix`'s root,
 equal `tests/golden.json` byte for byte; never regenerate it to make the check pass), and checks that roots, the
 kits and the home-manager module build (`pot-root`, `pot-root-claude`, `pot-gateway`, `pot-pi`, `pot-root-pi`,

@@ -9,6 +9,11 @@ v2.14.0's `sandbox` on).
 
 ### Added
 
+- **The container backend, a first slice** (draft, [docs/reference/container.md](docs/reference/container.md)):
+  `pot-container`, pot's first Rust code (`packages.pot-container`). It reads policy.json/1 strictly, probes podman
+  or docker, and renders a run as one `podman run` / `docker run`, refusing what it does not carry out yet; no
+  root offers it, and its `run` is not written.
+
 - **policy.json/1, a contract** ([contracts/policy-1.md](contracts/policy-1.md)): a run's `policy.json` as prose, a
   JSON Schema (2020-12) and fixtures, for a backend built apart from pot. It says which fields a backend must
   enforce and which are for explanations, the backend's verbs, and what a backend must refuse rather than run
