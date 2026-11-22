@@ -2857,3 +2857,53 @@ fn podman_the_commands_environment_is_bwraps_with_bindings() {
 fn docker_the_commands_environment_is_bwraps_with_bindings() {
     bwrap_env_case("docker");
 }
+
+/// A link planted after prepare, at secrets/ or at a file's name in it, is never written through: at secrets/ run
+/// refuses before the engine (the folder prepare left, S4); in it, run removes the link and creates its own file.
+#[test]
+fn a_link_planted_in_secrets_is_never_followed() {
+    let Some(program) = engine_program("podman") else {
+        return;
+    };
+    let cat = coreutils("cat");
+    let (top, run) = bind_world(
+        "bind-link",
+        "podman",
+        &program,
+        &[&cat, "/run/pot/secrets/E_TOKFILE"],
+    );
+    prepare(&top, &run);
+    let outside = top.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("E_TOKFILE"), "").unwrap();
+    // in secrets/: the link goes, run's own file takes its name
+    symlink(outside.join("E_TOKFILE"), run.join("secrets/E_TOKFILE")).unwrap();
+    let out = verb(&top, &run, "run")
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), marker("E_TOKFILE"));
+    assert_eq!(
+        fs::read_to_string(outside.join("E_TOKFILE")).unwrap(),
+        "",
+        "written through the link"
+    );
+    // at secrets/: refused, nothing written
+    prepare(&top, &run);
+    fs::remove_dir(run.join("secrets")).unwrap();
+    symlink(&outside, run.join("secrets")).unwrap();
+    let out = verb(&top, &run, "run")
+        .envs(bind_env())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("secrets (not the dir prepare left)"), "{err}");
+    assert_eq!(names(&outside), set(&["E_TOKFILE"]));
+    assert_eq!(fs::read_to_string(outside.join("E_TOKFILE")).unwrap(), "");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert!(outside.join("E_TOKFILE").exists(), "cleanup followed the link");
+}
