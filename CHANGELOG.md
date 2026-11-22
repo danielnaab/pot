@@ -45,6 +45,16 @@ v2.14.0's `sandbox` on).
 - **The container backend's final audit (U1, U2):** `PIPESTATUS`, which bash resets after every command, is refused
   as a run's variable. An env item named like one of pot's values (`TZ` from env.set, `LANG`) takes the host's
   value when the host has it set and pot's value when not, as under bubblewrap.
+- **The container backend: secrets over a named pipe, and the network.** The run's variables (a secret's among them)
+  go over a named pipe in the run folder (`secrets.fifo`, mode 0600, bound read-only at `/run/pot/secrets.fifo`)
+  under podman and docker alike, so docker now carries a secret variable; `--preserve-fd` is gone, and no fd of the
+  caller's reaches the container. `run` writes the pipe without blocking and never hangs on a container that did not
+  read it; the pipe is removed when the command ends and at `cleanup`. An effective network reach item is carried
+  out instead of refused: `run` starts pot's `proxy.py` on the host on the run folder's `proxy.sock` (bound at
+  `/run/pot/proxy.sock`), the container keeps `--network none`, socat in the run serves it as 127.0.0.1:3128, the
+  proxy's variables are bwrap's, `after` reports `denials` and `loopback`, and `cleanup` stops a proxy still running.
+  `probe` proves `private-proxy` when the backend's config names `python`, `proxy` and `socat` (new config keys,
+  with `netClosure`; no contract change). The dev shell gains socat, curl and strace for the backend's tests.
 
 ### Changed
 

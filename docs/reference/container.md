@@ -6,8 +6,9 @@ status: draft
 pot's third backend, beside bubblewrap and Seatbelt: it carries out a run's [policy.json/1](../../contracts/policy-1.md)
 as one `podman run` or `docker run`, a fresh container per run, on any host or CI that has either. It is pot's
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
-`packages.pot-container`). This page is its second slice (pot phase 2, plan step 3): it probes, renders the
-command and runs it, for runs in place with read access or none; no root offers the backend yet. The transcripts
+`packages.pot-container`). This page is its third slice (pot phase 2, plan step 3): it probes, renders the
+command and runs it, for runs in place with read access or none, with the network through pot's proxy; no root
+offers the backend yet. The transcripts
 that test it are the pages under [container/](container/probe.md).
 
 ```
@@ -19,8 +20,8 @@ pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
 | `probe` | Prints `{ "guarantees": [ … ] }`, or none beside an `error` ([transcript](container/probe.md)) |
 | `prepare` | Checks the policy and refuses what it can't carry out; places the run's files and `container.argv` (the command, NUL-separated). `--print` prints the command and writes nothing ([transcript](container/prepare.md)) |
 | `run` | Runs `container.argv` with the engine environment `prepare` recorded; exits with the command's status once the container is gone ([Run and cleanup](#run-and-cleanup)) |
-| `after` | Prints the run's `after` event: bwrap's, empty (nothing a read-only run can leave) |
-| `cleanup` | Removes the run's container and store through the engine, then what `prepare` placed; names every removal it could not make (exit 1) |
+| `after` | Prints the run's `after` event: bwrap's, with the proxy's `denials` and `loopback` and nothing else (nothing a read-only run can leave) |
+| `cleanup` | Stops the run's proxy if it still runs, removes the run's container and store through the engine, then what `prepare` and `run` placed; names every removal it could not make (exit 1) |
 
 A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 
@@ -29,7 +30,12 @@ A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 **`--config`** (JSON; unknown keys refused): `engine` (`podman` or `docker`; by default podman when it is on `PATH`,
 else docker), `podman` and `docker` (the programs), `image` (docker's empty image, default `localhost/pot-empty:1`),
 and the store paths bound into every run, named as bwrap's config names them: `sh`, `shell`, `env`, `cacert`,
-`terminfo`, `tzdir` and `baseClosure` (a file of store paths). `prepare` needs all of the store paths.
+`terminfo`, `tzdir` and `baseClosure` (a file of store paths). `prepare` needs all of the store paths. The network's
+programs, also named as bwrap's config names them: `python` and `proxy` (pot's `proxy.py`), which run on the host,
+`socat`, which runs in the run, and `netClosure` (a file of store paths: socat's closure, bound into a run with the
+network under `closure-store`). Without `python`, `proxy` and `socat`, `probe` does not prove `private-proxy` and
+`prepare` refuses the network. No contract field is added: these are the backend's own config, and the proxy's other
+inputs are launch.json/1's existing fields (below).
 
 **`launch.json`** ([launch.json/1](../../contracts/launch-1.md)) is read leniently, and only these fields:
 
@@ -42,6 +48,9 @@ and the store paths bound into every run, named as bwrap's config names them: `s
 | `uid`, `gid` | `--user`; with podman, the id `--userns=keep-id` keeps. `prepare` refuses a `uid` that is not the caller's |
 | `closure` | The store paths bound read-only under `closure-store` |
 | `potBin` | `/run/pot/launcher` and `~/.config/pot/launcher`, and on `PATH` |
+| `pane`, `hostTools.tmux` | The proxy's notices of a denial on the caller's tmux pane (`--tmux`, `--pane`), as bwrap's |
+| `netFix` | The permanent fix a denial names (the proxy's `--fix`) |
+| `siblingOf` | A sibling's proxy shows no one-run fix (`--sibling`) |
 
 ## Probe
 
@@ -67,9 +76,10 @@ Guarantees, in bubblewrap's vocabulary (no new names):
 | `in-place` | The workspace at its own path |
 | `root-files` | A `file` item at `/…`, bound into the container's own root |
 | `resource-limits` | podman only: `--cgroups=split` keeps the container in the cgroup of the pot that starts it, so the scope's `MemoryMax` and `TasksMax` apply (seen in a smoke run: the container's cgroup is a child of its caller's) |
+| `private-proxy` | When the config names `python`, `proxy` and `socat` (each a file): the proxy listens on a socket in the run folder, which only the caller can reach, and the run serves it on 127.0.0.1:3128 in its own network namespace ([The network](#the-network)) |
 
-Not proved yet: `protected-as-mounts`, `same-path-clone`, `private-proxy` (see [What's next](#whats-next)); never:
-`nest`, `separate-kernel`.
+Not proved yet: `protected-as-mounts`, `same-path-clone` (see [What's next](#whats-next)); never: `nest`,
+`separate-kernel`.
 
 **pot must not cache this probe.** pot caches a backend's probe per build; this one's answer depends on the caller
 (its `NoNewPrivs`, the engine's state and configuration), so pot must probe it for every run.
@@ -110,11 +120,18 @@ container config), which is acceptable for a plain variable and not for a secret
 run's files; the conformance audit of 2026-11-21 found a secret there, R3). **A secret variable** (an `env` item with
 `secret: true`) never reaches the engine. With one, every variable passed by name (the secrets, `TERM`, `COLORTERM`
 and the plain items) goes over a pipe instead. `run` writes `NAME=value` records, each ended by a NUL, then the
-sentinel record `.`. The engine passes the pipe's read end on with `--preserve-fd FD`, which keeps its number, and
-`run` gives the script that number. No other fd of the caller's reaches the container. The entry starts with
-`/usr/bin/env -i --`, which clears what the engine set. Then the run's bash (the config's `shell`) collects the
-records up to the sentinel and closes the fd. If the stream is not whole (no pipe, a short read, a record that is not
-`NAME=value`), it exits 125 and nothing runs. Otherwise it declares each record in bash (`unset -v NAME`, which drops
+sentinel record `.`. The pipe is a named pipe, `RUNDIR/secrets.fifo` (decided 2026-11-22, for both engines: docker
+passes no file descriptor, and podman's `--preserve-fd` passed one of the caller's): `run` makes it just before the
+engine starts, whatever is at its path removed first (a link is removed, never followed), mode 0600, and checks that
+it is a pipe of the caller's with that mode. The plan binds it read-only at `/run/pot/secrets.fifo`; the container's
+user is the caller (podman's `keep-id`, docker's `--user` with no user namespace), so it can open it under both
+engines. `run` opens it without following a link and without blocking (retried until the container has it open), and
+writes in a thread without blocking, until the engine exits, so `run` never waits on a container that ended before it
+read. It removes the pipe when the command ends, and `cleanup` does too. No fd of the caller's reaches the container.
+The entry starts with `/usr/bin/env -i --`, which clears what the engine set. Then the run's bash (the config's `shell`) opens the pipe read-write
+(so its open never waits for `run`), collects the records up to the sentinel, each within 30 s, and closes it. If the
+stream is not whole (no pipe, a short read, a timeout, a record that is not `NAME=value`), it exits 125 and nothing
+runs. Otherwise it declares each record in bash (`unset -v NAME`, which drops
 a special meaning such as `RANDOM`'s, then `declare -x`). A record is never an argument: an earlier version passed
 the records to `env -i`, and the audit read a secret in that process's `/proc/PID/cmdline` (T1). Bash then execs the
 last hop, `/usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV`, whose arguments hold only names
@@ -128,19 +145,20 @@ command (`SHLVL`, `PWD`, `OLDPWD`, `_`, `PIPESTATUS`), unset by it (`PS1`, `PS2`
 value is in no file, no argument and not in the engine's environment (checked in a real run: a marker value was in
 no file of the run folder or of `$XDG_RUNTIME_DIR/crun`, and in no engine process's arguments or environment, while
 the command printed it; and with every process on the host watched while a 100 000-byte variable slowed the
-script's reads, no process's arguments ever held a record's value). With a secret, `prepare` refuses a shell that is not a real file under a path the run binds
-(S5). docker passes no file descriptor, so `prepare` refuses a secret variable under docker. The run's bash is used
+script's reads, no process's arguments ever held a record's value). With a secret or the network, `prepare` refuses a shell that is not a real file under a path the run binds
+(S5), and with the network a `socat` that is not one. The run's bash is used
 rather than this binary, which would need its own closure (glibc, libgcc) bound, a closure the config does not name. A plain variable may not be one the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
 `_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `LISTEN_*`, `HOME`,
 `PATH`, `TMPDIR`, `NOTIFY_SOCKET`, `REGISTRY_AUTH_FILE`, `SSH_AUTH_SOCK`, or one of Go's runtime variables (`GODEBUG`,
-`GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). For a secret variable under podman
+`GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). For a secret variable
 this list is no longer needed, since the engine never sees it: only the names pot sets itself (`HOME`, `PATH` and the
 rest of pot's variables) would stay refused. It still applies to secret variables for now; lifting it is a later
-change. Plain variables already take the same pipe when a secret is there; with no secret they do not.
+change. Plain variables already take the same pipe when a secret or the network is there; otherwise they do not.
 
 `prepare` writes these as `container.env` for `run`: the names kept, the values set, the names that go over the
-pipe, and the kind (file or folder) of every file of the run's that the plan binds. It holds no secret's value.
-`prepare --print` shows them. pot's default hidden list holds `~/.config/containers` and
+pipe (and whether the pipe is used), the proxy's command, and the kind (file or folder) of every file of the run's that
+the plan binds, but for the pipe and the proxy's socket, which `run` makes. It holds no secret's value.
+`prepare --print` shows them, and the proxy's command. pot's default hidden list holds `~/.config/containers` and
 `~/.docker/config.json` (unreleased): no run can read or change the configuration of a later container run.
 
 ## Policy to flags
@@ -151,13 +169,15 @@ pipe, and the kind (file or folder) of every file of the run's that the plan bin
 | (always) | `run --interactive --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same, and `--name pot-HASH` (16 hex digits of the run folder's path, FNV-1a) |
 | (always) | `--init`: the engine's init is PID 1 (catatonit, or docker's `docker-init`), a read-only bind of the engine's own file; the command is never PID 1, which ignores a signal it has no handler for | the same |
 | stdin a terminal | `--tty`, added by `run` | the same |
-| a secret `env` item | `--preserve-fd FD`, added by `run`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-secrets FD /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` | refused |
+| a secret `env` item, or the network | `--volume RUNDIR/secrets.fifo:/run/pot/secrets.fifo:ro`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-entry /run/pot/secrets.fifo SOCAT /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` (`SOCAT` empty without the network) | the same, with `--mount` |
 | (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never --entrypoint ""` |
 | the working directory | `/usr/bin/env -C CWD -u HOSTNAME -- ARGV` (podman takes no `-w` with `--rootfs`); with a secret, as above | the same |
 | `/tmp`, `/run`, `HOME` | `--tmpfs …,notmpcopyup` (podman's default copies the folder below into the tmpfs); the home `mode=0700,U` | `--tmpfs`; the home `mode=0700,uid=UID,gid=GID` |
-| no effective network reach item | `--network none` | the same |
+| (always, with the network or without) | `--network none`: only `lo` | the same |
+| an effective network reach item | `--volume RUNDIR/proxy.sock:/run/pot/proxy.sock:ro`; socat's closure (`netClosure`) bound read-only with the closure; the entry starts socat on 127.0.0.1:3128 ([The network](#the-network)) | the same, with `--mount` |
+| the same | `--env` `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy` `=http://127.0.0.1:3128`, `NO_PROXY`, `no_proxy` `=localhost,127.0.0.1,::1` (bwrap's `run_env`, set last: they beat `env.set` and an item of the same name) | the same |
 | a bind | `--volume SRC:DEST:ro` (or `:rw`) | `--mount type=bind,source=SRC,target=DEST[,readonly]`: docker's `--volume` creates a missing source, as root |
 | `closure-store` proved | a read-only bind for each path of `launch.json` `closure` and the config's base closure | the same |
 | `closure-store` not proved | `/nix/store` bound read-only | the same |
@@ -197,8 +217,11 @@ regular files or absent. Every file and folder of the run's that the plan binds 
 `passwd` and the rest, S4) must still be the kind `prepare` recorded. `container.id` must be absent, and `status` a
 file or nothing (an empty folder there is removed). Otherwise `run` refuses, naming each path, and the engine
 never starts. It starts the engine with the caller's environment cleared but for the names `container.env`
-keeps, then the values it sets. stdin, stdout and stderr are the engine's. It adds `--tty` when stdin is a terminal,
-and the secrets' pipe ([above](#the-engines-configuration)). docker's root is the config's image, by default
+keeps, then the values it sets. stdin, stdout and stderr are the engine's. It adds `--tty` when stdin is a terminal.
+Before the engine it makes the named pipe ([above](#the-engines-configuration)) and starts the proxy
+([The network](#the-network)), then checks the run folder again, the pipe and the proxy's socket included (each must
+be what `run` just made: a pipe, a socket). Whatever it started is stopped and removed when the command ends, and on
+every early return. docker's root is the config's image, by default
 `localhost/pot-empty:1`. `run` imports it from an empty tar when it is missing (`docker import`) and refuses an image
 that is not the one empty layer with no configuration (R4): `Entrypoint`, `Cmd`, `Env`, `Volumes`, `User`,
 `WorkingDir`, `OnBuild`, `Labels`, `ExposedPorts`, `Healthcheck`, `StopSignal`, `Shell` and `ArgsEscaped` must be
@@ -227,6 +250,9 @@ reads it.
 
 **`cleanup`** (audit N6) removes, in order:
 
+- The run's proxy, if it still runs (a `run` killed with SIGKILL leaves it for up to a second): a process whose
+  arguments hold `proxy.sock` and the run's own `--denials RUNDIR/denials` and whose working folder is the run folder,
+  stopped with SIGTERM, then SIGKILL after 2 s; one that would not stop is named.
 - The container, through the engine (podman's when the run's store is not empty; docker's by the run's name),
   waiting for the engine's processes as `run` does. The engine is never handed a linked path (R2). When
   `engineroot`, `enginetmp` or `enginehome` is not a real folder, or the removal or the wait fails, the engine's
@@ -236,13 +262,48 @@ reads it.
 - The engine's state (`enginestore`, `engineroot`, `enginetmp`). What the user can't remove (files of another id of
   the user namespace, an overlay's mode-000 `work/work`) is removed with `podman unshare rm -rf`, run by a podman
   whose own store is a private temporary folder, never the run's.
-- The engine's home and what `prepare` placed. It never follows a link planted in the run folder (a
+- The engine's home, what `prepare` placed, and the named pipe and the proxy's socket. `proxy.log` stays, as
+  bwrap's does (the run's record, which `after` reads). It never follows a link planted in the run folder (a
 link is removed, not followed) and never empties a folder that should be empty (`rootfs`, `emptydir`). Every
 removal it could not make is named in one refusal (exit 1); what it removed stays removed, so it can run again.
 
 Outside the run folder, as with any rootless podman: the OCI runtime's state for a running container
 (`$XDG_RUNTIME_DIR/crun/ID`, gone once the container is removed) and the user's podman pause process, which keeps
 the user namespace for later podman commands and is shared with them.
+
+## The network
+
+An effective `network` item of class `reach` is carried out with pot's own proxy, as bubblewrap does: the run reaches
+exactly the allowlist, through the proxy, and nothing else (policy-1 rule 5). The container keeps `--network none`,
+so it has only `lo`: a connection that bypasses the proxy has no route, and 127.0.0.1 is the run's own loopback,
+never the host's.
+
+- **The proxy, on the host.** `run` starts `PYTHON -I -S PROXY proxy.sock --denials RUNDIR/denials --context CTX
+  [--tmux TMUX --pane PANE] --fix FIX [--sibling 1] HOST:PORT…` (bwrap's command; `prepare` writes it in
+  `container.env`), in the run folder, before the engine. Its socket is `proxy.sock`, relative to its working folder:
+  a run folder's path may be longer than `sun_path`'s 108 bytes. Its log is `proxy.log`, made afresh, never through a
+  link. Its environment is the caller's `PATH HOME USER LOGNAME LANG TMUX TMUX_TMPDIR XDG_RUNTIME_DIR` and nothing
+  else (bwrap passes the whole environment; the caller's secrets never reach this proxy). `run` waits up to 5 s for
+  the socket, else refuses with the log's last line. The proxy refuses a host not allowed (403), records it once in
+  `denials` (the run's `/run/pot/denials`), and never reaches the host's loopback: a name that resolves to it is
+  refused (`LOOPBACK`).
+- **In the run.** The run folder's `proxy.sock` is bound read-only at `/run/pot/proxy.sock`, a short path whatever
+  the run folder's. The entry's bash (always used with the network) starts the config's `socat` on 127.0.0.1:3128,
+  forwarding to that socket, with its streams `/dev/null`, its arguments pot's and its environment bash's own (no
+  variable of the run's is declared yet), and waits until it listens (`/proc/net/tcp`, as bwrap's `netwrap`), then
+  declares the variables and execs the command. socat is the command's child, as under bubblewrap; when the command
+  ends, the engine's init (PID 1) exits and the kernel ends every other process of the container, socat included, so
+  it never keeps the container alive. socat and its closure (`netClosure`) are bound read-only.
+- **The variables**, bwrap's `run_env`'s, set last: `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`,
+  `ALL_PROXY` and `all_proxy` are `http://127.0.0.1:3128`, and `NO_PROXY` and `no_proxy` `localhost,127.0.0.1,::1`.
+  With the network every variable passed by name goes over the named pipe, as with a secret, so the command's
+  environment is exactly the plan's.
+- **The end.** When the command ends, `run` stops the proxy (SIGTERM, then SIGKILL after 2 s, bwrap's
+  `stop_helpers`) and removes its socket. The proxy is `run`'s child and stops itself once its parent is gone
+  (`proxy.py`'s `orphaned`, checked each second), so a `run` killed with SIGKILL leaves no proxy behind (tested: gone
+  within a second or two); `cleanup` stops one still there.
+- **`after`** reads `proxy.log` (a regular file only) as bwrap's does: each `DENY host:port` counted in `denials`,
+  each `LOOPBACK host:port address` in `loopback`.
 
 ## Refusals
 
@@ -262,8 +323,7 @@ refused, since a field this backend does not know could narrow the run):
 - write access in place: the workspace's pins (git directories, `config`, hooks and the protected paths as read-only
   mounts, links and hard links refused, the placeholders), as bwrap's `Pins`;
 - clone mode: the clone at its original path, its pins, proposal links, and the `after` staging fetch;
-- the network: any effective network reach item (pot's proxy over a socket in `/run/pot`, with its 108-byte
-  `sun_path` limit);
+- the network when the config names no `python`, `proxy` and `socat` (and `private-proxy` proved then);
 - every binding: `status.relay`, `git.fetch`, `nix`, `credential`, `mcp` (with `via: file` as a 0400 file under
   `/run/pot`, decided 2026-11-21);
 - a children table with a `sibling` row (the run's children broker);
@@ -271,8 +331,7 @@ refused, since a field this backend does not know could narrow the run):
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
 - a path a bind can't name (`:`, `,` or `"`), and a command whose name holds `=` (`env` would read it as a variable);
-- a run's variable that configures the container engine, or that bash can't hand over (above), and a secret
-  variable under docker;
+- a run's variable that configures the container engine, or that bash can't hand over (above);
 - a path that is not its real path, and a bind source that does not exist (above).
 
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
@@ -286,8 +345,8 @@ is).
 
 ## What's next
 
-1. The network (pot's proxy over a socket bound into `/run/pot`, with its 108-byte `sun_path` limit), then the
-   bindings.
+1. The bindings: `credential` and `mcp` (with `via: file` as a 0400 file under `/run/pot`), `status.relay`,
+   `git.fetch`, `nix`; then siblings.
 2. Write access: pot's core resolves the workspace's protected paths and pins and passes them to the backend
    (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
 3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
@@ -308,7 +367,18 @@ is).
   keeps the store when it could not remove the container; a secret's value in no file or engine process; a docker
   image with a configuration refused; a bystander process naming the store not waited for; a mode-000 folder of
   another id removed through `podman unshare`, or named
-- [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `masked`, `Pins`, `cleanup` (the reference backend)
+- This slice's tests in `run.rs` (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, 2026-11-22), under both
+  engines: a secret arrives exactly over the named pipe and its marker is in no file of the run folder or
+  `$XDG_RUNTIME_DIR/crun`, not in the engine's `container inspect`, and in no exec's arguments (`strace -f -e
+  execve` of `run`, which under podman follows into the container's bash and its last hop); a link planted at the
+  pipe's path is removed, never written through; a container that never opens the pipe does not hang `run`; with the
+  network, `https://example.com` (allowed) answers 200, `https://example.org` is refused (403) and is in `denials` and
+  the after event, a direct connection fails, `localhost:PORT` through the proxy is refused as the host's loopback
+  (`loopback` in the after event) and the host's listener on 127.0.0.1 is never reached, `/proc/net/dev` shows only
+  `lo`; the command's environment with the network is exactly the plan's; the proxy is gone within seconds of a
+  SIGKILL of `run`; `cleanup` stops a live proxy and removes its socket
+- [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `masked`, `Pins`, `cleanup`, `run` (the proxy),
+  `after` (denials and loopback) (the reference backend); [core/proxy.py](../../core/proxy.py)
 - [core/pot.py](../../core/pot.py): `launch_facts` (launch.json), `scope_for` (resource-limits)
 - The phase 2 spike, executed on platform-vm on 2026-11-21 (flexion-assistant session record
   `2026-11-21-pot-phase-2/spike.md`): rootless podman and docker flags, `--rootfs DIR:O`, no `-w` with `--rootfs`,
