@@ -267,6 +267,15 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     for f in &p.files {
         match f {
             RunFile::Dir { name } => dir_new(&rundir.join(name))?,
+            RunFile::FreshDir { name } => {
+                let path = rundir.join(name);
+                match path.symlink_metadata() {
+                    Ok(m) if m.is_dir() => fs::remove_dir_all(&path).map_err(at(&path))?,
+                    Ok(_) => fs::remove_file(&path).map_err(at(&path))?,
+                    Err(_) => {}
+                }
+                fs::create_dir(&path).map_err(at(&path))?;
+            }
             RunFile::File { name, text, mode } => write_new(&rundir.join(name), text.as_bytes(), *mode)?,
             RunFile::Link { name, target } => {
                 let path = rundir.join(name);
@@ -331,6 +340,7 @@ fn cleanup(rundir: &Path) {
         "container.argv",
         "container.env",
         "containers.conf",
+        "storage.conf",
         "container.id",
         "passwd",
         "group",
@@ -345,8 +355,45 @@ fn cleanup(rundir: &Path) {
     for d in ["potcfg", "rootfs", "emptydir", "dockercfg"] {
         let _ = fs::remove_dir(rundir.join(d));
     }
-    // the engine's home: what podman wrote there (its .config), never the run
+    // the engine's home and store: what podman wrote there, never the run
     let _ = fs::remove_dir_all(rundir.join("enginehome"));
+    let _ = fs::remove_dir_all(rundir.join("enginestore"));
+}
+
+/// probe's engine, in a temporary folder of its own (podman's home, its storage.conf and store), removed after:
+/// probe leaves nothing in the folder pot gives it, often pot's state (audit N3).
+fn probe_now(e: Engine, program: &str) -> Result<Vec<&'static str>, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let found = if program.contains('/') {
+        Path::new(program).is_file()
+    } else {
+        on_path(program)
+    };
+    if !found {
+        return Err(format!("{}: can't run {program}: not found", e.name()));
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let dir = std::env::temp_dir().join(format!("pot-container-probe-{}-{nanos}", std::process::id()));
+    // a new folder, 0700, that did not exist: never one another user placed
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|err| format!("{}: {err}", dir.display()))?;
+    let d = dir.to_string_lossy().into_owned();
+    let made = fs::create_dir(dir.join("home")).and_then(|()| {
+        write_new(
+            &dir.join("storage.conf"),
+            engine::storage_conf(&format!("{d}/store")).as_bytes(),
+            0o444,
+        )
+    });
+    let result = made
+        .map_err(|err| err.to_string())
+        .and_then(|()| probe::assess(e, &probe::facts(e, program, &engine::probe_set(e, &d))));
+    let _ = fs::remove_dir_all(&dir);
+    result
 }
 
 fn main() -> ExitCode {
@@ -363,31 +410,12 @@ fn main() -> ExitCode {
     };
     let cfg = read_config(cli.config.as_deref());
     let result = match &cli.verb {
-        Verb::Probe { rundir } => {
-            // podman's home is an empty folder of pot's, so it reads none of the user's files (audit F2)
-            let home = rundir.join("enginehome");
-            let ready = cfg.and_then(|c| engine(&c)).and_then(|(e, program)| {
-                let found = if program.contains('/') {
-                    Path::new(&program).is_file()
-                } else {
-                    on_path(&program)
-                };
-                if !found {
-                    return Err(format!("{}: can't run {program}: not found", e.name()));
-                }
-                if e == Engine::Podman {
-                    dir_new(&home).map_err(|err| err.to_string())?;
-                }
-                Ok((e, program))
-            });
-            let doc = match ready {
-                Ok((e, program)) => match probe::assess(
-                    e,
-                    &probe::facts(e, &program, &engine::probe_set(e, &home.to_string_lossy())),
-                ) {
-                    Ok(g) => serde_json::json!({ "guarantees": g }),
-                    Err(err) => serde_json::json!({ "guarantees": [], "error": err }),
-                },
+        Verb::Probe { .. } => {
+            let doc = match cfg
+                .and_then(|c| engine(&c))
+                .and_then(|(e, program)| probe_now(e, &program))
+            {
+                Ok(g) => serde_json::json!({ "guarantees": g }),
                 Err(err) => serde_json::json!({ "guarantees": [], "error": err }),
             };
             let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{doc}\n").as_bytes());

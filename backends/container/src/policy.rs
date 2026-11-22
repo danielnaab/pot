@@ -260,10 +260,10 @@ pub fn parse(text: &str) -> Result<Policy, Refusal> {
         .to_string();
     match raw.get("version") {
         Some(Value::Number(n)) if n.as_u64() == Some(1) => {}
-        Some(v) => {
+        Some(_) => {
             return Err(Refusal::new(
                 &context,
-                format!("policy.json version {v}: this backend reads version 1 only"),
+                "policy.json's version is not 1: this backend reads version 1 only",
             ));
         }
         None => {
@@ -363,16 +363,16 @@ fn check_rules(p: &Policy) -> Result<(), String> {
     let run_ok =
         p.run == "explain" || (p.run.len() == 4 && p.run.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
     if !run_ok {
-        return Err(format!("run {:?} is not four hex digits", p.run));
+        return Err("run is not four hex digits".into());
     }
     if p.context.is_empty() {
         return Err("context is empty".into());
     }
     if !matches!(p.mode.as_str(), "in-place" | "clone") {
-        return Err(format!("mode {:?} is not one this backend knows", p.mode));
+        return Err("mode is not one this backend knows".into());
     }
     if !matches!(p.access.as_str(), "write" | "read" | "none") {
-        return Err(format!("access {:?} is not one this backend knows", p.access));
+        return Err("access is not one this backend knows".into());
     }
     for w in &p.workspace {
         if !w.id.starts_with("repo:") || !abs(&w.path) || !abs(&w.common) {
@@ -648,7 +648,7 @@ mod tests {
         let e = parse(r#"{"version": 2, "context": "work", "new": 1}"#).unwrap_err();
         assert_eq!(
             e.to_string(),
-            "pot (work): policy.json version 2: this backend reads version 1 only"
+            "pot (work): policy.json's version is not 1: this backend reads version 1 only"
         );
         let e = parse(r#"{"context": "work"}"#).unwrap_err();
         assert_eq!(
@@ -690,5 +690,22 @@ mod tests {
             serde_json::from_str(include_str!("../../../contracts/policy-1.schema.json")).unwrap();
         let names = &schema["properties"]["backend"]["properties"]["name"]["enum"];
         assert!(names.as_array().unwrap().iter().any(|n| n == BACKEND), "{names}");
+    }
+
+    /// N4c: the version and the run's id are not shown either when they are wrong.
+    #[test]
+    fn a_wrong_version_or_run_is_not_shown() {
+        let e = parse(r#"{"version": "sk-live-123", "context": "work"}"#)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "pot (work): policy.json's version is not 1: this backend reads version 1 only"
+        );
+        let text = include_str!("../../../docs/reference/container/prepare.in/read-only/policy.json");
+        let mut v: Value = serde_json::from_str(text).unwrap();
+        v["run"] = "sk-live-123".into();
+        let e = parse(&v.to_string()).unwrap_err().to_string();
+        assert_eq!(e, "pot (review): policy.json/1: run is not four hex digits");
     }
 }

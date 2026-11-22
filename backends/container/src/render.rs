@@ -70,9 +70,22 @@ pub struct Opt {
 /// What `prepare` places in the run directory for the command to see.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunFile {
-    File { name: String, text: String, mode: u32 },
-    Dir { name: String },
-    Link { name: String, target: String },
+    /// A folder of the run's, emptied: removed with what is in it, then made again.
+    FreshDir {
+        name: String,
+    },
+    File {
+        name: String,
+        text: String,
+        mode: u32,
+    },
+    Dir {
+        name: String,
+    },
+    Link {
+        name: String,
+        target: String,
+    },
 }
 
 #[derive(Debug)]
@@ -214,6 +227,15 @@ fn gaps(i: &Inputs) -> Vec<String> {
     for d in p.effective("dir") {
         out.push(format!("dir {} (a folder of links)", d.value));
     }
+    for e in p
+        .effective("env")
+        .filter(|e| crate::engine::configures_engine(&e.value))
+    {
+        out.push(format!(
+            "the variable {}, which configures the container engine, as a run's variable",
+            e.value
+        ));
+    }
     for it in p.items.iter().filter(|it| it.effective && !known_kind(&it.kind)) {
         out.push(format!("an item of kind {} ({})", it.kind, it.class));
     }
@@ -229,7 +251,7 @@ fn gaps(i: &Inputs) -> Vec<String> {
 
 /// The paths a `--volume` names: one with ':' or ',' can't be said there.
 fn unsayable(plan: &[(String, Mount)], closure: &[String]) -> Vec<String> {
-    let bad = |s: &str| s.contains(':') || s.contains(',');
+    let bad = |s: &str| s.contains(':') || s.contains(',') || s.contains('"');
     let mut out = vec![];
     for (dest, m) in plan {
         if bad(dest) {
@@ -271,18 +293,24 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     ];
     let mut host_dirs = vec![];
 
-    let hidden: Vec<&str> = p
-        .effective("hidden")
-        .flat_map(|h| h.paths.iter().flatten())
-        .map(String::as_str)
-        .collect();
+    // the hidden paths, and (N4a) the real path of each that is a link, as Home Manager's files are: a link is
+    // masked where a bound folder shows it, and so is what it points to
+    let mut hidden: Vec<String> = vec![];
+    for h in p.effective("hidden").flat_map(|h| h.paths.iter().flatten()) {
+        for q in [Some(h.clone()), host.realpath(h)].into_iter().flatten() {
+            if !hidden.contains(&q) {
+                hidden.push(q);
+            }
+        }
+    }
+    let real_dir = |q: &str| host.is_real_dir(q) || host.realpath(q).is_some_and(|r| host.is_real_dir(&r));
     // K4: a hidden folder is hidden as one unit: nothing is bound inside it
     let in_hidden = |q: &str| hidden.iter().any(|h| under(q, h) && host.is_real_dir(h));
-    let hidden_or_below = |q: &str| hidden.contains(&q) || in_hidden(q);
-    // a mask is a read-only bind of an empty folder or file: never a tmpfs, which podman mounts before every
-    // bind, so a tmpfs below a bound folder is covered by it (the smoke test, 2026-11-21)
+    let hidden_or_below = |q: &str| hidden.iter().any(|h| h == q) || in_hidden(q);
+    // a mask is a read-only bind of an empty folder or file, by the kind of what it hides: never a tmpfs, which
+    // podman fills with a copy of what is below it (tmpcopyup)
     let mask = |m: &mut Mounts, q: &str| {
-        let empty = if host.is_real_dir(q) { "emptydir" } else { "empty" };
+        let empty = if real_dir(q) { "emptydir" } else { "empty" };
         m.bind(&rd(empty), q, HIDE, true);
     };
 
@@ -365,23 +393,6 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 m.bind(q, q, prio, prio == READ);
                 bound.push(q.to_string());
             }
-        }
-    }
-    // the folders the run sees whole: the bound ones, and with read access each workspace's top and common
-    let mut roots = bound.clone();
-    if p.access == "read" && p.mode == "in-place" {
-        for w in &p.workspace {
-            roots.push(w.path.clone());
-            if !under(&w.common, &w.path) {
-                roots.push(w.common.clone());
-            }
-        }
-    }
-    // a hidden path a root would show, by its name or by its real path, must be its real path
-    for h in &hidden {
-        let shown = |q: &str| roots.iter().any(|b| at_or_under(q, b));
-        if host.lexists(h) && (shown(h) || host.realpath(h).is_some_and(|r| shown(&r))) {
-            real(h, &mut unreal);
         }
     }
     for h in &hidden {
@@ -525,7 +536,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     let bad = unsayable(&mounts, &closure);
     if !bad.is_empty() {
         refuse.push(format!(
-            "paths a bind can't name (':' or ','): {}",
+            "paths a bind can't name (':', ',' or '\"'): {}",
             bad.join(", ")
         ));
     }
@@ -609,11 +620,20 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
                 text: crate::engine::containers_conf(&rd("empty")),
                 mode: 0o444,
             });
-            files.push(RunFile::Dir {
+            files.push(RunFile::File {
+                name: "storage.conf".into(),
+                text: crate::engine::storage_conf(&rd("enginestore")),
+                mode: 0o444,
+            });
+            files.push(RunFile::FreshDir {
                 name: "enginehome".into(),
+            });
+            files.push(RunFile::FreshDir {
+                name: "enginestore".into(),
             });
             vec![
                 ("CONTAINERS_CONF".to_string(), rd("containers.conf")),
+                ("CONTAINERS_STORAGE_CONF".to_string(), rd("storage.conf")),
                 ("HOME".to_string(), rd("enginehome")),
             ]
         }
@@ -991,7 +1011,10 @@ mod tests {
         p.workspace[0].path = "/home/u/src/a:b".into();
         p.workspace[0].common = "/home/u/src/a:b/.git".into();
         let gaps = go(&p, &l, Engine::Podman, &nothing()).unwrap_err();
-        assert_eq!(gaps, ["paths a bind can't name (':' or ','): /home/u/src/a:b"]);
+        assert_eq!(
+            gaps,
+            ["paths a bind can't name (':', ',' or '\"'): /home/u/src/a:b"]
+        );
     }
 
     #[test]
@@ -1121,7 +1144,7 @@ mod tests {
             ("unknown-field", "unknown field `owner`"),
             (
                 "version-2",
-                "policy.json version 2: this backend reads version 1 only",
+                "policy.json's version is not 1: this backend reads version 1 only",
             ),
         ];
         let dir = repo().join("contracts/fixtures/policy-1/invalid");
@@ -1209,19 +1232,46 @@ mod tests {
         p.workspace[0].common = "/home/u/link/.git".into();
         let gaps = go(&p, &l, Engine::Podman, &host).unwrap_err();
         assert_eq!(gaps, ["/home/u/link is not its real path (/home/u/src/notes)"]);
-        // a hidden path that is a link to a file under a bound folder
+    }
+
+    /// N4a: a hidden path that is a link (Home Manager's files are) is not refused: the link is masked where a bound
+    /// folder shows it, and so is its real path, by the real path's kind.
+    #[test]
+    fn a_hidden_link_is_masked_with_its_real_path() {
         let (mut p, l) = run_dir("read-only");
         for it in p.items.iter_mut().filter(|i| i.kind == "hidden") {
-            it.paths = Some(vec!["/home/u/.ssh".into()]);
+            it.paths = Some(vec!["/home/u/.ssh".into(), "/home/u/docs/.gnupg".into()]);
         }
         let host = Fake {
-            dirs: vec!["/home/u/docs", "/home/u/docs/ssh", "/home/u/.ssh"],
-            files: vec![],
+            dirs: vec!["/home/u/docs", "/home/u/docs/ssh", "/home/u/docs/gnupg-real"],
+            files: vec!["/home/u/.ssh", "/home/u/docs/.gnupg"],
             socks: vec![],
-            links: vec![("/home/u/.ssh", "/home/u/docs/ssh")],
+            links: vec![
+                ("/home/u/.ssh", "/home/u/docs/ssh"),
+                ("/home/u/docs/.gnupg", "/home/u/docs/gnupg-real"),
+            ],
         };
-        let gaps = go(&p, &l, Engine::Podman, &host).unwrap_err();
-        assert_eq!(gaps, ["/home/u/.ssh is not its real path (/home/u/docs/ssh)"]);
+        let plan = go(&p, &l, Engine::Podman, &host).unwrap();
+        for want in [
+            "--volume /r/emptydir:/home/u/docs/ssh:ro",
+            "--volume /r/emptydir:/home/u/docs/.gnupg:ro",
+            "--volume /r/emptydir:/home/u/docs/gnupg-real:ro",
+        ] {
+            assert!(has(&plan, want), "missing {want}\n{:#?}", lines(&plan));
+        }
+        assert!(!lines(&plan).iter().any(|x| x.ends_with(":/home/u/.ssh:ro")));
+    }
+
+    /// N4b: docker's --mount can't name a path with a double quote.
+    #[test]
+    fn docker_refuses_a_path_with_a_quote() {
+        let (mut p, l) = run_dir("access-none");
+        p.mounts.state[0].dir = "/home/u/state/\"x".into();
+        let gaps = go(&p, &l, Engine::Docker, &nothing()).unwrap_err();
+        assert_eq!(
+            gaps,
+            ["paths a bind can't name (':', ',' or '\"'): /home/u/state/\"x"]
+        );
     }
 
     /// F10: a git common directory outside the workspace (a worktree's) gets the workspace's masking and socket search.
@@ -1306,17 +1356,36 @@ mod tests {
     fn the_engine_reads_only_pots_configuration() {
         let (p, l) = run_dir("read-only");
         let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
-        // podman reads the user's mounts.conf from $HOME whatever containers.conf says: the engine's home is the run's
+        // podman reads the user's mounts.conf from $HOME whatever containers.conf says: the engine's home is the run's,
+        // emptied at each prepare (N3); its storage is pot's (N2): a store of the run's own, native overlay
         assert_eq!(
             plan.engine_set,
             [
                 ("CONTAINERS_CONF".to_string(), "/r/containers.conf".to_string()),
+                (
+                    "CONTAINERS_STORAGE_CONF".to_string(),
+                    "/r/storage.conf".to_string()
+                ),
                 ("HOME".to_string(), "/r/enginehome".to_string()),
             ]
         );
-        assert!(plan.files.contains(&RunFile::Dir {
+        assert!(plan.files.contains(&RunFile::FreshDir {
             name: "enginehome".into()
         }));
+        assert!(plan.files.contains(&RunFile::FreshDir {
+            name: "enginestore".into()
+        }));
+        let storage = plan.files.iter().find_map(|f| match f {
+            RunFile::File { name, text, .. } if name == "storage.conf" => Some(text.clone()),
+            _ => None,
+        });
+        let storage = storage.expect("storage.conf");
+        assert!(storage.contains("driver = \"overlay\""), "{storage}");
+        assert!(
+            storage.contains("rootless_storage_path = \"/r/enginestore\""),
+            "{storage}"
+        );
+        assert!(!storage.contains("mount_program"), "{storage}");
         let conf = plan.files.iter().find_map(|f| match f {
             RunFile::File { name, text, .. } if name == "containers.conf" => Some(text.clone()),
             _ => None,
@@ -1334,11 +1403,42 @@ mod tests {
             "DOCKER_CONTEXT",
             "DOCKER_CONFIG",
             "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "CONTAINERS_STORAGE_CONF",
         ] {
             assert!(
                 !plan.engine_keep.iter().any(|k| k == bad),
                 "{bad} reaches the engine"
             );
+        }
+        // N1: a run variable reaches the container through the engine's environment (--env NAME), so a granted
+        // variable that configures the engine is refused, never passed
+        for bad in [
+            "CONTAINERS_CONF_OVERRIDE",
+            "CONTAINERS_CONF",
+            "CONTAINER_HOST",
+            "DOCKER_HOST",
+            "DOCKER_CONFIG",
+            "XDG_CONFIG_HOME",
+            "STORAGE_OPTS",
+            "_CONTAINERS_USERNS_CONFIGURED",
+            "LD_PRELOAD",
+            "TMPDIR",
+        ] {
+            let (mut p, l) = run_dir("read-only");
+            for it in p.items.iter_mut().filter(|i| i.kind == "env") {
+                it.value = bad.into();
+            }
+            for engine in [Engine::Podman, Engine::Docker] {
+                p.backend.proved.retain(|g| g != "resource-limits");
+                let gaps = go(&p, &l, engine, &nothing()).unwrap_err();
+                assert_eq!(
+                    gaps,
+                    [format!(
+                        "the variable {bad}, which configures the container engine, as a run's variable"
+                    )]
+                );
+            }
         }
         // the variables the run is passed by name reach the engine, which reads their values
         assert!(plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));

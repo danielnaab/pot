@@ -118,3 +118,60 @@ fn prepare_names_the_file_it_could_not_write() {
         "{err}"
     );
 }
+
+/// N3: an engine home left from before (with a mounts.conf in it) is emptied by prepare.
+#[test]
+fn prepare_empties_the_engine_home() {
+    let (top, run) = world("enginehome");
+    let planted = run.join("enginehome/.config/containers");
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("mounts.conf"), "/etc/hostname:/leak\n").unwrap();
+    let out = prepare(&top, &run);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(fs::read_dir(run.join("enginehome")).unwrap().count(), 0);
+}
+
+/// N3: probe leaves nothing in the folder pot gives it (pot's state, often): podman's home is a temporary folder,
+/// removed after.
+#[test]
+fn probe_leaves_nothing_behind() {
+    let top = Path::new(env!("CARGO_TARGET_TMPDIR")).join("probe");
+    let _ = fs::remove_dir_all(&top);
+    let state = top.join("state");
+    fs::create_dir_all(&state).unwrap();
+    let fake = top.join("podman");
+    let seen = top.join("seen-home");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\necho \"$HOME\" > {}\nmkdir -p \"$HOME/.config\"\ncase \"$1\" in version) echo 5.4.1;; info) echo 'true true memory,pids,';; esac\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod").arg("755").arg(&fake).status().unwrap();
+    let config = top.join("config.json");
+    fs::write(
+        &config,
+        serde_json::json!({ "engine": "podman", "podman": fake }).to_string(),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_pot-container"))
+        .arg("--config")
+        .arg(&config)
+        .arg("probe")
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        fs::read_dir(&state).unwrap().count(),
+        0,
+        "probe left files in its folder"
+    );
+    let home = fs::read_to_string(&seen).unwrap();
+    assert!(
+        !Path::new(home.trim()).exists(),
+        "podman's home {home} is still there"
+    );
+}

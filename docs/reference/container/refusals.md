@@ -26,7 +26,7 @@ pot (dispatch): policy.json is for the seatbelt backend, not container
 ```console
 $ pot-container --config config.json prepare --print invalid-version-2
 ? 1
-pot (work): policy.json version 2: this backend reads version 1 only
+pot (work): policy.json's version is not 1: this backend reads version 1 only
 
 $ pot-container --config config.json prepare --print invalid-unknown-field
 ? 1

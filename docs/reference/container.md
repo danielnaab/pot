@@ -81,15 +81,29 @@ podman and docker read configuration that changes every container: `CONTAINERS_C
 command to another engine. The conformance audit (2026-11-21) saw each widen a run while the probe claimed every
 guarantee. So the engine starts with:
 
-- **an environment of pot's**: the caller's cleared, but for `PATH HOME USER LOGNAME XDG_RUNTIME_DIR XDG_DATA_HOME
-  DBUS_SESSION_BUS_ADDRESS CONTAINERS_STORAGE_CONF TMPDIR LANG TERM COLORTERM` and the run's variables passed by name
-  (`engine::KEEP`);
+- **an environment of pot's**: the caller's cleared, but for `PATH HOME USER LOGNAME XDG_RUNTIME_DIR
+  DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM` (`engine::KEEP`) and the run's variables passed by name;
 - **podman:** `CONTAINERS_CONF` the run's `containers.conf` (it replaces every other containers.conf; no default
-  mounts file, volumes, variables or devices; the default seccomp profile), and `HOME` an empty folder of the run's
-  (`enginehome`), since podman reads `~/.config/containers/mounts.conf` from `$HOME` whatever containers.conf says.
-  The caller's storage is named first (`XDG_DATA_HOME`, and `~/.config/containers/storage.conf` as
-  `CONTAINERS_STORAGE_CONF`). probe uses `CONTAINERS_CONF=/dev/null` and `RUNDIR/enginehome`;
+  mounts file, volumes, variables or devices; the default seccomp profile); `CONTAINERS_STORAGE_CONF` the run's
+  `storage.conf` (native overlay, no `mount_program`: a user's storage.conf named a program the engine ran at the
+  run's start); and `HOME` the run's `enginehome`, emptied at each `prepare`, since podman reads
+  `~/.config/containers/mounts.conf` from `$HOME` whatever containers.conf says;
 - **docker:** `DOCKER_CONFIG` an empty folder of the run's (probe: one that does not exist).
+
+**The store is the run's own** (`enginestore`, removed by `cleanup`): with `--rootfs` there are no image layers to
+keep, and a fresh store cost about 10 ms a start against a persistent one (rootless podman 5.4.1 on platform-vm,
+2026-11-21: 105 ms against 96 ms, mean of five `true` runs); native rootless overlay works on kernel 6.6, so no
+`mount_program` is needed. **probe** runs the engine in a temporary folder of its own (`$TMPDIR/pot-container-probe-…`,
+made 0700, holding podman's home, storage.conf and store) and removes it: it leaves nothing in the folder pot gives
+it, which is often pot's state.
+
+**A run's variables reach the container through the engine's environment** (`--env NAME`: the engine reads the
+value, so no value is in an argument or a file; policy-1 rule 6 rules out an env file). So a run may not be granted
+a variable the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
+`_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `HOME`,
+`PATH`, `TMPDIR`, `NOTIFY_SOCKET`, `REGISTRY_AUTH_FILE`, `SSH_AUTH_SOCK`, or one of Go's runtime variables (`GODEBUG`,
+`GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). A later `run` could hand the
+values over a pipe instead (`--env-file /dev/fd/N`), which would lift this.
 
 `prepare` writes these as `container.env` (the names kept and the values set; no secret's value) for `run`, and
 `--print` shows them. A root that offers this backend should also hide `~/.config/containers` (and
@@ -129,9 +143,10 @@ A mask is a read-only bind of an empty file or folder of the run's, never a `--t
 mask showed the hidden folder's contents (podman's `tmpcopyup` fills a tmpfs with what is below it; every podman
 tmpfs now says `notmpcopyup`). The engines mount by destination depth.
 
-**Paths are compared as strings**, so `prepare` refuses a bound path, a workspace top or common, a socket, or a
-hidden path a bound folder would show (by its name or by its real path) that is not its own real path (a link, or
-`..`), naming it. And it refuses a bind whose source does not exist (the run folder's own files and the state
+**Paths are compared as strings**, so `prepare` refuses a bound path, a workspace top or common, or a socket that is
+not its own real path (a link, or `..`), naming it. A hidden path that is a link (pot lists a hidden link and its
+real path; Home Manager's files are links) is not refused: the link is masked where a bound folder shows it, and so
+is its real path, by the kind of what it points to. And it refuses a bind whose source does not exist (the run folder's own files and the state
 directories aside), since docker would create it.
 
 ## Refusals
@@ -160,7 +175,8 @@ refused, since a field this backend does not know could narrow the run):
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
-- a path a bind can't name (`:` or `,`), and a command whose name holds `=` (`env` would read it as a variable);
+- a path a bind can't name (`:`, `,` or `"`), and a command whose name holds `=` (`env` would read it as a variable);
+- a run's variable that configures the container engine (above);
 - a path that is not its real path, and a bind source that does not exist (above).
 
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
@@ -202,3 +218,7 @@ is).
   `CONTAINERS_CONF_OVERRIDE`, the run had `Seccomp: 2`, no variable and neither mount (before: `Seccomp: 0`, both);
   a home tmpfs under a bound folder was empty (before, with podman's default: a copy of the host folder); a `..`
   path and a linked workspace were refused
+- The re-audit (2026-11-21) and its smoke run: a granted `CONTAINERS_CONF_OVERRIDE` variable is refused; a caller
+  storage.conf with a `mount_program` no longer runs it (before: it ran at the run's start); a mounts.conf left in
+  the engine's home is gone after `prepare`; probe leaves its folder empty; a hidden link under a bound folder and
+  its real path are both empty in the run

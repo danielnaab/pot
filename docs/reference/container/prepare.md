@@ -18,7 +18,7 @@ backend binds into every run. None of the host paths exist here, so no read path
 ```console
 $ pot-container --config config-podman.json prepare --print read-only
 # the podman command for this run, an option a line (pot explain --backend-command)
-# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR XDG_DATA_HOME DBUS_SESSION_BUS_ADDRESS CONTAINERS_STORAGE_CONF TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/read-only/containers.conf HOME=[CWD]/read-only/enginehome
+# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/read-only/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/read-only/storage.conf HOME=[CWD]/read-only/enginehome
 podman
   run --rm --interactive
   --log-driver none
@@ -93,7 +93,7 @@ Without it (`access-none/`: no workspace at all, so the command starts in the ho
 ```console
 $ pot-container --config config-docker.json prepare --print access-none
 # the docker command for this run, an option a line (pot explain --backend-command)
-# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR XDG_DATA_HOME DBUS_SESSION_BUS_ADDRESS CONTAINERS_STORAGE_CONF TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and DOCKER_CONFIG=[CWD]/access-none/dockercfg
+# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and DOCKER_CONFIG=[CWD]/access-none/dockercfg
 docker
   run --rm --interactive
   --log-driver none
