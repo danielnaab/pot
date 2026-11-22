@@ -13,7 +13,11 @@ v2.14.0's `sandbox` on).
   JSON Schema (2020-12) and fixtures, for a backend built apart from pot. It says which fields a backend must
   enforce and which are for explanations, the backend's verbs, and what a backend must refuse rather than run
   weaker. pot writes exactly what 0.1.0 wrote: `tests/run.sh` validates every `policy.json` its runs write, and
-  `pot explain --json`. `launch.json` stays internal.
+  `pot explain --json`.
+- **launch.json/1, a contract** ([contracts/launch-1.md](contracts/launch-1.md)): the launcher's facts beside
+  policy.json, as prose, a JSON Schema (2020-12) and fixtures: which fields a backend must use, which are pot's own,
+  and the keys a backend's `prepare` adds. pot writes exactly what 0.1.0 wrote: `tests/run.sh` validates every
+  `launch.json` its runs write.
 
 ### Changed
 

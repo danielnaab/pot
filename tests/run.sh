@@ -167,6 +167,22 @@ print(json.dumps(rec))' "$src/core" "$f")
   for f in "$px"/invalid/*.json; do
     refuse "contracts: policy.json/1 refuses invalid/$(basename "$f")" quiet valid "$ps" "$f"
   done
+  # launch.json/1: the launcher's facts pot writes for a backend beside policy.json (and the keys a backend adds)
+  local ls=contracts/launch-1.schema.json lx=$src/contracts/fixtures/launch-1
+  expect "contracts: launch.json/1's schema is a 2020-12 schema" quiet jsv --check-metaschema "$src/$ls"
+  expect "contracts: launch.json/1's fixtures validate" valid "$ls" "$lx"/*.json
+  expect "contracts: launch.json/1's fixtures hold a clone, a root repository, a sibling, a hook's variables, an explain, the nix store, inspect's walk and a hidden path git tracks" quiet \
+    jq -se 'any(.[]; .clone) and any(.[]; .rootRepo) and any(.[]; .siblingOf) and any(.[]; .hookEnv.GIT_INDEX_FILE)
+      and any(.[]; has("policyDigest") | not) and any(.[]; .closureCount | type == "string") and any(.[]; .walk)
+      and any(.[]; .hiddenTracked)' "$lx"/*.json
+  for f in "$px"/*.json; do
+    [ "$(basename "$f")" = seatbelt.json ] && continue     # composed by compose(), with no run: no launch.json
+    expect "contracts: launch.json/1 has policy.json/1's $(basename "$f")'s launch.json" test -f "$lx/$(basename "$f")"
+  done
+  expect "contracts: launch.json/1 has invalid fixtures" test -n "$(find "$lx/invalid" -name '*.json')"
+  for f in "$lx"/invalid/*.json; do
+    refuse "contracts: launch.json/1 refuses invalid/$(basename "$f")" quiet valid "$ls" "$f"
+  done
 }
 # runs_valid STATE CMD...: every line of every run log under STATE, and CMD's `runs --json --all`, validate against
 # runs/1's schemas (contracts/runs-1*.schema.json): what pot really wrote, in each section that runs it
@@ -190,6 +206,16 @@ policies_valid() {
   [ -n "$ps" ] || { echo "policies_valid: no policy.json under $1" >&2; return 1; }
   # shellcheck disable=SC2086 # one path per line, no spaces (the tests' own folders)
   valid contracts/policy-1.schema.json $ps
+}
+
+# launches_valid STATE: every launch.json under STATE (each run's, after its backend's prepare) validates against
+# launch.json/1's schema (contracts/launch-1.schema.json): what pot and its backend really wrote, as policies_valid
+launches_valid() {
+  local ls
+  ls=$(find "$1" -name launch.json -size +0 | sort)
+  [ -n "$ls" ] || { echo "launches_valid: no launch.json under $1" >&2; return 1; }
+  # shellcheck disable=SC2086 # one path per line, no spaces (the tests' own folders)
+  valid contracts/launch-1.schema.json $ls
 }
 
 # kits: pot's side of the seam with a producer (pot.lib.pot.kitsFor, contract pot-lib/1): the bundle it builds
@@ -1117,6 +1143,7 @@ EOF
   ran "pot: the init flake builds" nix build --no-link "path:$i#packages.$sys.pot"
   expect "pot: runs/1, every log line and record this section's runs wrote validates" runs_valid "$work/sbstate" sb_
   expect "pot: policy.json/1, every policy.json this section's runs wrote validates" policies_valid "$work/sbstate"
+  expect "pot: launch.json/1, every launch.json this section's runs wrote validates" launches_valid "$work/sbstate"
   cd "$work"
 }
 
@@ -1329,6 +1356,7 @@ except OSError as e:
   expect "and the fcntls" grep -qF '(deny system-fcntl (fcntl-command 80 110))' "$work/sbstate/runs/$id/git.sb"
   expect "pot (seatbelt): runs/1, every log line and record validates" runs_valid "$work/sbstate" sb_
   expect "pot (seatbelt): policy.json/1, every policy.json validates" policies_valid "$work/sbstate"
+  expect "pot (seatbelt): launch.json/1, every launch.json validates" launches_valid "$work/sbstate"
 }
 
 sec_dispatch() {
@@ -2059,6 +2087,7 @@ EOF
   refuse "G4: its submodule is not cloned from the name's path" holds PLANTED
   expect "dispatch: runs/1, every log line and record validates (clone, review, stop, fetch, discard, recovered)" runs_valid "$work/dstate" d_
   expect "dispatch: policy.json/1, every policy.json validates (clones, stops)" policies_valid "$work/dstate"
+  expect "dispatch: launch.json/1, every launch.json validates (clones, root repositories)" launches_valid "$work/dstate"
   cd "$work"
 }
 
@@ -2465,6 +2494,7 @@ EOF
   refuse "nothing ran" holds "args=rr"
   expect "sibling: runs/1, every log line and record validates (siblings, wrappers, hooks)" runs_valid "$work/nstate" nb_
   expect "sibling: policy.json/1, every policy.json validates (siblings, wrappers, hooks)" policies_valid "$work/nstate"
+  expect "sibling: launch.json/1, every launch.json validates (siblings, hooks)" launches_valid "$work/nstate"
 }
 
 # pi (kits/pi.nix): a root with the pi kit, its program a stub that reports what it sees. The run's pi
@@ -2744,6 +2774,7 @@ PROBE
   expect "is refused (the kit's agent.markers)" holds "pot grant is for people: PI_CODING_AGENT is set"
   expect "pi: runs/1, every log line and record validates" runs_valid "$work/pistate" pi_
   expect "pi: policy.json/1, every policy.json validates" policies_valid "$work/pistate"
+  expect "pi: launch.json/1, every launch.json validates" launches_valid "$work/pistate"
   cd "$work"
 }
 

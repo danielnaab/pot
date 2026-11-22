@@ -1,0 +1,574 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danielnaab/pot/contracts/launch-1.schema.json",
+  "title": "launch.json/1: the launcher's facts, for a run's backend",
+  "description": "The host facts pot writes beside policy.json as <run dir>/launch.json before it calls the backend's prepare, and the keys bubblewrap and Seatbelt add to it there. The prose is contracts/launch-1.md. This schema is what this release writes: every object pot builds is closed (additionalProperties: false). Objects pot copies as written from a root's or a kit's manifest stay open: root.contexts' values, and in wsFacts a repo kit's and a scion's manifest and the root's repoKits entries. A new field, or a changed meaning, is launch.json/2.",
+  "type": "object",
+  "required": [
+    "argv",
+    "cwd",
+    "home",
+    "user",
+    "uid",
+    "gid",
+    "group",
+    "closure",
+    "git",
+    "xdgRuntime",
+    "potBin",
+    "resolve",
+    "pane",
+    "hostTools"
+  ],
+  "dependentRequired": {
+    "policyDigest": [
+      "netFix",
+      "pkgFix",
+      "toolsFix",
+      "root",
+      "hostSigns",
+      "hostPot",
+      "wsFacts",
+      "tree",
+      "depth",
+      "repoKitPaths"
+    ],
+    "siblingOf": [
+      "inClone",
+      "hookEnv",
+      "policyDigest"
+    ],
+    "inClone": [
+      "siblingOf"
+    ],
+    "rootRepo": [
+      "clone"
+    ],
+    "grantsRel": [
+      "rootRepo"
+    ]
+  },
+  "additionalProperties": false,
+  "properties": {
+    "argv": {
+      "description": "The command the backend runs, as given (a /run/pot/… argument is the run folder as the run sees it).",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "cwd": {
+      "description": "The working directory in the run (a sibling's: its caller's, as the caller saw it).",
+      "$ref": "#/$defs/absolute"
+    },
+    "home": {
+      "description": "The caller's home: the run's HOME, and where ~/… in the policy points.",
+      "$ref": "#/$defs/absolute"
+    },
+    "user": {
+      "type": "string",
+      "minLength": 1
+    },
+    "uid": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "gid": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "group": {
+      "type": "string",
+      "minLength": 1
+    },
+    "closure": {
+      "description": "The store paths the run sees when the backend proves closure-store: the root's, the workspace bundles', --package's and the kits' files' closures.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/storePath"
+      }
+    },
+    "git": {
+      "description": "The host's user.name and user.email (each when set), for the run's generated ~/.gitconfig.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        }
+      }
+    },
+    "xdgRuntime": {
+      "type": "string",
+      "pattern": "^/run/user/[0-9]+$"
+    },
+    "potBin": {
+      "description": "This pot's bin/ (the root's), or null when the root names none.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/absolute"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resolve": {
+      "description": "Always empty: reserved, never read.",
+      "type": "object",
+      "maxProperties": 0
+    },
+    "pane": {
+      "description": "The caller's tmux pane (TMUX_PANE) when it runs in tmux, else null.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^%[0-9]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hostTools": {
+      "description": "Host programs the bindings' helpers run, each when it is on the caller's PATH.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nix": {
+          "$ref": "#/$defs/absolute"
+        },
+        "ssh": {
+          "$ref": "#/$defs/absolute"
+        },
+        "workmux": {
+          "$ref": "#/$defs/absolute"
+        },
+        "tmux": {
+          "$ref": "#/$defs/absolute"
+        }
+      }
+    },
+    "netFix": {
+      "type": "string"
+    },
+    "pkgFix": {
+      "type": "string"
+    },
+    "toolsFix": {
+      "type": "string"
+    },
+    "root": {
+      "type": "object",
+      "required": [
+        "contexts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "contexts": {
+          "description": "The root's contexts as the root wrote them; pot reads their names.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "hostSigns": {
+      "type": "boolean"
+    },
+    "hostPot": {
+      "description": "The host's pot as a sibling's host entry runs it (an argv), or null when there is no root manifest.",
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "wsFacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/workspaceFacts"
+      }
+    },
+    "tree": {
+      "$ref": "#/$defs/absolute"
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "siblingOf": {
+      "$ref": "#/$defs/runId"
+    },
+    "inClone": {
+      "type": "boolean"
+    },
+    "repoKitPaths": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^/"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/relative"
+        }
+      }
+    },
+    "clone": {
+      "type": "object",
+      "required": [
+        "base",
+        "branch",
+        "path",
+        "scions",
+        "objects"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/commit"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "$ref": "#/$defs/absolute"
+        },
+        "scions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "path",
+              "commit",
+              "objects"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "$ref": "#/$defs/relative"
+              },
+              "commit": {
+                "$ref": "#/$defs/commit"
+              },
+              "objects": {
+                "$ref": "#/$defs/absolute"
+              }
+            }
+          }
+        },
+        "objects": {
+          "$ref": "#/$defs/absolute"
+        }
+      }
+    },
+    "rootRepo": {
+      "const": true
+    },
+    "grantsRel": {
+      "$ref": "#/$defs/relative"
+    },
+    "hookEnv": {
+      "description": "The git variables a hook command gets (GIT_INDEX_FILE only when it names a workspace repository's index), and no other.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "GIT_INDEX_FILE": {
+          "$ref": "#/$defs/absolute"
+        },
+        "GIT_PREFIX": {
+          "type": "string",
+          "not": {
+            "pattern": "^/|\n"
+          }
+        }
+      }
+    },
+    "policyDigest": {
+      "type": "string",
+      "pattern": "^sha256-[0-9a-f]{64}$"
+    },
+    "notes": {
+      "description": "Added by the backend's prepare: start notes, one warning each, which pot prints on the host's terminal.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "closureCount": {
+      "description": "bubblewrap and Seatbelt (prepare): how many store paths the run sees, or a phrase for the whole store.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "enum": [
+            "the whole store (nix)",
+            "the whole store"
+          ]
+        }
+      ]
+    },
+    "walk": {
+      "description": "bubblewrap and Seatbelt (prepare, inspect's view): what the host walk masked and how long it took.",
+      "type": "object",
+      "required": [
+        "secrets",
+        "sockets",
+        "seconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "secrets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sockets": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seconds": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "sealed": {
+      "description": "bubblewrap (prepare): each sealed folder, its base in the run folder and the entries it had, for the after event.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "dest",
+          "base",
+          "entries",
+          "rel"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "dest": {
+            "$ref": "#/$defs/absolute"
+          },
+          "base": {
+            "$ref": "#/$defs/absolute"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rel": {
+            "$ref": "#/$defs/relative"
+          }
+        }
+      }
+    },
+    "hiddenTracked": {
+      "description": "bubblewrap (prepare): per workspace top, the hidden paths git tracks there, for the after event.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^/"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/relative"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "absolute": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "relative": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/]"
+    },
+    "storePath": {
+      "type": "string",
+      "pattern": "^/nix/store/[0-9a-z]{32}-"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{4}$"
+    },
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspaceFacts": {
+      "description": "One repository as pot found it at the run's start, before grants narrowed it: what a sibling's composition starts from (never evaluated again). pot's own: the host's pot reads it, a backend does not.",
+      "type": "object",
+      "required": [
+        "top",
+        "common",
+        "id",
+        "origin",
+        "originKey",
+        "flakeDir",
+        "rootRepoKits",
+        "repoKit",
+        "scions",
+        "tree",
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "top": {
+          "$ref": "#/$defs/absolute"
+        },
+        "common": {
+          "$ref": "#/$defs/absolute"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^repo:"
+        },
+        "origin": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "originKey": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "flakeDir": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "clone": {
+          "$ref": "#/$defs/absolute"
+        },
+        "rootRepoKits": {
+          "description": "The root's repoKits entries for this repository, as the root wrote them.",
+          "type": "array"
+        },
+        "repoKit": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "manifest",
+                "file"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "manifest": {
+                  "description": "The repo kit, as the bundle holds it (kit/1).",
+                  "type": "object"
+                },
+                "file": {
+                  "$ref": "#/$defs/nullableString"
+                }
+              }
+            }
+          ]
+        },
+        "tree": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "source": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "bundle": {
+          "type": "string"
+        },
+        "flakePath": {
+          "$ref": "#/$defs/absolute"
+        },
+        "bundleProtect": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {
+          "$ref": "#/$defs/storePath"
+        },
+        "closure": {
+          "$ref": "#/$defs/absolute"
+        },
+        "scions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "path",
+              "url",
+              "commit",
+              "identity",
+              "manifest",
+              "tag",
+              "verified",
+              "file"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "path": {
+                "$ref": "#/$defs/relative"
+              },
+              "url": {
+                "type": "string"
+              },
+              "commit": {
+                "$ref": "#/$defs/commit"
+              },
+              "identity": {
+                "type": "string"
+              },
+              "manifest": {
+                "description": "The scion's kit, as the bundle holds it (kit/1), or empty.",
+                "type": "object"
+              },
+              "tag": {
+                "$ref": "#/$defs/nullableString"
+              },
+              "verified": {
+                "type": "boolean"
+              },
+              "file": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

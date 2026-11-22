@@ -3,11 +3,11 @@ status: working
 ---
 # pot's contracts
 
-pot meets other parties through eight contracts. A contract gets a version when its producer and its reader are
+pot meets other parties through nine contracts. A contract gets a version when its producer and its reader are
 pinned by different parties: a provider's tag and a repository's producer, a repository's `inputs.pot` and a root's
 pot, or the pots of two machines that share one grants file. A file that one build both writes and reads stays
-internal, so the root manifest and the launcher's facts for a backend (`launch.json`) have no version. A run's
-`policy.json` has one ([policy.json/1](policy-1.md)): a backend built as its own binary reads it across a seam.
+internal, so the root manifest has no version. A run's `policy.json` and `launch.json` have one
+([policy.json/1](policy-1.md), [launch.json/1](launch-1.md)): a backend built as its own binary reads them across a seam.
 
 **Who owns a contract.** pot owns every contract that pot touches. A producer of kits, such as tuteur, owns its own
 formats (tuteur's `provider` file and `status/1`), which pot never reads. Nothing a producer writes is read by pot:
@@ -20,7 +20,7 @@ what graft v2.21.0's pot does ([CHANGELOG](../CHANGELOG.md)).
 **What a contract is.** Prose, a JSON Schema (2020-12) and golden fixtures, all owned by the producer: the prose
 says what the values mean, the schema what this release emits, and the fixtures are what readers test against.
 The producer tests that what it really emits validates; a reader tests against the fixtures, never against the
-producer's live output. `runs/1`, `trailer/1` and `policy.json/1` have all three; the others are prose until their next change.
+producer's live output. `runs/1`, `trailer/1`, `policy.json/1` and `launch.json/1` have all three; the others are prose until their next change.
 
 | Contract | Version | Producer | Reader | Owner |
 |---|---|---|---|---|
@@ -31,6 +31,7 @@ producer's live output. `runs/1`, `trailer/1` and `policy.json/1` have all three
 | [`run-env`](run-env-1.md) | 1 | pot's backends | tuteur's check inside a run, kit hooks, any program in a run | pot |
 | [`runs`](runs-1.md) | 1 | pot | workmux, Windmill jobs, later grove | pot |
 | [`policy.json`](policy-1.md) | 1 | pot, for each run | pot's backends (bubblewrap, Seatbelt, a backend built apart), the run's own pot, pot-kits/1's wrappers | pot |
+| [`launch.json`](launch-1.md) | 1 | pot, for each run (a backend's `prepare` adds its keys) | pot's backends (bubblewrap, Seatbelt, a backend built apart), pot | pot |
 | [`trailer`](trailer-1.md) | 1 | `pot trailer` | tuteur's `ci signers`, later grove, any program that reads commits | pot |
 
 ## How the arrows point

@@ -18,8 +18,8 @@ calls the backend's `prepare`; inside the run it is `/run/pot/policy.json`, read
 
 **Why it has a version now.** Until 0.1.0, the backends were built in the same derivation as the pot that wrote the
 policy, so the format was internal. A backend built as its own binary, pinned on its own, reads the file across
-a seam: what it may rely on, and what it must refuse, has to be written down. `launch.json` stays internal (see
-[For backend authors](#for-backend-authors)).
+a seam: what it may rely on, and what it must refuse, has to be written down. The `launch.json` beside it has its
+own contract, [launch.json/1](launch-1.md).
 
 ## Shape
 
@@ -148,11 +148,9 @@ message the run's pot prints) and `grant: true` (a grant would admit it). Neithe
 
 ## For backend authors
 
-**Inputs.** A backend reads `<run dir>/policy.json` (this contract) and `<run dir>/launch.json`. `launch.json` is
-not part of this contract: it is the launcher's facts (`argv`, `cwd`, `home`, `user`, `uid`, `gid`, `group`,
-`closure`, `potBin`, `hostTools`, `pane`, `xdgRuntime`, the sibling and clone facts), written and read by the same
-pot build, and it changes without a version. A backend built apart needs it written down too: that is a follow-up
-(`launch.json/1`) before the container backend ships.
+**Inputs.** A backend reads `<run dir>/policy.json` (this contract) and `<run dir>/launch.json`, the launcher's
+facts (`argv`, `cwd`, the caller's identity, `closure`, `potBin`, `hostTools`, the sibling and clone facts):
+[launch.json/1](launch-1.md).
 
 **The interface,** as `core/bwrap.py` implements it: `backend [--config CONFIG] VERB RUNDIR`.
 

@@ -929,7 +929,8 @@ a hook command, its two git variables, with its standard input, output and error
 At start, `pot` composes the run's policy from manifests, grants, flags and host facts, and writes it as
 `policy.json`, version 1. Inside the run it is `/run/pot/policy.json`, read-only, and
 `POT_POLICY` names it. Its contract is [policy.json/1](../../contracts/policy-1.md) (every field, what a backend
-enforces, a schema and fixtures); [run-env/1](../../contracts/run-env-1.md) is what a program in the run sees. pot's own defaults are `{ "root": "default" }` (v2.15.0 wrote `{ "root": "graft" }`).
+enforces, a schema and fixtures); [run-env/1](../../contracts/run-env-1.md) is what a program in the run sees. Beside
+it, outside the run, `launch.json` holds the launcher's facts for the backend ([launch.json/1](../../contracts/launch-1.md)). pot's own defaults are `{ "root": "default" }` (v2.15.0 wrote `{ "root": "graft" }`).
 To ask whether a run reaches a host or URL, use `pot why TARGET --json` rather than reading the items.
 
 ```json
