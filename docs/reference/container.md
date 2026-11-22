@@ -122,8 +122,9 @@ and pot's values, which are not secret. The command's environment is then exactl
 `env.set`, the items and the secrets. Nothing of bash's (`SHLVL`, `PWD`, `_`) or the engine's (`HOSTNAME`) is
 added, and a secret named like a bash variable (`RANDOM`, `SECONDS`, `IFS`) keeps its value (audit S1, S3, T1). For
 this to hold, `prepare` refuses, for every `env` item and under either engine, a name bash can't hand over: read-only
-in bash (`UID`, `EUID`, `PPID`, `BASHOPTS`, `SHELLOPTS`), set by bash itself (`SHLVL`, `PWD`, `OLDPWD`, `_`), unset
-by it (`PS1`, `PS2`), `BASH_*`, or the script's own `__pot_*` (`engine::bash_sets`). Without a secret, `env -C CWD -u HOSTNAME --` removes the one variable podman adds, unless the plan sets it. The
+in bash (`UID`, `EUID`, `PPID`, `BASHOPTS`, `SHELLOPTS`), set by bash itself at its start, its exec or after every
+command (`SHLVL`, `PWD`, `OLDPWD`, `_`, `PIPESTATUS`), unset by it (`PS1`, `PS2`), `BASH_*`, or the script's own
+`__pot_*` (`engine::bash_sets`). Without a secret, `env -C CWD -u HOSTNAME --` removes the one variable podman adds, unless the plan sets it. The
 value is in no file, no argument and not in the engine's environment (checked in a real run: a marker value was in
 no file of the run folder or of `$XDG_RUNTIME_DIR/crun`, and in no engine process's arguments or environment, while
 the command printed it; and with every process on the host watched while a 100 000-byte variable slowed the
@@ -172,6 +173,7 @@ hidden list is a change to pot's core, listed in [What's next](#whats-next).
 | `file`, mode `fixed` | `SOURCE` bound read-only at `PATH` | the same |
 | `env.set` | `--env NAME=VALUE` (`~` as the home) | the same |
 | `env` items (not secret), `TERM`, `COLORTERM` | `--env NAME`: the engine reads the value from its own environment, so no value is in an argument | the same |
+| an `env` item named like one of pot's values | passed by name, with no `--env NAME=VALUE`; pot's value is its default, which `run` uses when the host has it unset (bwrap's order: pot's values, the host's `TERM` and `COLORTERM`, `env.set`, then the items the host has set) | the same |
 | pot's variables | `HOME USER LOGNAME SHELL PATH LANG TERMINFO_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE TZDIR POT POT_POLICY POT_RUN PS1`, `POT_TOOLS`, `POT_CLONE` (bwrap's `run_env`) | the same |
 | `mounts.run` | `/run/pot/policy.json` and `/run/pot/denials`, read-only | the same |
 | `mounts.launcher` | `POTBIN/pot` at `/run/pot/launcher`; `~/.config/pot/launcher` links to it | the same |

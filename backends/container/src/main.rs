@@ -322,7 +322,7 @@ fn place(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     }
     // run starts the engine with only these variables of its own, then these set (no value of a secret is here)
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
-    let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own });
+    let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -509,6 +509,8 @@ struct EngineEnv {
     piped: Vec<String>,
     #[serde(default)]
     own: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    defaults: std::collections::BTreeMap<String, String>,
 }
 
 /// R2: the run folder's engine paths as `prepare` left them, checked just before the engine starts: the engine
@@ -736,13 +738,26 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         pipe.as_ref().map(|(rd, _)| rd.as_raw_fd()),
     );
 
-    let mut child = engine::command(&argv[0], &env.keep, &set)
+    // U2: a variable passed by name that the host has unset takes pot's value: in the engine's environment (the
+    // engine reads it for --env NAME), or as its record on the pipe
+    let mut engine_set = set.clone();
+    if env.piped.is_empty() {
+        engine_set.extend(
+            env.defaults
+                .iter()
+                .filter(|(n, _)| std::env::var_os(n).is_none())
+                .map(|(n, v)| (n.clone(), v.clone())),
+        );
+    }
+    let mut child = engine::command(&argv[0], &env.keep, &engine_set)
         .args(&argv[1..])
         .spawn()
         .map_err(|err| refuse(format!("can't run {program}: {err}")))?;
     if let Some((rd, wr)) = pipe {
         drop(rd);
-        let data = lifecycle::secret_records(&env.piped, |n| std::env::var_os(n));
+        let data = lifecycle::secret_records(&env.piped, |n| {
+            std::env::var_os(n).or_else(|| env.defaults.get(n).map(Into::into))
+        });
         // a thread: the container reads the pipe once it starts; a failed write is the run's own failure to start
         std::thread::spawn(move || {
             let mut f = fs::File::from(wr);

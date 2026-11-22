@@ -125,7 +125,7 @@ pub struct Workspace {
 
 // Info fields are parsed so that an unknown one is refused; a backend must not act on them.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Item {
     pub kind: String,

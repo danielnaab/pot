@@ -42,6 +42,9 @@ v2.14.0's `sandbox` on).
   CWD -- POT'S VALUES… ARGV`. `prepare` refuses an `env` item bash can't hand over faithfully (`UID`, `SHELLOPTS`,
   `SHLVL`, `PWD`, `_`, `PS1`, `BASH_*` and the like). A test that moves the run's store puts it back and cleans up,
   even when it fails.
+- **The container backend's final audit (U1, U2):** `PIPESTATUS`, which bash resets after every command, is refused
+  as a run's variable. An env item named like one of pot's values (`TZ` from env.set, `LANG`) takes the host's
+  value when the host has it set and pot's value when not, as under bubblewrap.
 
 ## v0.2.0 - 2026-11-21
 

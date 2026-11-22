@@ -1036,6 +1036,7 @@ fn prepare_refuses_a_variable_bash_cannot_hand_over() {
         "PS2",
         "BASH_ARGV0",
         "BASH_ENV",
+        "PIPESTATUS",
     ] {
         let (top, run) = world("bash-refused", "podman", "podman", &["/bin/sh", "-c", "true"]);
         let path = run.join("policy.json");
@@ -1221,6 +1222,14 @@ fn podman_a_secret_named_like_a_bash_variable_keeps_its_value() {
         "HISTCMD",
         "EPOCHSECONDS",
         "SRANDOM",
+        "EPOCHREALTIME",
+        "BASHPID",
+        "DIRSTACK",
+        "FUNCNAME",
+        "OPTIND",
+        "REPLY",
+        "COLUMNS",
+        "LINES",
     ] {
         let (top, run) = world("podman-bashvar", "podman", &program, &[&envp, "-0"]);
         let path = run.join("policy.json");
@@ -1377,4 +1386,111 @@ fn a_sigterm_before_the_engine_starts_records_the_status() {
     assert_eq!(fs::read_to_string(run.join("status")).unwrap(), "143");
     let calls = fs::read_to_string(&log).unwrap();
     assert!(!calls.lines().any(|l| l == "run"), "the engine started: {calls}");
+}
+
+/// A prepared run folder whose env items are ITEMS (name, secret), in place of the fixture's, running `env -0`.
+fn item_world(name: &str, engine: &str, program: &str, items: &[(&str, bool)]) -> (PathBuf, PathBuf) {
+    let envp = coreutils("env");
+    let (top, run) = world(name, engine, program, &[&envp, "-0"]);
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let list = p["items"].as_array_mut().unwrap();
+    let at = list.iter().position(|i| i["kind"] == "env").unwrap();
+    let template = list.remove(at);
+    for (n, secret) in items {
+        let mut it = template.clone();
+        it["value"] = (*n).into();
+        it["secret"] = (*secret).into();
+        list.push(it);
+    }
+    fs::write(&path, p.to_string()).unwrap();
+    prepare(&top, &run);
+    (top, run)
+}
+
+fn env_lines(out: &Output, names: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .filter(|w| names.iter().any(|n| w.starts_with(&format!("{n}="))))
+        .collect();
+    v.sort();
+    v
+}
+
+/// U2: an env item named like one of pot's values (`TZ` from env.set, `LANG` fixed) takes the host's value when the
+/// host has it set, and leaves pot's value when it has not, as bwrap's `run_env` (its items come last); on the
+/// secret path and the plain one.
+#[test]
+fn podman_an_item_set_on_the_host_wins_over_pots_value() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    for secret in [true, false] {
+        for host_set in [true, false] {
+            let (top, run) = item_world(
+                "podman-item-wins",
+                "podman",
+                &program,
+                &[("TZ", secret), ("LANG", false)],
+            );
+            let mut c = verb(&top, &run, "run");
+            if host_set {
+                c.env("TZ", "Europe/Paris").env("LANG", "de_DE.UTF-8");
+            } else {
+                c.env_remove("TZ").env_remove("LANG");
+            }
+            let out = c.stdin(Stdio::null()).output().unwrap();
+            ok(&out);
+            let want = if host_set {
+                ["LANG=de_DE.UTF-8", "TZ=Europe/Paris"]
+            } else {
+                ["LANG=C.UTF-8", "TZ=America/Chicago"]
+            };
+            assert_eq!(
+                env_lines(&out, &["TZ", "LANG"]),
+                want,
+                "secret {secret}, set on the host {host_set}"
+            );
+            ok(&verb(&top, &run, "cleanup").output().unwrap());
+        }
+    }
+}
+
+/// U2 under docker (the plain path): the same rule.
+#[test]
+fn docker_an_item_set_on_the_host_wins_over_pots_value() {
+    let Ok(program) = std::env::var("POT_TEST_DOCKER") else {
+        eprintln!("POT_TEST_DOCKER is not set: no container started");
+        return;
+    };
+    for host_set in [true, false] {
+        let (top, run) = item_world(
+            "docker-item-wins",
+            "docker",
+            &program,
+            &[("TZ", false), ("LANG", false)],
+        );
+        let mut c = verb(&top, &run, "run");
+        if host_set {
+            c.env("TZ", "Europe/Paris").env("LANG", "de_DE.UTF-8");
+        } else {
+            c.env_remove("TZ").env_remove("LANG");
+        }
+        let out = c.stdin(Stdio::null()).output().unwrap();
+        ok(&out);
+        let want = if host_set {
+            ["LANG=de_DE.UTF-8", "TZ=Europe/Paris"]
+        } else {
+            ["LANG=C.UTF-8", "TZ=America/Chicago"]
+        };
+        assert_eq!(
+            env_lines(&out, &["TZ", "LANG"]),
+            want,
+            "set on the host {host_set}"
+        );
+        ok(&verb(&top, &run, "cleanup").output().unwrap());
+    }
 }

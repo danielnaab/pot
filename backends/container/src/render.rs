@@ -156,6 +156,9 @@ pub struct Plan {
     /// The engine's environment (audit F2): only these of the caller's variables, then `engine_set`.
     pub engine_keep: Vec<String>,
     pub engine_set: Vec<(String, String)>,
+    /// U2: pot's values for variables passed by name (an env item named like one): run's value when the host has
+    /// the variable unset.
+    pub defaults: BTreeMap<String, String>,
     /// The variables `run` hands over its pipe (podman only), by name: the secret ones, and with them every one
     /// passed by name.
     pub piped: Vec<String>,
@@ -684,7 +687,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         })
         .collect();
     sources.extend(closure.iter().cloned());
-    let (set, mut pass) = environment(i);
+    let (set, mut pass, defaults) = environment(i);
     // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration):
     // run hands it over a pipe, fd 3 in the container (podman; docker refuses it above)
     let secret: BTreeSet<&str> = p
@@ -800,6 +803,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         engine_keep,
         engine_set,
         piped,
+        defaults,
     })
 }
 
@@ -826,7 +830,7 @@ fn bind_opt(engine: Engine, src: &str, dest: &str, ro: bool) -> Opt {
 
 /// The run's environment: what pot sets (bwrap's `run_env`, less what this slice does not place), then the
 /// names passed from the host by name only (`--env NAME`: the engine reads the value, so no value is in argv).
-fn environment(i: &Inputs) -> (BTreeMap<String, String>, Vec<String>) {
+fn environment(i: &Inputs) -> (BTreeMap<String, String>, Vec<String>, BTreeMap<String, String>) {
     let (p, l) = (i.policy, i.launch);
     let home = l.home.trim_end_matches('/');
     let mut path: Vec<String> = vec![];
@@ -874,14 +878,25 @@ fn environment(i: &Inputs) -> (BTreeMap<String, String>, Vec<String>) {
             env.insert(n.to_string(), in_home(home, v));
         }
     }
-    let mut pass: Vec<String> = vec!["TERM".into(), "COLORTERM".into()];
-    for e in p.effective("env") {
-        if !pass.contains(&e.value) {
-            pass.push(e.value.clone());
+    // bwrap's order (run_env): pot's values, then the host's TERM and COLORTERM, then env.set, then the env items
+    // the host has set. So env.set beats TERM and COLORTERM, and an item set on the host beats everything: an item
+    // named like one of pot's values is passed by name, with pot's value as its default (U2)
+    let items: Vec<String> = p.effective("env").map(|e| e.value.clone()).collect();
+    let mut pass: Vec<String> = ["TERM", "COLORTERM"]
+        .iter()
+        .filter(|t| !env.contains_key(**t) || items.iter().any(|i| i == *t))
+        .map(|t| (*t).to_string())
+        .collect();
+    for n in items {
+        if !pass.contains(&n) {
+            pass.push(n);
         }
     }
-    pass.retain(|n| !env.contains_key(n));
-    (env, pass)
+    let defaults = pass
+        .iter()
+        .filter_map(|n| env.remove(n).map(|v| (n.clone(), v)))
+        .collect();
+    (env, pass, defaults)
 }
 
 #[cfg(test)]
@@ -1583,6 +1598,43 @@ mod tests {
         assert!(!SECRETS_SCRIPT.contains("recs[@]}\" \"$@"));
     }
 
+    /// U2: as bwrap's `run_env`, an env item comes last: named like one of pot's values (fixed or env.set), it is
+    /// passed by name and pot's value becomes its default, which run uses when the host has the item unset. env.set
+    /// still beats TERM and COLORTERM, which come before it.
+    #[test]
+    fn an_item_named_like_pots_value_is_passed_with_that_value_as_default() {
+        let (mut p, l) = run_dir("access-none");
+        let mut lang = p.items.iter().find(|i| i.kind == "env").unwrap().clone();
+        for it in p.items.iter_mut().filter(|i| i.kind == "env") {
+            it.value = "TZ".into();
+        }
+        lang.value = "LANG".into();
+        p.items.push(lang);
+        for engine in [Engine::Podman, Engine::Docker] {
+            let plan = go(&p, &l, engine, &nothing()).unwrap();
+            assert!(has(&plan, "--env TZ") && has(&plan, "--env LANG"));
+            assert!(
+                !lines(&plan)
+                    .iter()
+                    .any(|x| x.starts_with("--env TZ=") || x.starts_with("--env LANG="))
+            );
+            assert_eq!(
+                plan.defaults,
+                BTreeMap::from([
+                    ("LANG".to_string(), "C.UTF-8".to_string()),
+                    ("TZ".to_string(), "America/Chicago".to_string())
+                ])
+            );
+        }
+        // env.set TERM: pot's value, never the host's (TERM comes before env.set in bwrap)
+        let (mut p, l) = run_dir("access-none");
+        for it in p.items.iter_mut().filter(|i| i.kind == "env.set") {
+            it.value = "TERM=dumb".into();
+        }
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap();
+        assert!(has(&plan, "--env TERM=dumb") && !has(&plan, "--env TERM") && plan.defaults.is_empty());
+    }
+
     /// T1: a variable bash can't hand over faithfully is refused for every env item.
     #[test]
     fn a_variable_bash_sets_is_refused() {
@@ -1591,6 +1643,7 @@ mod tests {
             ("BASH_ENV", true),
             ("SHLVL", true),
             ("_", true),
+            ("PIPESTATUS", true),
             ("RANDOM", false),
             ("IFS", false),
         ] {

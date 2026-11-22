@@ -74,7 +74,8 @@ pub fn configures_engine(name: &str) -> bool {
 }
 
 /// A variable bash can't hand over faithfully to the command (T1): read-only in bash (`UID`, `EUID`, `PPID`,
-/// `BASHOPTS`, `SHELLOPTS`), set by bash at its start or its exec (`SHLVL`, `PWD`, `OLDPWD`, `_`), unset by a
+/// `BASHOPTS`, `SHELLOPTS`), set by bash at its start, its exec or after every command (`SHLVL`, `PWD`, `OLDPWD`,
+/// `_`, `PIPESTATUS`), unset by a
 /// non-interactive bash (`PS1`, `PS2`), one of bash's own (`BASH_*`), or a name of the script's (`__pot_*`). Refused for
 /// every `env` item, whatever the engine, so a run's environment does not depend on whether it holds a secret.
 pub fn bash_sets(name: &str) -> bool {
@@ -90,6 +91,7 @@ pub fn bash_sets(name: &str) -> bool {
         "_",
         "PS1",
         "PS2",
+        "PIPESTATUS",
     ];
     NAMES.contains(&name) || name.starts_with("BASH_") || name.starts_with("__pot_")
 }
