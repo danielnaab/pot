@@ -233,6 +233,23 @@ pub fn names_proxy(cmdline: &[u8], rundir: &str) -> bool {
             .any(|w| w[0] == b"--denials" && w[1] == denials.as_bytes())
 }
 
+/// Whether CMDLINE is one of pot's helpers for this run (main.rs checks its working folder, the run folder, too): the
+/// proxy ([`names_proxy`]); the broker (its socket `relay.sock` or `git.sock` and the run's `--denials`); the nix relay
+/// (socat listening on `nix.sock`, running `./nix-relay`) or a daemon it started for a connection (`nix daemon --stdio
+/// --force-untrusted`).
+pub fn names_helper(cmdline: &[u8], rundir: &str) -> bool {
+    let denials = format!("{}/denials", rundir.trim_end_matches('/'));
+    let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+    let has = |w: &str| args.iter().any(|a| *a == w.as_bytes());
+    let broker = (has("relay.sock") || has("git.sock"))
+        && args
+            .windows(2)
+            .any(|w| w[0] == b"--denials" && w[1] == denials.as_bytes());
+    let relay = has("UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600") && has("EXEC:./nix-relay");
+    let daemon = has("daemon") && has("--stdio") && has("--force-untrusted");
+    names_proxy(cmdline, rundir) || broker || relay || daemon
+}
+
 /// The names the configured engine program runs under: its own name, its real file's, and nix's wrapped name
 /// (`.NAME-wrapped`, which conmon's exit command names).
 pub fn engine_names(program: &str) -> Vec<String> {

@@ -307,6 +307,86 @@ podman
 
 ```
 
+## The relays
+
+`relays/` is `access-none/` with the `status.relay`, `git.fetch` and `nix` bindings (closure-store dropped, as pot
+drops it with nix), launch.json's `hostTools` and the caller's pane. Each socket is the run folder's, made by `run`'s
+helpers before the engine and bound read-only at the binding's path; the shims are in `bin/`, first on `PATH`; the
+whole store is bound read-only; the broker and the nix relay are shown as `run` starts them:
+
+```console
+$ pot-container --config config-podman.json prepare --print relays
+# the podman command for this run, an option a line (pot explain --backend-command)
+# the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/relays/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/relays/storage.conf HOME=[CWD]/relays/enginehome
+podman
+  --root [CWD]/relays/enginestore --runroot [CWD]/relays/engineroot --tmpdir [CWD]/relays/enginetmp
+  run --interactive
+  --init
+  --log-driver none
+  --cidfile [CWD]/relays/container.id
+  --hostname pot
+  --network none
+  --ipc private
+  --cgroupns private
+  --cap-drop all
+  --security-opt no-new-privileges
+  --read-only
+  --userns keep-id
+  --user 1000:100
+  --passwd=false
+  --tmpfs /run:rw,nosuid,nodev,mode=0755,notmpcopyup
+  --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777,notmpcopyup
+  --volume /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh:/bin/sh:ro
+  --volume [CWD]/relays/group:/etc/group:ro
+  --volume [CWD]/relays/hosts:/etc/hosts:ro
+  --volume [CWD]/relays/passwd:/etc/passwd:ro
+  --tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U,notmpcopyup
+  --volume [CWD]/relays/hidden.txt:/home/u/.pot-hidden:ro
+  --volume [CWD]/relays/bin:/run/pot/bin:ro
+  --volume [CWD]/relays/denials:/run/pot/denials:ro
+  --volume [CWD]/relays/git.sock:/run/pot/git.sock:ro
+  --volume /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot:/run/pot/launcher:ro
+  --volume [CWD]/relays/mcp.json:/run/pot/mcp.json:ro
+  --volume [CWD]/relays/nix.sock:/run/pot/nix.sock:ro
+  --volume [CWD]/relays/policy.json:/run/pot/policy.json:ro
+  --volume [CWD]/relays/relay.sock:/run/pot/relay.sock:ro
+  --volume /nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/env:/usr/bin/env:ro
+  --volume /nix/store/7f6kqbjr4l3qkl1m2s0a9hb3s5z7r0bq-nss-cacert-3.111/etc/ssl/certs/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
+  --volume /home/u/.local/state/pot/state/9f2e/notes:/home/u/.cache/notes:rw
+  --volume [CWD]/relays/potcfg:/home/u/.config/pot:ro
+  --volume /nix/store/0aqd4v7xhp2c9z2lfy5h4v0rdf3q4k8n-config.toml:/home/u/.config/notes/config.toml:ro
+  --volume /nix/store:/nix/store:ro
+  --env GIT_SSH_COMMAND=/run/pot/bin/pot-ssh
+  --env GIT_SSH_VARIANT=ssh
+  --env HOME=/home/u
+  --env LANG=C.UTF-8
+  --env LOGNAME=u
+  --env 'NIX_CONFIG=experimental-features = nix-command flakes'
+  --env NIX_REMOTE=unix:///run/pot/nix.sock
+  --env NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+  --env NOTES_CACHE=/home/u/.cache/notes
+  --env PATH=/run/pot/bin:/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin:/nix/store/scikhwasnkiqmjsi9iczrrx59bwbn379-pot-kits/bin:/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin:/nix/store/679vq5k0j0mzl1li55gf3x5awpd9gvl1-nix-2.34.6/bin
+  --env POT=review
+  --env POT_POLICY=/run/pot/policy.json
+  --env POT_RUN=3c1a
+  --env POT_TOOLS=/nix/store/scikhwasnkiqmjsi9iczrrx59bwbn379-pot-kits/bin
+  --env 'PS1=(pot:review) [..]
+  --env SHELL=/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash
+  --env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+  --env TERMINFO_DIRS=/nix/store/1ylb9cjvz6p8pjkl3l4bl6wq0b1hd8xm-ncurses-6.5/share/terminfo
+  --env TZ=America/Chicago
+  --env TZDIR=/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo
+  --env USER=u
+  --env TERM
+  --env COLORTERM
+  --env NOTES_TOKEN
+  --rootfs [CWD]/relays/rootfs:O
+  /usr/bin/env -C /home/u -u HOSTNAME -- notes check --all
+# before the engine, run starts pot's broker in the run folder: /nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3 -I -S /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/broker.py --context review --denials [CWD]/relays/denials --status relay.sock --workmux /nix/store/4w3kq0c3l2v2m1xz8ls6n5p0qk7d9r1a-workmux-0.1.0/bin/workmux --pane %3 --git git.sock --ssh /run/current-system/sw/bin/ssh --remote 'ssh://git@github.com/u/*'
+# before the engine, run starts the nix relay in the run folder: /nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat -lf /dev/null UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600 EXEC:./nix-relay; each connection runs ./nix-relay: exec /nix/store/679vq5k0j0mzl1li55gf3x5awpd9gvl1-nix-2.34.6/bin/nix daemon --stdio --force-untrusted --process-ops --extra-experimental-features 'daemon-trust-override mounted-ssh-store'
+
+```
+
 ## What this slice refuses
 
 Write access in place binds the pins pot's core resolved (launch.json's `pins`) and runs pot's `pins.py` for the

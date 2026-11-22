@@ -2656,20 +2656,18 @@ fn prepare_removes_secrets_even_when_it_stops() {
     prepare(&top, &run);
     // as a killed run leaves it
     fs::write(run.join("secrets/E_TOKFILE"), marker("E_TOKFILE")).unwrap();
-    // prepare stops: a binding this slice does not carry out
+    // prepare stops: an item this slice does not carry out
     let path = run.join("policy.json");
     let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    p["bindings"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({ "capability": "nix", "selector": "*",
-        "kit": "root:test", "request": "capability nix", "socket": "/run/pot/nix.sock", "see": [],
-        "via": "daemon-untrusted", "notes": [] }));
+    p["items"].as_array_mut().unwrap().push(
+        serde_json::json!({ "kind": "dir", "value": "~/.links", "class": "see", "effective": true,
+        "mode": "fixed", "sources": [ { "kit": "root:test", "file": "t", "as": "see" } ], "links": [] }),
+    );
     fs::write(&path, p.to_string()).unwrap();
     let out = verb(&top, &run, "prepare").output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("the nix binding"),
+        String::from_utf8_lossy(&out.stderr).contains("dir ~/.links (a folder of links)"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -3852,4 +3850,786 @@ fn remove_engine_made(engine: &str, program: &str, top: &Path, dir: &Path, keep:
         fs::remove_dir_all(&store).unwrap();
     }
     extra
+}
+
+// ---------------------------------------------------------------- the status.relay, git.fetch and nix bindings
+
+/// pot's shim, the repository's, added to the store (as a root's pot source is there), so the run sees it under a path
+/// of the config's `shimClosure`; None without nix-store (the flake's sandbox).
+fn shim_in_store() -> Option<PathBuf> {
+    // core/ is not in the flake's sandbox source: no relays run there
+    let shim = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/shim.py")).ok()?;
+    let out = Command::new("nix-store").arg("--add").arg(&shim).output().ok()?;
+    out.status
+        .success()
+        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// The processes whose working folder is the run folder: pot's helpers for it (the proxy, the broker, the nix relay
+/// and its daemons) are started there. None may be left once run returns, or after cleanup.
+fn helpers_in(run: &Path) -> Vec<String> {
+    let r = fs::canonicalize(run).unwrap();
+    let mut out = vec![];
+    for e in fs::read_dir("/proc").unwrap().flatten() {
+        if fs::read_link(e.path().join("cwd")).is_ok_and(|c| c == r) {
+            let c = fs::read(e.path().join("cmdline")).unwrap_or_default();
+            // a zombie (empty cmdline) is no longer a helper
+            if !c.is_empty() {
+                out.push(format!(
+                    "{}: {}",
+                    e.file_name().to_string_lossy(),
+                    String::from_utf8_lossy(&c).replace('\0', " ")
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// What the relays test world holds beside the run folder.
+struct Relays {
+    top: PathBuf,
+    run: PathBuf,
+    /// The bare repository the run fetches, at `ssh://git@fake.example/PATH`.
+    remote: PathBuf,
+    /// What the fake host ssh and workmux were run with, a line each.
+    ssh_log: PathBuf,
+    workmux_log: PathBuf,
+    /// git.fetch's key file (a fake: the fake ssh never reads it).
+    key: PathBuf,
+}
+
+const RELAY_CAPS: &[&str] = &["status.relay", "git.fetch", "nix"];
+
+/// A run folder whose policy has the bindings CAPS (of `RELAY_CAPS`): the config names pot's broker and shim, with
+/// python, and the shim's closure; launch.json's hostTools a fake ssh (it runs git-upload-pack on this host for the
+/// path asked, and logs its arguments), a fake workmux (it logs its arguments and `TMUX_PANE`) and the host's real nix; its
+/// pane `%7`; git's closure in the run's. With nix, closure-store is not proved (pot drops it). None where python,
+/// socat, nix-store or nix are missing.
+#[allow(clippy::too_many_lines)] // the world, its remote, its fake host programs and its policy, in order
+fn relay_world(name: &str, engine: &str, program: &str, argv: &[&str], caps: &[&str]) -> Option<Relays> {
+    let (top, run) = world(name, engine, program, argv);
+    let cfg_path = top.join("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_str(&fs::read_to_string(&cfg_path).unwrap()).unwrap();
+    let (Some(python), Some(_), Some(shim), Some(nix), Some(gitb)) = (
+        find("python3"),
+        cfg.get("socat"),
+        shim_in_store(),
+        find("nix"),
+        find("git"),
+    ) else {
+        eprintln!("no python3, socat, nix-store, nix or git: no relays run");
+        return None;
+    };
+    let store = top.join("store");
+    fs::write(store.join("shim.txt"), closure_of(&[&python, &shim])).unwrap();
+    cfg["broker"] = core_dir().join("broker.py").display().to_string().into();
+    cfg["shim"] = shim.display().to_string().into();
+    cfg["shimClosure"] = store.join("shim.txt").display().to_string().into();
+    fs::write(&cfg_path, cfg.to_string()).unwrap();
+    // the remote: one commit
+    let (remote, work) = (top.join("remote.git"), top.join("remote-work"));
+    fs::create_dir_all(&work).unwrap();
+    git(&top, &["init", "-q", "--bare", "remote.git"]);
+    git(&work, &["init", "-q", "-b", "main"]);
+    put(&work, &[("a.txt", "a\n")]);
+    git(&work, &["add", "a.txt"]);
+    git(&work, &["commit", "-q", "-m", "relay-commit"]);
+    git(&work, &["push", "-q", remote.to_str().unwrap(), "main"]);
+    git(
+        &top,
+        &[
+            "--git-dir",
+            remote.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ],
+    );
+    let (ssh, ssh_log, workmux, workmux_log, key) = (
+        top.join("fake-ssh"),
+        top.join("ssh.log"),
+        top.join("fake-workmux"),
+        top.join("workmux.log"),
+        top.join("id_test"),
+    );
+    fs::write(&key, "not a key\n").unwrap();
+    fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nfor a; do last=$a; done\neval \"exec $last\"\n",
+            ssh_log.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &workmux,
+        format!(
+            "#!/bin/sh\nprintf '%s pane=%s\\n' \"$*\" \"$TMUX_PANE\" >> {}\n",
+            workmux_log.display()
+        ),
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("755")
+        .arg(&ssh)
+        .arg(&workmux)
+        .status()
+        .unwrap();
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let mut bindings = vec![];
+    for c in caps {
+        bindings.push(match *c {
+            "status.relay" => serde_json::json!({ "capability": "status.relay", "selector": "*", "kit": "root:test",
+                "request": "capability status.relay", "socket": "/run/pot/relay.sock", "see": ["workmux shim"],
+                "allow": ["set-window-status", "register-agent"] }),
+            "git.fetch" => serde_json::json!({ "capability": "git.fetch", "selector": "ssh://git@fake.example/*",
+                "kit": "root:test", "request": "capability git.fetch ssh://git@fake.example/*",
+                "socket": "/run/pot/git.sock", "see": ["ssh shim (GIT_SSH_COMMAND)"],
+                "remotes": ["ssh://git@fake.example/*"], "key": { "file": key } }),
+            _ => serde_json::json!({ "capability": "nix", "selector": "*", "kit": "root:test",
+                "request": "capability nix", "socket": "/run/pot/nix.sock", "see": ["nix", "NIX_REMOTE"],
+                "via": "daemon-untrusted", "notes": ["the whole store is visible (closure-store dropped)"] }),
+        });
+    }
+    p["bindings"] = bindings.into();
+    if caps.contains(&"nix") {
+        let proved: Vec<serde_json::Value> = p["backend"]["proved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|g| *g != "closure-store")
+            .cloned()
+            .collect();
+        p["backend"]["proved"] = proved.into();
+    }
+    fs::write(&path, p.to_string()).unwrap();
+    let lpath = run.join("launch.json");
+    let mut l: serde_json::Value = serde_json::from_str(&fs::read_to_string(&lpath).unwrap()).unwrap();
+    let closure: Vec<String> = String::from_utf8(closure_of(&[&gitb]))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    l["closure"] = closure.into();
+    l["pane"] = "%7".into();
+    l["hostTools"] = serde_json::json!({ "ssh": ssh, "workmux": workmux, "nix": nix });
+    fs::write(&lpath, l.to_string()).unwrap();
+    Some(Relays {
+        top,
+        run,
+        remote,
+        ssh_log,
+        workmux_log,
+        key,
+    })
+}
+
+/// The relays under ENGINE, end to end: the run's `workmux` shim reaches the broker, which relays an allowed verb to
+/// host workmux on the caller's pane (and refuses another), and clears the pane when the command ends; git clones over
+/// ssh through the broker (`GIT_SSH_COMMAND`, the `pot-ssh` shim), with the binding's key file and `BatchMode`, and a
+/// remote not bound is refused and recorded in denials; nix reaches the host's daemon through the relay as an untrusted
+/// client, writes to the store and reads the new path at once (the whole store is bound). When run returns, no helper
+/// is left and their sockets and the relay's script are gone.
+fn relays_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let (git, cat) = (gitbin(), coreutils("cat"));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let script = format!(
+        r#"workmux set-window-status working
+workmux kill-server
+{git} clone -q "ssh://git@fake.example$REMOTE" /tmp/c && {git} -C /tmp/c log --format=fetched=%s
+{git} ls-remote ssh://git@other.example/x >/dev/null 2>&1; echo "other=$?"
+nix store info 2>&1
+p=$(nix eval --raw --expr 'builtins.toFile "pot-relay-{nanos}" "MARK-{nanos}"') && echo "added=$({cat} "$p")"
+o=$(nix build --no-link --print-out-paths --impure --expr 'derivation {{ name = "pot-relay-{nanos}"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "echo BUILT-{nanos} > $out" ]; }}') && echo "built=$({cat} "$o")"
+"#
+    );
+    let Some(w) = relay_world(
+        &format!("{engine}-relays"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+        RELAY_CAPS,
+    ) else {
+        return;
+    };
+    // the remote's path, as an env item the run is given
+    let path = w.run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    p["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "kind": "env", "value": "REMOTE",
+        "class": "reach", "sources": [ { "flag": "--env" } ], "effective": true, "request": "env REMOTE",
+        "requestClass": "ordinary" }));
+    fs::write(&path, p.to_string()).unwrap();
+    prepare(&w.top, &w.run);
+    let out = verb(&w.top, &w.run, "run")
+        .env("REMOTE", &w.remote)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}{err}");
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(lines.contains(&"fetched=relay-commit"), "{said}{err}");
+    assert!(
+        !lines.contains(&"other=0") && lines.iter().any(|l| l.starts_with("other=")),
+        "{said}"
+    );
+    assert!(lines.contains(&"Trusted: 0"), "an untrusted client: {said}{err}");
+    assert!(
+        lines.contains(&format!("added=MARK-{nanos}").as_str()),
+        "{said}{err}"
+    );
+    assert!(
+        lines.contains(&format!("built=BUILT-{nanos}").as_str()),
+        "{said}{err}"
+    );
+    let relayed = fs::read_to_string(&w.workmux_log).unwrap_or_default();
+    assert_eq!(
+        relayed.lines().collect::<Vec<_>>(),
+        [
+            "set-window-status working pane=%7",
+            "set-window-status clear pane=%7"
+        ],
+        "only the allowed verb, on the caller's pane, then the clear"
+    );
+    let ssh = fs::read_to_string(&w.ssh_log).unwrap();
+    let first = ssh.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("-o BatchMode=yes -o SendEnv=GIT_PROTOCOL"),
+        "{ssh}"
+    );
+    assert!(
+        first.contains(&format!(
+            "-i {} -o IdentitiesOnly=yes git@fake.example",
+            w.key.display()
+        )),
+        "{ssh}"
+    );
+    assert!(!ssh.contains("other.example"), "{ssh}");
+    let denials = fs::read_to_string(w.run.join("denials")).unwrap();
+    assert!(
+        denials.contains("ssh://git@other.example/x (not a bound git.fetch remote)"),
+        "{denials}"
+    );
+    assert_eq!(helpers_in(&w.run), Vec::<String>::new());
+    for n in ["relay.sock", "git.sock", "nix.sock", "nix-relay"] {
+        assert!(w.run.join(n).symlink_metadata().is_err(), "{n} is left");
+    }
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+    let mut left = set(LEFT);
+    left.extend(["status".to_string(), "bindings.log".to_string()]);
+    assert_eq!(names(&w.run), left);
+}
+
+#[test]
+fn podman_relays_reach_the_hosts_helpers() {
+    relays_case("podman");
+}
+
+#[test]
+fn docker_relays_reach_the_hosts_helpers() {
+    relays_case("docker");
+}
+
+/// The helpers end with the run under ENGINE: a SIGTERM to run stops the container and the helpers (143); a SIGKILL of
+/// run leaves them to cleanup, which stops every one (the broker, the nix relay and a daemon it started for a live
+/// connection) and removes their sockets.
+fn relays_stopped_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let sleep = coreutils("sleep");
+    for (sig, killed) in [("TERM", false), ("KILL", true)] {
+        // a nix build holds a connection open (a relay daemon runs for it) while the run sleeps
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let script = format!(
+            r#"nix build --no-link --impure --expr 'derivation {{ name = "pot-held-{nanos}"; system = builtins.currentSystem; builder = "/bin/sh"; args = [ "-c" "read -t 60 x < /dev/zero; echo > $out" ]; }}' & {sleep} 60"#
+        );
+        let Some(w) = relay_world(
+            &format!("{engine}-relays-{sig}"),
+            engine,
+            &program,
+            &["/bin/sh", "-c", &script],
+            RELAY_CAPS,
+        ) else {
+            return;
+        };
+        prepare(&w.top, &w.run);
+        let said = w.top.join("said.txt");
+        let mut child = verb(&w.top, &w.run, "run")
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(&said).unwrap())
+            .stderr(Stdio::from(fs::File::create(w.top.join("err.txt")).unwrap()))
+            .spawn()
+            .unwrap();
+        wait_for("the container and the helpers", || {
+            !fs::read_to_string(w.run.join("container.id"))
+                .unwrap_or_default()
+                .is_empty()
+                && helpers_in(&w.run).iter().any(|h| h.contains("daemon --stdio"))
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        let before = helpers_in(&w.run);
+        assert!(before.iter().any(|h| h.contains("broker.py")), "{before:?}");
+        assert!(
+            before.iter().any(|h| h.contains("EXEC:./nix-relay")),
+            "{before:?}"
+        );
+        assert!(
+            before
+                .iter()
+                .any(|h| h.contains("daemon --stdio --force-untrusted")),
+            "{before:?}: {}{}",
+            fs::read_to_string(&said).unwrap_or_default(),
+            fs::read_to_string(w.top.join("err.txt")).unwrap_or_default()
+        );
+        Command::new("kill")
+            .arg(format!("-{sig}"))
+            .arg(child.id().to_string())
+            .status()
+            .unwrap();
+        let status = child.wait().unwrap();
+        if killed {
+            ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+        } else {
+            assert_eq!(status.code(), Some(143));
+            assert_eq!(helpers_in(&w.run), Vec::<String>::new(), "after SIGTERM");
+            ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+        }
+        assert_eq!(
+            helpers_in(&w.run),
+            Vec::<String>::new(),
+            "after {sig} and cleanup"
+        );
+        for n in ["relay.sock", "git.sock", "nix.sock", "nix-relay"] {
+            assert!(
+                w.run.join(n).symlink_metadata().is_err(),
+                "{n} is left after {sig}"
+            );
+        }
+        let mut left = set(LEFT);
+        left.insert("bindings.log".into());
+        if !killed {
+            left.insert("status".into());
+        }
+        assert_eq!(names(&w.run), left, "after {sig}");
+        if engine == "podman" {
+            assert_eq!(engine_processes(&w.run), Vec::<String>::new());
+        }
+    }
+}
+
+#[test]
+fn podman_relays_end_with_the_run() {
+    relays_stopped_case("podman");
+}
+
+#[test]
+fn docker_relays_end_with_the_run() {
+    relays_stopped_case("docker");
+}
+
+/// Links planted in the run folder after prepare are never followed: at a socket's name (towards a listener of the
+/// test's), at the nix relay's script (towards a script that would leave a mark) and at bindings.log (towards a file
+/// of the test's). run removes each and makes its own: the run reaches its own helpers, the listener is never
+/// connected to, the script never runs and the file is never written.
+fn relay_links_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let script = "workmux set-window-status linked; nix store info >/dev/null && echo nix=ok";
+    let Some(w) = relay_world(
+        &format!("{engine}-relay-links"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", script],
+        RELAY_CAPS,
+    ) else {
+        return;
+    };
+    prepare(&w.top, &w.run);
+    let decoy = w.top.join("decoy");
+    fs::create_dir_all(&decoy).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(decoy.join("listen.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mark = decoy.join("ran");
+    fs::write(
+        decoy.join("relay"),
+        format!("#!/bin/sh\ntouch {}\n", mark.display()),
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("755")
+        .arg(decoy.join("relay"))
+        .status()
+        .unwrap();
+    fs::write(decoy.join("log"), "").unwrap();
+    for n in ["relay.sock", "nix.sock"] {
+        symlink(decoy.join("listen.sock"), w.run.join(n)).unwrap();
+    }
+    symlink(decoy.join("relay"), w.run.join("nix-relay")).unwrap();
+    symlink(decoy.join("log"), w.run.join("bindings.log")).unwrap();
+    let out = verb(&w.top, &w.run, "run").stdin(Stdio::null()).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.lines().any(|l| l == "nix=ok"), "{said}");
+    assert!(
+        fs::read_to_string(&w.workmux_log)
+            .unwrap_or_default()
+            .contains("set-window-status linked pane=%7"),
+        "the run's own broker relayed it"
+    );
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock),
+        "the decoy listener was reached"
+    );
+    assert!(!mark.exists(), "the decoy relay ran");
+    assert_eq!(
+        fs::read_to_string(decoy.join("log")).unwrap(),
+        "",
+        "written through the link"
+    );
+    assert!(decoy.join("relay").exists() && decoy.join("listen.sock").exists());
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+    assert!(
+        decoy.join("relay").exists() && decoy.join("listen.sock").exists(),
+        "cleanup followed a link"
+    );
+}
+
+#[test]
+fn podman_a_link_planted_at_a_helpers_path_is_never_followed() {
+    relay_links_case("podman");
+}
+
+#[test]
+fn docker_a_link_planted_at_a_helpers_path_is_never_followed() {
+    relay_links_case("docker");
+}
+
+/// The command's environment with the three bindings equals bwrap's for the same policy (`run_env`, run here with the
+/// repository's core/bwrap.py, and `deliver`, which adds nothing without a credential): `/run/pot/bin` first on PATH
+/// (the shims), nix's bin/ on it, `GIT_SSH_COMMAND`, `GIT_SSH_VARIANT`, `NIX_REMOTE` and `NIX_CONFIG`; but for what this
+/// backend does not place yet (`BASH_ENV`, the exported not-found handler, `/run/pot/notfound` on PATH).
+fn relay_env_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(python) = find("python3") else {
+        return;
+    };
+    let envp = coreutils("env");
+    let Some(w) = relay_world(
+        &format!("{engine}-relay-env"),
+        engine,
+        &program,
+        &[&envp, "-0"],
+        RELAY_CAPS,
+    ) else {
+        return;
+    };
+    let path = w.run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let pkg = |b: &str| which(b).parent().unwrap().parent().unwrap().display().to_string();
+    let mut n = 0;
+    for it in p["items"].as_array_mut().unwrap() {
+        if it["kind"] == "package" {
+            it["value"] = if n == 0 { pkg("env") } else { pkg("sh") }.into();
+            n += 1;
+        }
+    }
+    fs::write(&path, p.to_string()).unwrap();
+    prepare(&w.top, &w.run);
+    let host = [("TERM", "xterm"), ("NOTES_TOKEN", "notes-value")];
+    let out = verb(&w.top, &w.run, "run")
+        .envs(host)
+        .env_remove("COLORTERM")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    let got: BTreeSet<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|w| !w.is_empty())
+        .map(|w| String::from_utf8_lossy(w).into_owned())
+        .collect();
+    let bwrap_py = "import json, sys\nsys.path.insert(0, sys.argv[1])\nimport bwrap\n\
+        cfg = json.load(open(sys.argv[2]))\npolicy, launch = bwrap.load(sys.argv[3])\n\
+        env = bwrap.run_env(cfg, policy, launch)\n\
+        env.update(bwrap.deliver(policy, sys.argv[3], policy['mounts']['run'] + '/secrets', bwrap.credentials(policy)))\n\
+        sys.stdout.write(json.dumps(env))\n";
+    let py = Command::new(python)
+        .args(["-I", "-S", "-c", bwrap_py])
+        .arg(core_dir())
+        .arg(w.top.join("config.json"))
+        .arg(&w.run)
+        .envs(host)
+        .env_remove("COLORTERM")
+        .output()
+        .unwrap();
+    ok(&py);
+    let bwrap: BTreeMap<String, String> = serde_json::from_slice(&py.stdout).unwrap();
+    let want: BTreeSet<String> = bwrap
+        .into_iter()
+        .filter(|(k, _)| k != "BASH_ENV" && !k.starts_with("BASH_FUNC_"))
+        .map(|(k, v)| {
+            let v = if k == "PATH" {
+                v.split(':')
+                    .filter(|d| *d != "/run/pot/notfound")
+                    .collect::<Vec<_>>()
+                    .join(":")
+            } else {
+                v
+            };
+            format!("{k}={v}")
+        })
+        .collect();
+    assert!(
+        want.contains("GIT_SSH_COMMAND=/run/pot/bin/pot-ssh")
+            && want.contains("NIX_REMOTE=unix:///run/pot/nix.sock")
+    );
+    assert!(
+        want.iter().any(|v| v.starts_with("PATH=/run/pot/bin:")),
+        "{want:?}"
+    );
+    assert_eq!(got, want);
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_the_commands_environment_is_bwraps_with_the_relays() {
+    relay_env_case("podman");
+}
+
+#[test]
+fn docker_the_commands_environment_is_bwraps_with_the_relays() {
+    relay_env_case("docker");
+}
+
+/// cleanup stops the run's live broker and nix relay (here started by this test from container.env's commands, so not
+/// orphaned) and removes their sockets and the relay's script. No engine is needed.
+#[test]
+fn cleanup_stops_live_relays_and_removes_their_sockets() {
+    let Some(w) = relay_world("relay-cleanup", "podman", "podman", &["true"], RELAY_CAPS) else {
+        return;
+    };
+    prepare(&w.top, &w.run);
+    let cenv: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.run.join("container.env")).unwrap()).unwrap();
+    let words = |k: &str| -> Vec<String> {
+        cenv[k]
+            .as_array()
+            .unwrap_or_else(|| panic!("container.env has no {k}: {cenv}"))
+            .iter()
+            .map(|a| a.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (broker, relay) = (words("broker"), words("nixRelay"));
+    fs::write(w.run.join("nix-relay"), "#!/bin/sh\nexit 0\n").unwrap();
+    let mut started = vec![];
+    for argv in [&broker, &relay] {
+        started.push(
+            Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(&w.run)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    wait_for("the sockets", || {
+        ["relay.sock", "git.sock", "nix.sock"]
+            .iter()
+            .all(|n| w.run.join(n).exists())
+    });
+    assert_eq!(helpers_in(&w.run).len(), 2);
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+    for mut c in started {
+        let start = Instant::now();
+        while c.try_wait().unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5), "a helper still runs");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    assert_eq!(helpers_in(&w.run), Vec::<String>::new());
+    for n in ["relay.sock", "git.sock", "nix.sock", "nix-relay"] {
+        assert!(w.run.join(n).symlink_metadata().is_err(), "{n} is left");
+    }
+}
+
+/// prepare stops, as bwrap's run does, when a binding's host program is missing from launch.json's hostTools (ssh for
+/// git.fetch, nix for the nix relay); status.relay without workmux runs (bwrap gives its broker /bin/false).
+#[test]
+fn prepare_stops_when_a_bindings_host_program_is_missing() {
+    let Some(w) = relay_world("relay-no-tools", "podman", "podman", &["true"], RELAY_CAPS) else {
+        return;
+    };
+    let lpath = w.run.join("launch.json");
+    let l: serde_json::Value = serde_json::from_str(&fs::read_to_string(&lpath).unwrap()).unwrap();
+    for (drop, said) in [
+        ("ssh", "git.fetch's broker needs ssh on the host's PATH"),
+        ("nix", "the nix capability's relay needs nix on the host's PATH"),
+    ] {
+        let mut l2 = l.clone();
+        l2["hostTools"].as_object_mut().unwrap().remove(drop);
+        fs::write(&lpath, l2.to_string()).unwrap();
+        let out = verb(&w.top, &w.run, "prepare").output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{err}");
+        assert!(err.contains(said), "{err}");
+    }
+    let mut l2 = l.clone();
+    l2["hostTools"].as_object_mut().unwrap().remove("workmux");
+    fs::write(&lpath, l2.to_string()).unwrap();
+    prepare(&w.top, &w.run);
+    let cenv: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.run.join("container.env")).unwrap()).unwrap();
+    let broker: Vec<&str> = cenv["broker"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert!(
+        broker.windows(2).any(|p| p == ["--workmux", "/bin/false"]),
+        "{broker:?}"
+    );
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+}
+
+/// No value reaches an exec it should not (`strace -f -e execve -v`, which prints each exec's arguments and
+/// environment, following run's helpers and, under podman, into the container): git.fetch's key file's contents are in
+/// no exec at all (the broker hands ssh its path); the caller's `SSH_AUTH_SOCK` (git.fetch's `key.agent`) reaches the
+/// broker and the host ssh and workmux it runs (beside run itself, whose environment it is), and never the engine, the
+/// nix relay or the run.
+fn relay_strace_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(strace) = find("strace") else {
+        eprintln!("no strace on PATH");
+        return;
+    };
+    let git = gitbin();
+    let script = format!(
+        "workmux set-window-status traced; {git} ls-remote \"ssh://git@fake.example$REMOTE\" >/dev/null && echo fetched; nix store info >/dev/null && echo nix=ok"
+    );
+    let Some(w) = relay_world(
+        &format!("{engine}-relay-strace"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+        RELAY_CAPS,
+    ) else {
+        return;
+    };
+    let held = "pot-relay-marker-in-the-file";
+    let sock_marker = "/tmp/pot-relay-agent-marker-77e2";
+    fs::write(&w.key, format!("{held}\n")).unwrap();
+    let path = w.run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    p["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({ "kind": "env", "value": "REMOTE",
+        "class": "reach", "sources": [ { "flag": "--env" } ], "effective": true, "request": "env REMOTE",
+        "requestClass": "ordinary" }));
+    fs::write(&path, p.to_string()).unwrap();
+    prepare(&w.top, &w.run);
+    let log = w.top.join("strace.log");
+    let out = Command::new(&strace)
+        .args([
+            "-f",
+            "-qq",
+            "-v",
+            "-e",
+            "trace=execve,execveat",
+            "-s",
+            "1000000",
+            "-o",
+        ])
+        .arg(&log)
+        .arg(BIN)
+        .arg("--config")
+        .arg(w.top.join("config.json"))
+        .arg("run")
+        .arg(&w.run)
+        .env("REMOTE", &w.remote)
+        .env("SSH_AUTH_SOCK", sock_marker)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    ok(&out);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("fetched") && said.contains("nix=ok"), "{said}");
+    let execs = fs::read_to_string(&log).unwrap();
+    // the trace saw the helpers (and, under podman, the run)
+    for seen in ["broker.py", "EXEC:./nix-relay", "fake-ssh", "daemon\", \"--stdio"] {
+        assert!(execs.contains(seen), "strace did not see {seen}");
+    }
+    if engine == "podman" {
+        assert!(
+            execs.contains("shim.py"),
+            "strace did not follow into the container"
+        );
+    }
+    let bad: Vec<&str> = execs.lines().filter(|l| l.contains(held)).collect();
+    assert!(bad.is_empty(), "the key's contents in an exec: {bad:?}");
+    let fake_ssh = format!("execve(\"{}\"", w.top.join("fake-ssh").display());
+    let fake_workmux = format!("execve(\"{}\"", w.top.join("fake-workmux").display());
+    let bad: Vec<&str> = execs
+        .lines()
+        .filter(|l| l.contains(sock_marker))
+        .filter(|l| !l.contains(&format!("execve(\"{BIN}\"")))
+        .filter(|l| {
+            !(l.contains("broker.py")
+                || l.contains(&fake_ssh)
+                || l.contains(&fake_workmux)
+                || l.contains("/git-upload-pack\""))
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "SSH_AUTH_SOCK beyond the broker and its ssh: {bad:?}"
+    );
+    assert!(
+        execs
+            .lines()
+            .any(|l| l.contains(sock_marker) && l.contains("broker.py")),
+        "the broker lacks SSH_AUTH_SOCK"
+    );
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_no_exec_is_handed_a_relays_value() {
+    relay_strace_case("podman");
+}
+
+#[test]
+fn docker_no_exec_is_handed_a_relays_value() {
+    relay_strace_case("docker");
 }

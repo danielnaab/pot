@@ -164,6 +164,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
     let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
     let net = cfg.net_tools().map_err(refuse)?;
     let look = cfg.look_tools();
+    let broker = cfg.broker_tools().map_err(refuse)?;
     let inputs = Inputs {
         policy: &p,
         launch: &l,
@@ -175,6 +176,8 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
         base_closure: &base,
         net: net.as_ref(),
         look: look.as_ref(),
+        broker: broker.as_ref(),
+        nix_socat: cfg.socat.as_deref(),
         host: &host::RealHost,
     };
     let plan = render::render(&inputs).map_err(|gaps| {
@@ -234,6 +237,22 @@ fn print_plan(engine: &str, p: &Plan) -> String {
             out,
             "# before the engine, run starts pot's proxy in the run folder: {}",
             words(proxy)
+        );
+    }
+    if let Some(broker) = &p.broker {
+        let _ = writeln!(
+            out,
+            "# before the engine, run starts pot's broker in the run folder: {}",
+            words(broker)
+        );
+    }
+    if let (Some(relay), Some(script)) = (&p.nix_relay, &p.nix_script) {
+        let _ = writeln!(
+            out,
+            "# before the engine, run starts the nix relay in the run folder: {}; each connection runs ./{}: {}",
+            words(relay),
+            render::NIX_SCRIPT,
+            script.lines().last().unwrap_or_default()
         );
     }
     if !p.creds.is_empty() {
@@ -320,8 +339,16 @@ fn dir_new(path: &Path) -> std::io::Result<()> {
 }
 
 /// What `run` makes in the run folder just before the engine starts, and removes when the command ends: the named pipe
-/// for the variables and the proxy's socket. `prepare` records no kind for them.
-const RUNTIME: &[&str] = &["secrets.fifo", "proxy.sock"];
+/// for the variables, the proxy's socket, the bindings' sockets and the nix relay's script. `prepare` records no kind
+/// for them.
+const RUNTIME: &[&str] = &[
+    "secrets.fifo",
+    "proxy.sock",
+    "relay.sock",
+    "git.sock",
+    "nix.sock",
+    "nix-relay",
+];
 
 /// A workspace path the plan binds, as `prepare` found it: `run` checks it again just before the engine starts.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -529,7 +556,7 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
     let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults,
         "fifo": p.fifo, "proxy": p.proxy, "credentials": p.creds, "hostless": p.hostless, "secretsAt": p.secrets_at,
-        "pins": pins });
+        "pins": pins, "broker": p.broker, "nixRelay": p.nix_relay, "nixScript": p.nix_script, "clear": p.clear });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -546,6 +573,10 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
             .map_err(|e| Refusal::new(&context_of(rundir), format!("can't remove {}: {e}", s.display())))?;
     }
     let (p, l, plan) = plan(cfg, rundir)?;
+    // bwrap's run stops so when a binding's host program is missing (launch-1: before the command starts)
+    if let (Some(stop), false) = (&plan.stop, print) {
+        return Err(Refusal::new(&p.context, stop.clone()));
+    }
     if print {
         let (engine, _) = engine(cfg).map_err(|m| Refusal::new(&p.context, m))?;
         print!("{}", print_plan(engine.name(), &plan));
@@ -573,6 +604,18 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
     if plan.proxy.is_some() || p.proves("private-proxy") {
         if let Some(t) = cfg.net_tools().map_err(|m| Refusal::new(&p.context, m))? {
             gaps.extend(render::net_gaps(&t, &host::RealHost));
+        }
+    }
+    if plan.broker.is_some() {
+        if let Some(t) = cfg.broker_tools().map_err(|m| Refusal::new(&p.context, m))? {
+            gaps.extend(render::broker_gaps(&t, &plan, &host::RealHost));
+        }
+    }
+    if let (Some(relay), Some(socat)) = (&plan.nix_relay, &cfg.socat) {
+        if !fs::metadata(socat).is_ok_and(|m| m.is_file()) || relay.first() != Some(socat) {
+            gaps.push(format!(
+                "the config's socat {socat} (the nix relay runs it on the host: it must be a file)"
+            ));
         }
     }
     if !gaps.is_empty() {
@@ -870,6 +913,17 @@ struct EngineEnv {
     /// Write access: every workspace path the plan binds, as prepare found it.
     #[serde(default)]
     pins: Vec<PinRecord>,
+    /// status.relay, git.fetch: pot's broker, started in the run folder before the engine.
+    #[serde(default)]
+    broker: Option<Vec<String>>,
+    /// nix: the relay (socat) and the script it runs, started and written in the run folder before the engine.
+    #[serde(default, rename = "nixRelay")]
+    nix_relay: Option<Vec<String>>,
+    #[serde(default, rename = "nixScript")]
+    nix_script: Option<String>,
+    /// status.relay: workmux's argv and the pane, run when the command ends.
+    #[serde(default)]
+    clear: Option<Vec<String>>,
 }
 
 /// Write access, just before the engine starts: each pin is the inode prepare recorded, of its kind, no link, and a
@@ -1079,26 +1133,11 @@ const PROXY_KEEP: &[&str] = &[
 /// (written afresh, never through a link), its socket `proxy.sock` (whatever is there removed first, never a folder).
 /// It is this process's child: when `run` is gone (even killed with SIGKILL), the proxy stops itself (`proxy.py`'s `orphaned`).
 fn start_proxy(abs: &Path, argv: &[String]) -> Result<std::process::Child, String> {
-    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+    use std::os::unix::fs::FileTypeExt as _;
     let sock = abs.join("proxy.sock");
-    match sock.symlink_metadata() {
-        Ok(m) if m.is_dir() => return Err(format!("{}: a folder is in the way", sock.display())),
-        Ok(_) => fs::remove_file(&sock).map_err(|e| format!("{}: {e}", sock.display()))?,
-        Err(_) => {}
-    }
+    make_room(&sock)?;
     let log_path = abs.join("proxy.log");
-    match log_path.symlink_metadata() {
-        Ok(m) if m.is_dir() => return Err(format!("{}: a folder is in the way", log_path.display())),
-        Ok(_) => fs::remove_file(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?,
-        Err(_) => {}
-    }
-    // created exclusively: never through a link
-    let log = fs::OpenOptions::new()
-        .append(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&log_path)
-        .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let log = fresh_log(&log_path)?;
     let err = log
         .try_clone()
         .map_err(|e| format!("{}: {e}", log_path.display()))?;
@@ -1135,6 +1174,150 @@ fn start_proxy(abs: &Path, argv: &[String]) -> Result<std::process::Child, Strin
     ))
 }
 
+/// Whatever is at PATH removed (a link: the link, never followed); a folder there refused.
+fn make_room(path: &Path) -> Result<(), String> {
+    match path.symlink_metadata() {
+        Ok(m) if m.is_dir() => Err(format!("{}: a folder is in the way", path.display())),
+        Ok(_) => fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display())),
+        Err(_) => Ok(()),
+    }
+}
+
+/// A helper's log, made afresh: whatever is at its path removed first, then created exclusively (never through a link).
+fn fresh_log(path: &Path) -> Result<fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    make_room(path)?;
+    fs::OpenOptions::new()
+        .append(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The caller's variables pot's broker keeps (when set): the proxy's, and the ssh agent's socket (git.fetch's
+/// `key.agent`). Host workmux gets the pane from the broker (`TMUX_PANE`), never from the run.
+const BROKER_KEEP: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "TMUX",
+    "TMUX_TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "SSH_AUTH_SOCK",
+];
+
+/// The caller's variables the nix relay keeps (when set): what host nix reads to reach the caller's store and its
+/// configuration. The run is an untrusted client whatever they say (`--force-untrusted`).
+const RELAY_KEEP: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CONFIG_DIRS",
+    "XDG_CACHE_HOME",
+    "NIX_REMOTE",
+    "NIX_CONF_DIR",
+    "NIX_USER_CONF_FILES",
+    "NIX_CONFIG",
+];
+
+/// The bindings' sockets the run folder's helpers make: status.relay's and git.fetch's (the broker), nix's (the relay).
+fn binding_socks(env: &EngineEnv) -> Vec<&'static str> {
+    let mut socks = vec![];
+    if let Some(b) = &env.broker {
+        for s in ["relay.sock", "git.sock"] {
+            if b.iter().any(|a| a == s) {
+                socks.push(s);
+            }
+        }
+    }
+    if env.nix_relay.is_some() {
+        socks.push("nix.sock");
+    }
+    socks
+}
+
+/// The host side of the bindings, as bwrap's `start_bindings`: pot's broker (status.relay, git.fetch) and the nix relay
+/// (socat, running the script `nix-relay` for each connection), each in the run folder with an environment of its own,
+/// their stderr in `bindings.log` (made afresh). Whatever is at a socket's or the script's name is removed first (a link
+/// is removed, never followed); `run` waits up to 5 s for every socket, else refuses with the log's last line. The
+/// broker stops itself when `run` is gone (`orphaned`); the relay does not, and `cleanup` stops it.
+fn start_bindings(abs: &Path, env: &EngineEnv, helpers: &mut Helpers) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let socks = binding_socks(env);
+    if socks.is_empty() {
+        return Ok(());
+    }
+    helpers.rundir = Some(abs.to_path_buf());
+    for s in &socks {
+        helpers.files.push(abs.join(s));
+        make_room(&abs.join(s))?;
+    }
+    let log_path = abs.join("bindings.log");
+    let log = fresh_log(&log_path)?;
+    let spawn = |argv: &[String], keep: &[&str]| -> Result<std::process::Child, String> {
+        let mut c = std::process::Command::new(&argv[0]);
+        c.args(&argv[1..]).current_dir(abs).env_clear();
+        for k in keep {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
+        let err = log
+            .try_clone()
+            .map_err(|e| format!("{}: {e}", log_path.display()))?;
+        c.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(err)
+            .spawn()
+            .map_err(|e| format!("can't start the run's bindings ({}): {e}", argv[0]))
+    };
+    if let Some(b) = &env.broker {
+        helpers.procs.push(spawn(b, BROKER_KEEP)?);
+    }
+    if let (Some(relay), Some(script)) = (&env.nix_relay, &env.nix_script) {
+        let path = abs.join(render::NIX_SCRIPT);
+        helpers.files.push(path.clone());
+        write_new(&path, script.as_bytes(), 0o500).map_err(|e| e.to_string())?;
+        helpers.procs.push(spawn(relay, RELAY_KEEP)?);
+    }
+    let start = std::time::Instant::now();
+    let up = || {
+        socks.iter().all(|s| {
+            abs.join(s)
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_socket())
+        })
+    };
+    while !up() && start.elapsed() < std::time::Duration::from_secs(5) {
+        if helpers
+            .procs
+            .iter_mut()
+            .any(|c| matches!(c.try_wait(), Ok(Some(_))))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if up() {
+        return Ok(());
+    }
+    let said = read_own(&log_path).unwrap_or_default();
+    let said = String::from_utf8_lossy(&said);
+    Err(format!(
+        "the run's bindings ({}) did not start: {}",
+        socks.join(", "),
+        said.lines().last().unwrap_or("(nothing in bindings.log)")
+    ))
+}
+
 /// SIGTERM, then SIGKILL after 2 s (bwrap's `stop_helpers`); the child is reaped.
 fn stop_process(child: &mut std::process::Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
@@ -1162,16 +1345,49 @@ fn stop_process(child: &mut std::process::Child) {
 /// is gone) and to `cleanup`.
 #[derive(Default)]
 struct Helpers {
-    proxy: Option<std::process::Child>,
+    /// The proxy, the broker and the nix relay.
+    procs: Vec<std::process::Child>,
     files: Vec<PathBuf>,
     /// The via-file bindings' folder, `secrets/`: removed with the values in it (a link there removed, not followed).
     secrets: Option<PathBuf>,
+    /// status.relay: workmux's argv and the caller's pane, run once the command has ended (bwrap's: clear the pane).
+    clear: Option<Vec<String>>,
+    /// With the bindings' helpers: the run folder, where a relay daemon still serving a connection is stopped too.
+    rundir: Option<PathBuf>,
 }
 
 impl Drop for Helpers {
     fn drop(&mut self) {
-        if let Some(c) = self.proxy.as_mut() {
+        if let Some(c) = self.clear.as_ref().filter(|c| c.len() == 4) {
+            let mut cmd = std::process::Command::new(&c[0]);
+            cmd.args(&c[1..3]).env_clear();
+            for k in PROXY_KEEP {
+                if let Some(v) = std::env::var_os(k) {
+                    cmd.env(k, v);
+                }
+            }
+            let _ = cmd
+                .env("TMUX_PANE", &c[3])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        for c in &mut self.procs {
+            if let Some(pid) = i32::try_from(c.id())
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+            }
+        }
+        for c in &mut self.procs {
             stop_process(c);
+        }
+        if let Some(r) = &self.rundir {
+            for f in stop_helpers(r) {
+                eprintln!("{}", visible(&format!("pot: {f}")));
+            }
         }
         for f in &self.files {
             if f.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
@@ -1235,7 +1451,13 @@ fn write_secrets(dir: &Path, files: &SecretFiles) -> Result<(), String> {
 
 /// Just before the engine starts: the named pipe and the proxy's socket are what `run` made (a link or another kind of
 /// file in their place is refused).
-fn runtime_paths(abs: &Path, fifo: bool, proxy: bool, secrets: Option<&[String]>) -> Result<(), String> {
+fn runtime_paths(
+    abs: &Path,
+    fifo: bool,
+    proxy: bool,
+    socks: &[&str],
+    secrets: Option<&[String]>,
+) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
     let mut bad = vec![];
     // the via-file bindings' folder: this user's, 0700, holding exactly the files run wrote, each 0400 and this user's
@@ -1271,6 +1493,9 @@ fn runtime_paths(abs: &Path, fifo: bool, proxy: bool, secrets: Option<&[String]>
     }
     if proxy {
         check("proxy.sock", &|t| t.is_socket(), &mut bad);
+    }
+    for s in socks {
+        check(s, &|t| t.is_socket(), &mut bad);
     }
     if bad.is_empty() {
         Ok(())
@@ -1441,8 +1666,9 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     }
     if let Some(proxy) = &env.proxy {
         helpers.files.push(abs.join("proxy.sock"));
-        helpers.proxy = Some(start_proxy(&abs, proxy).map_err(refuse)?);
+        helpers.procs.push(start_proxy(&abs, proxy).map_err(refuse)?);
     }
+    start_bindings(&abs, &env, &mut helpers).map_err(refuse)?;
     let secret_names = (!bindings::via_file(&env.credentials).is_empty()).then(|| {
         helpers.secrets = Some(abs.join("secrets"));
         secret_files.iter().map(|f| f.0.clone()).collect::<Vec<_>>()
@@ -1452,7 +1678,14 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     }
     // R2 again, now that the proxy runs: every path the engine is handed is as prepare left it, or as run made it
     engine_paths(&abs, e, &env.own).map_err(refuse)?;
-    runtime_paths(&abs, env.fifo, env.proxy.is_some(), secret_names.as_deref()).map_err(refuse)?;
+    runtime_paths(
+        &abs,
+        env.fifo,
+        env.proxy.is_some(),
+        &binding_socks(&env),
+        secret_names.as_deref(),
+    )
+    .map_err(refuse)?;
     pins_unchanged(&env.pins).map_err(refuse)?;
     let argv = lifecycle::run_argv(&argv, std::io::stdin().is_terminal());
 
@@ -1471,6 +1704,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         .args(&argv[1..])
         .spawn()
         .map_err(|err| refuse(format!("can't run {program}: {err}")))?;
+    helpers.clear.clone_from(&env.clear);
     let done = Arc::new(AtomicBool::new(false));
     let feeder = env.fifo.then(|| {
         let data = lifecycle::secret_records(&env.piped, |n| piped_value(&env, &vals, n));
@@ -1759,14 +1993,14 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         }
     };
     let rd = |n: &str| abs.join(n);
-    let mut failed = stop_proxies(&abs);
+    let mut failed = stop_helpers(&abs);
     failed.extend(cleanup_engine(cfg, &abs));
     // write access: the placeholders that still hold what prepare wrote (bwrap's cleanup), and the seals' bases
     failed.extend(remove_placeholders(&rd("placeholders.json")));
     if let Err(e) = remove_tree_writable(&rd("sealed")) {
         failed.push(format!("{}: {e}", rd("sealed").display()));
     }
-    for n in ["enginehome", "dockercfg", "secrets"] {
+    for n in ["enginehome", "dockercfg", "secrets", "bin"] {
         if let Err(e) = remove_tree(&rd(n)) {
             failed.push(format!("{}: {e}", rd(n).display()));
         }
@@ -1794,6 +2028,10 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "hidden.txt",
         "secrets.fifo",
         "proxy.sock",
+        "relay.sock",
+        "git.sock",
+        "nix.sock",
+        "nix-relay",
         "mcp.json",
         "placeholders.json",
         "sealed.json",
@@ -1830,9 +2068,10 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     }
 }
 
-/// pot's proxies for this run still alive (a `run` killed with SIGKILL a moment ago leaves its proxy for up to a second):
-/// stopped, SIGTERM then SIGKILL after 2 s. Returns those that would not stop.
-fn stop_proxies(abs: &Path) -> Vec<String> {
+/// pot's helpers for this run still alive, each started in the run folder: the proxy and the broker (a `run` killed with
+/// SIGKILL a moment ago leaves them for up to a second), the nix relay and a daemon it started for a connection (which
+/// never stop by themselves): stopped, SIGTERM then SIGKILL after 2 s. Returns those that would not stop.
+fn stop_helpers(abs: &Path) -> Vec<String> {
     let r = abs.to_string_lossy().into_owned();
     let me = std::process::id().to_string();
     let find = || -> Vec<rustix::process::Pid> {
@@ -1844,7 +2083,7 @@ fn stop_proxies(abs: &Path) -> Vec<String> {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|pid| pid.bytes().all(|b| b.is_ascii_digit()) && *pid != me)
             .filter(|pid| {
-                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| lifecycle::names_proxy(&c, &r))
+                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| lifecycle::names_helper(&c, &r))
                     && fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|c| c == abs)
             })
             .filter_map(|pid| pid.parse().ok().and_then(rustix::process::Pid::from_raw))
@@ -1873,7 +2112,7 @@ fn stop_proxies(abs: &Path) -> Vec<String> {
             return vec![];
         }
     }
-    vec![format!("the network proxy of {} would not stop", abs.display())]
+    vec![format!("the helpers of {} would not stop", abs.display())]
 }
 
 /// probe's engine, in a temporary folder of its own (podman's home, its storage.conf and store), removed after:

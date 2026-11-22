@@ -6,9 +6,9 @@ status: draft
 pot's third backend, beside bubblewrap and Seatbelt: it carries out a run's [policy.json/1](../../contracts/policy-1.md)
 as one `podman run` or `docker run`, a fresh container per run, on any host or CI that has either. It is pot's
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
-`packages.pot-container`). This page is its fifth slice (pot phase 2, plan step 3): it probes, renders the
+`packages.pot-container`). This page is its sixth slice (pot phase 2, plan step 3): it probes, renders the
 command and runs it, for runs in place with read access, write access or none, with the network through pot's proxy
-and the `credential` and `mcp` bindings; no root offers the backend yet. The transcripts
+and the `credential`, `mcp`, `status.relay`, `git.fetch` and `nix` bindings; no root offers the backend yet. The transcripts
 that test it are the pages under [container/](container/probe.md).
 
 ```
@@ -21,7 +21,7 @@ pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
 | `prepare` | Checks the policy and refuses what it can't carry out; places the run's files and `container.argv` (the command, NUL-separated). `--print` prints the command and writes nothing ([transcript](container/prepare.md)) |
 | `run` | Reads the bindings' values on the host, then runs `container.argv` with the engine environment `prepare` recorded; exits with the command's status once the container is gone ([Run and cleanup](#run-and-cleanup), [Bindings](#bindings)) |
 | `after` | Prints the run's `after` event: bwrap's, with the proxy's `denials` and `loopback`; with write access, the host's look after the run (commits, changed host-run files, new git metadata, sealed leftovers: [Write access](#write-access)) |
-| `cleanup` | Stops the run's proxy if it still runs, removes the run's container and store through the engine, then what `prepare` and `run` placed (a via-file binding's values, the placeholders, the sealed folders' bases among them); names every removal it could not make (exit 1) |
+| `cleanup` | Stops the run's helpers if they still run (the proxy, the broker, the nix relay and its daemons), removes the run's container and store through the engine, then what `prepare` and `run` placed (a via-file binding's values, the bindings' sockets, the placeholders, the sealed folders' bases among them); names every removal it could not make (exit 1) |
 
 A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 
@@ -38,7 +38,13 @@ network under `closure-store`). Unless `python` and `proxy` are files and `socat
 refuses the network and `private-proxy`. No contract field is added: these are the backend's own config, and the proxy's other
 inputs are launch.json/1's existing fields (below). Write access (0.3.0) needs `pins` (pot's `core/pins.py`) and
 `git` (host git) beside `python`, each a file: the host's look before and after the run. Without them `probe` does
-not prove `protected-as-mounts` and `prepare` refuses write access.
+not prove `protected-as-mounts` and `prepare` refuses write access. The `status.relay` and `git.fetch` bindings
+(this slice) need `broker` (pot's `core/broker.py`, which `python` runs on the host) and `shim` (pot's
+`core/shim.py`, which the run's shims run with the same `python`), and `shimClosure` (a file of store paths: python's
+and the shim's closure, bound into a run with either binding under `closure-store`); `prepare` refuses either binding
+without `python`, `broker` and `shim`, and refuses unless `python` and `broker` are files and `python` and `shim`, and
+each one's real path, are files under a path the run binds (`render::broker_gaps`). The `nix` binding needs `socat`
+(the relay, on the host), a file. These are bwrap's config names; no contract field is added.
 
 **`launch.json`** ([launch.json/1](../../contracts/launch-1.md)) is read leniently, and only these fields:
 
@@ -52,6 +58,9 @@ not prove `protected-as-mounts` and `prepare` refuses write access.
 | `closure` | The store paths bound read-only under `closure-store` |
 | `potBin` | `/run/pot/launcher` and `~/.config/pot/launcher`, and on `PATH` |
 | `pane`, `hostTools.tmux` | The proxy's notices of a denial on the caller's tmux pane (`--tmux`, `--pane`), as bwrap's |
+| `pane`, `hostTools.workmux` | status.relay's broker relays to host workmux on the caller's pane, and `run` clears the pane when the command ends ([The relays](#the-relays)) |
+| `hostTools.ssh` | git.fetch's broker runs host ssh; without it `prepare` stops with bwrap's message |
+| `hostTools.nix` | The nix relay runs host nix; its `bin/` is on the run's `PATH`; without it `prepare` stops with bwrap's message |
 | `netFix` | The permanent fix a denial names (the proxy's `--fix`) |
 | `siblingOf` | A sibling's proxy shows no one-run fix (`--sibling`) |
 | `pins` | Write access: each workspace's pins, as pot's core resolved them ([Write access](#write-access)); read strictly (an unknown key is refused) |
@@ -173,10 +182,11 @@ change. Plain variables already take the same pipe when a secret, a binding or t
 not.
 
 `prepare` writes these as `container.env` for `run`: the names kept, the values set, the names that go over the
-pipe (and whether the pipe is used), the proxy's command, the `credential` and `mcp` bindings (their `capability`,
+pipe (and whether the pipe is used), the proxy's command, the broker's and the nix relay's commands and the relay's
+script, workmux's clear, the `credential` and `mcp` bindings (their `capability`,
 `selector`, `env`, `from` and `via`: references, never a value), and the kind (file or folder) of every file of the
-run's that the plan binds, but for the pipe and the proxy's socket, which `run` makes. It holds no secret's value.
-`prepare --print` shows them, and the proxy's command. pot's default hidden list holds `~/.config/containers` and
+run's that the plan binds, but for the pipe and the sockets, which `run`'s helpers make. It holds no secret's value.
+`prepare --print` shows them, and the helpers' commands ([transcript](container/prepare.md#the-relays)). pot's default hidden list holds `~/.config/containers` and
 `~/.docker/config.json` (unreleased): no run can read or change the configuration of a later container run.
 
 ## Policy to flags
@@ -198,7 +208,10 @@ run's that the plan binds, but for the pipe and the proxy's socket, which `run` 
 | the same | `--env` `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy` `=http://127.0.0.1:3128`, `NO_PROXY`, `no_proxy` `=localhost,127.0.0.1,::1` (bwrap's `run_env`, set last: they beat `env.set` and an item of the same name) | the same |
 | a bind | `--volume SRC:DEST:ro` (or `:rw`) | `--mount type=bind,source=SRC,target=DEST[,readonly]`: docker's `--volume` creates a missing source, as root |
 | `closure-store` proved | a read-only bind for each path of `launch.json` `closure` and the config's base closure | the same |
-| `closure-store` not proved | `/nix/store` bound read-only | the same |
+| `closure-store` not proved, or the `nix` binding | `/nix/store` bound read-only (bwrap's, for nix: new build outputs appear at once) | the same |
+| `status.relay`, `git.fetch`, `nix` | `--volume RUNDIR/relay.sock:/run/pot/relay.sock:ro` (`git.sock`, `nix.sock`: the binding's `socket`), each made by `run`'s helpers before the engine ([The relays](#the-relays)) | the same, with `--mount` |
+| `status.relay` or `git.fetch` | `--volume RUNDIR/bin:/run/pot/bin:ro` (the shims `workmux`, `pot-ssh`); `/run/pot/bin` first on `PATH`; with `git.fetch`, `GIT_SSH_COMMAND=/run/pot/bin/pot-ssh GIT_SSH_VARIANT=ssh` | the same |
+| `nix` | `NIX_REMOTE=unix:///run/pot/nix.sock`, `NIX_CONFIG=experimental-features = nix-command flakes`, `hostTools.nix`'s folder on `PATH` (bwrap's `run_env`) | the same |
 | `/bin/sh`, `/usr/bin/env`, the CA bundle, `/etc/passwd`, `/etc/group`, `/etc/hosts` | read-only binds | the same |
 | `access: read` (in place) | `PATH` bound read-only, and `common` when it is outside (a worktree's); in each, sockets and hidden paths masked | the same |
 | `access: write` (in place) | `PATH` bound writable, and `common` when it is outside (a worktree's); then launch.json's `pins`: each of `dirs` bound writable onto itself and each of `ro` read-only onto itself; sockets and hidden paths masked as with read access; each sealed folder a folder of the run's (`RUNDIR/sealed/N`) bound writable at its path with its entries bound read-only into it ([Write access](#write-access)) | the same, with `--mount` (`readonly` for `ro`) |
@@ -328,9 +341,9 @@ regular files or absent. Every file and folder of the run's that the plan binds 
 file or nothing (an empty folder there is removed). Otherwise `run` refuses, naming each path, and the engine
 never starts. It starts the engine with the caller's environment cleared but for the names `container.env`
 keeps, then the values it sets. stdin, stdout and stderr are the engine's. It adds `--tty` when stdin is a terminal.
-Before the engine it makes the named pipe ([above](#the-engines-configuration)) and starts the proxy
-([The network](#the-network)), then checks the run folder again, the pipe and the proxy's socket included (each must
-be what `run` just made: a pipe, a socket). Whatever it started is stopped and removed when the command ends, and on
+Before the engine it makes the named pipe ([above](#the-engines-configuration)), starts the proxy
+([The network](#the-network)) and the bindings' helpers ([The relays](#the-relays)), then
+checks the run folder again, the pipe and the sockets included (each must be what `run` just made: a pipe, a socket). Whatever it started is stopped and removed when the command ends, and on
 every early return. docker's root is the config's image, by default
 `localhost/pot-empty:1`. `run` imports it from an empty tar when it is missing (`docker import`) and refuses an image
 that is not the one empty layer with no configuration (R4): `Entrypoint`, `Cmd`, `Env`, `Volumes`, `User`,
@@ -360,9 +373,12 @@ reads it.
 
 **`cleanup`** (audit N6) removes, in order:
 
-- The run's proxy, if it still runs (a `run` killed with SIGKILL leaves it for up to a second): a process whose
-  arguments hold `proxy.sock` and the run's own `--denials RUNDIR/denials` and whose working folder is the run folder,
-  stopped with SIGTERM, then SIGKILL after 2 s; one that would not stop is named.
+- The run's helpers, if they still run, each a process whose working folder is the run folder and whose arguments
+  are a helper's (`lifecycle::names_helper`): the proxy (`proxy.sock` and the run's own `--denials RUNDIR/denials`)
+  and the broker (`relay.sock` or `git.sock` and the same `--denials`), which a `run` killed with SIGKILL leaves for
+  up to a second; the nix relay (socat on `nix.sock` running `./nix-relay`) and a daemon it started for a connection
+  (`daemon --stdio --force-untrusted`), which never stop by themselves. Each is stopped with SIGTERM, then SIGKILL
+  after 2 s; one that would not stop is named.
 - The container, through the engine (podman's when the run's store is not empty; docker's by the run's name),
   waiting for the engine's processes as `run` does. The engine is never handed a linked path (R2). When
   `engineroot`, `enginetmp` or `enginehome` is not a real folder, or the removal or the wait fails, the engine's
@@ -372,8 +388,9 @@ reads it.
 - The engine's state (`enginestore`, `engineroot`, `enginetmp`). What the user can't remove (files of another id of
   the user namespace, an overlay's mode-000 `work/work`) is removed with `podman unshare rm -rf`, run by a podman
   whose own store is a private temporary folder, never the run's.
-- The engine's home, what `prepare` placed, and the named pipe and the proxy's socket. `proxy.log` stays, as
-  bwrap's does (the run's record, which `after` reads). It never follows a link planted in the run folder (a
+- The engine's home, what `prepare` placed (`bin/` among it), the named pipe, the proxy's and the bindings' sockets
+  and the nix relay's script. `proxy.log` and `bindings.log` stay, as bwrap's do (the run's record; `after` reads
+  the proxy's). It never follows a link planted in the run folder (a
 link is removed, not followed) and never empties a folder that should be empty (`rootfs`, `emptydir`). Every
 removal it could not make is named in one refusal (exit 1); what it removed stays removed, so it can run again.
 
@@ -460,6 +477,56 @@ A `credential` or `mcp` binding (policy-1 `bindings[]`) is carried out as bwrap.
   that is not a `NAME`. The engine list (`engine::configures_engine`) does not apply: no binding's variable reaches
   the engine.
 
+## The relays
+
+The `status.relay`, `git.fetch` and `nix` bindings are carried out as bwrap.py carries them out (`write_own`,
+`run_env`, `start_bindings`): the run reaches a helper on the host over a socket, and the helper decides.
+
+- **What the run sees.** Each binding's socket at its `socket` (`/run/pot/relay.sock`, `git.sock`, `nix.sock`): the
+  run folder's socket of that name, bound read-only (connecting to a socket is not a write to the mount; tested under
+  both engines). The container keeps `--network none`: a Unix socket reached by path through a bind crosses network
+  namespaces, so no relay inside is needed (the proxy needs socat only to turn TCP into its socket). With
+  `status.relay` or `git.fetch`, the shims in the run folder's `bin/`, bound read-only at `/run/pot/bin`, first on
+  `PATH`: `workmux` and `pot-ssh`, bwrap's text (`#!/bin/sh` then `exec PYTHON -I -S SHIM workmux|ssh "$@"`), which
+  run pot's `shim.py` with the config's python, both under a path the run binds (`shimClosure`). bwrap places `bin/`
+  for every run; here it is placed only with one of these two bindings, so a run without them has no `/run/pot/bin`
+  on `PATH`. With `git.fetch`, `GIT_SSH_COMMAND=/run/pot/bin/pot-ssh` and `GIT_SSH_VARIANT=ssh`. With `nix`, the whole
+  store read-only (`/nix/store` bound onto itself, so the host daemon's new outputs appear at once), `NIX_REMOTE=
+  unix:///run/pot/nix.sock`, `NIX_CONFIG=experimental-features = nix-command flakes`, and `hostTools.nix`'s folder on
+  `PATH`, after pot's. The variables are pot's values (`--env NAME=VALUE`, or the last hop's with the pipe), in
+  bwrap's order: after `env.set`, before the items. `prepare` refuses `closure-store` with the nix binding (pot drops
+  it; this backend never claims it while binding the whole store).
+- **What runs on the host,** started by `run` in the run folder, after the proxy and before the engine, each with an
+  environment of its own and its stderr in `bindings.log` (made afresh, never through a link):
+  - **pot's broker** (`status.relay`, `git.fetch`): `PYTHON -I -S BROKER --context CTX --denials RUNDIR/denials
+    [--status relay.sock --workmux WORKMUX [--pane PANE]] [--git git.sock --ssh SSH --remote PATTERN… [--key-file
+    FILE]]`, bwrap's command (`/bin/false` as workmux when the host has none; a key file's `~` is the caller's home).
+    It relays only `set-window-status` and `register-agent` to host workmux, on the pane that launched the run, and
+    brokers only `git-upload-pack` to a bound remote, through host ssh with `BatchMode` (and the key file); a refused
+    fetch is recorded in `denials`. Its environment is the proxy's list (`PATH HOME USER LOGNAME LANG TMUX TMUX_TMPDIR
+    XDG_RUNTIME_DIR`) and `SSH_AUTH_SOCK` (for `key.agent`), nothing else of the caller's (bwrap passes the whole
+    environment). It stops itself once `run` is gone (`broker.py`'s `orphaned`).
+  - **the nix relay** (`nix`): `SOCAT -lf /dev/null UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600 EXEC:./nix-relay`,
+    bwrap's, where `nix-relay` (written by `run`, mode 0500, never through a link) is `exec NIX daemon --stdio
+    --force-untrusted --process-ops --extra-experimental-features 'daemon-trust-override mounted-ssh-store'`: the run
+    is an untrusted client of the host's daemon (tested: `nix store info` says `Trusted: 0`), and builds and adds to
+    the store through it. Its environment is `PATH HOME USER LOGNAME LANG TMPDIR XDG_RUNTIME_DIR XDG_CONFIG_HOME
+    XDG_CONFIG_DIRS XDG_CACHE_HOME NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES NIX_CONFIG`. It does not stop by itself
+    (socat has no parent-death option, and a backend without `unsafe` can't set one): `run` stops it, and `cleanup`
+    after a SIGKILL of `run`, as bwrap's `cleanup` would have to.
+
+  Each socket is relative to the run folder (a run folder's path may be longer than `sun_path`'s 108 bytes). Whatever
+  is at a socket's or the script's name is removed first (a link is removed, never followed; a folder refuses); `run`
+  waits up to 5 s for every socket, else refuses with `bindings.log`'s last line. Just before the engine it checks that
+  each is a socket (`lstat`). A missing `hostTools.ssh` (git.fetch) or `hostTools.nix` stops `prepare` with bwrap's
+  message (`git.fetch's broker needs ssh on the host's PATH`, `the nix capability's relay needs nix on the host's
+  PATH`); a missing workmux does not.
+- **The end.** When the command ends (and on every early return), `run` clears the caller's pane when it relayed to
+  workmux (`WORKMUX set-window-status clear` with `TMUX_PANE`, bwrap's), stops the broker and the relay (SIGTERM, then
+  SIGKILL after 2 s), stops a relay daemon still serving a connection, and removes the sockets and `nix-relay`. A
+  SIGTERM of `run` does the same once the container has stopped. After a SIGKILL of `run`, `cleanup` stops what is
+  left and removes them ([Run and cleanup](#run-and-cleanup)).
+
 ## Refusals
 
 `prepare` refuses, naming every gap in one line, never running without one (policy-1 rules 1-5):
@@ -480,7 +547,8 @@ refused, since a field this backend does not know could narrow the run):
 - clone mode: the clone at its original path, its pins, proposal links, and the `after` staging fetch;
 - the network, and `private-proxy`, when the config's `python`, `proxy`, `socat` and `netClosure` do not pass
   `probe`'s test (above);
-- the `status.relay`, `git.fetch` and `nix` bindings (the broker, the nix relay);
+- `status.relay` or `git.fetch` when the config names no `python`, `broker` and `shim`, or they fail
+  `render::broker_gaps` (above); `nix` when it names no `socat`, or that is not a file; `closure-store` with `nix`;
 - a children table with a `sibling` row (the run's children broker);
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
@@ -491,7 +559,8 @@ refused, since a field this backend does not know could narrow the run):
   that bash can't hand over, or that is not a `NAME`;
 - a path that is not its real path, and a bind source that does not exist (above).
 
-It stops the run, as bwrap does and not as a gap, on a pin pot's core could not make (launch.json's `refused`: a
+It stops the run, as bwrap does and not as a gap, on a binding's host program missing from `hostTools` (ssh for
+git.fetch, nix for the nix relay: bwrap's messages), on a pin pot's core could not make (launch.json's `refused`: a
 link, a hard link), with its message, and on a pin that changed since ([Write access](#write-access)).
 
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
@@ -499,16 +568,17 @@ value found: a secret misplaced into a field is never printed. `prepare` can run
 writing through a link planted in the run folder, and names the file it could not write.
 
 Not placed yet, which leaves the run narrower than bubblewrap's, never wider: `/run/pot/README.md`, `explain.txt`,
-`why.json`, `bin/` (the shims), `notfound/` and `bash_env` (the not-found advice), `~/.gitconfig`, and
-`/run/current-system`. So the command's environment is bwrap's but for `BASH_ENV`, the exported not-found handler, and
-`/run/pot/bin` and `/run/pot/notfound` on `PATH` (tested against bwrap.py's own `run_env` and `deliver`). With read
+`why.json`, `bin/` without `status.relay` or `git.fetch` (bwrap's holds only their shims), `notfound/` and `bash_env`
+(the not-found advice), `~/.gitconfig`, and `/run/current-system`. So the command's environment is bwrap's but for
+`BASH_ENV`, the exported not-found handler, `/run/pot/notfound` on `PATH`, and `/run/pot/bin` on it without those
+bindings (tested against bwrap.py's own `run_env` and `deliver`, with and without them). With read
 access a sealed folder stays plainly read-only, as the whole workspace is (bwrap seals it there too); with write
 access it is sealed as bwrap seals it ([Write access](#write-access)). The hidden-path start notes are given for
 write runs only.
 
 ## What's next
 
-1. The other bindings: `status.relay`, `git.fetch`, `nix` (the broker and the nix relay); then siblings.
+1. Siblings: a children table with a `sibling` row (the run's children broker, `siblings.py`).
 2. Clone mode: the clone at its original path, its pins (the same `core/pins.py`), `after` and `cleanup` for clones;
    the conformance review with executed evidence per guarantee, write access included (plan step 4).
 3. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
@@ -517,8 +587,9 @@ write runs only.
 ## Sources
 
 - [backends/container/src/](../../backends/container/src/): `policy.rs` (reading policy.json/1), `probe.rs`,
-  `render.rs` (the flags), `bindings.rs` (the credential and mcp bindings), `lifecycle.rs` (run's and cleanup's
-  commands, the after event), `main.rs` (the verbs)
+  `render.rs` (the flags, the relays' binds, shims and commands), `bindings.rs` (the credential and mcp bindings),
+  `lifecycle.rs` (run's and cleanup's commands, the helpers cleanup knows, the after event), `main.rs` (the verbs,
+  the helpers `run` starts)
 - [backends/container/tests/run.rs](../../backends/container/tests/run.rs): real containers, when `POT_TEST_PODMAN`
   or `POT_TEST_DOCKER` names the engine (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, 2026-11-21): `true`
   and `exit 3` with no engine process or container left at return, SIGTERM stopping the run (143), a killed run's
@@ -563,8 +634,25 @@ write runs only.
   checked as it is,
   a pin the container does not see as recorded stops the entry (125) before the command, the command's environment
   gains nothing from the check, and the look's environment holds no caller variable but its own list
+- The relays slice's tests in `run.rs` (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, nix 2.34.6,
+  2026-11-22), under both engines, with a fake host ssh (it runs `git-upload-pack` on the host for the path asked)
+  and a fake workmux: the run's `workmux` reaches host workmux on the caller's pane through the broker, a verb not
+  allowed is not relayed, and the pane is cleared when the command ends; `git clone` over ssh through the broker
+  fetches a local remote, with the binding's key file and `BatchMode`, and a remote not bound is refused and in
+  `denials`; nix through the relay is untrusted (`Trusted: 0`), adds a file to the store and builds a derivation,
+  each new path read in the run at once; no helper is left when `run` returns, after a SIGTERM (143), or after a
+  SIGKILL then `cleanup` (the broker, the relay and a relay daemon serving a held connection); links planted after
+  `prepare` at `relay.sock`, `nix.sock`, `nix-relay` and `bindings.log` are removed, never followed (the decoy
+  listener is never reached, the decoy script never runs); the command's environment equals bwrap.py's `run_env`
+  plus `deliver` for the same policy (but for what is not placed yet); with `strace -f -v -e execve`, git.fetch's key
+  file's contents are in no exec, and the caller's `SSH_AUTH_SOCK` reaches only the broker and the host ssh and
+  workmux it runs, never the engine, the relay or the run; `cleanup` stops a live broker and relay (not orphaned) and
+  removes their sockets; a missing `hostTools.ssh` or `.nix` stops `prepare` with bwrap's message
+- [core/broker.py](../../core/broker.py) (status.relay's and git.fetch's broker), [core/shim.py](../../core/shim.py)
+  (the run's shims)
 - [core/pins.py](../../core/pins.py): `Pins`, `resolve_workspace` (the pins), `before_look`, `look_after` (the look)
-- [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `credentials`, `deliver`, `mcp_servers`, `masked`, `Pins`, `cleanup`, `run` (the proxy),
+- [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `credentials`, `deliver`, `mcp_servers`, `write_own`,
+  `start_bindings`, `stop_helpers`, `masked`, `Pins`, `cleanup`, `run` (the proxy, workmux's clear),
   `after` (denials and loopback) (the reference backend); [core/proxy.py](../../core/proxy.py)
 - [core/pot.py](../../core/pot.py): `launch_facts` (launch.json), `scope_for` (resource-limits)
 - The phase 2 spike, executed on platform-vm on 2026-11-21 (flexion-assistant session record

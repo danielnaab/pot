@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::host::{Entry, Host};
-use crate::launch::{Kind, Launch, LookTools, NetTools, Paths, Placeholder, WsPins};
+use crate::launch::{BrokerTools, Kind, Launch, LookTools, NetTools, Paths, Placeholder, WsPins};
 use crate::policy::{Policy, known_kind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +55,18 @@ pub const FIFO: &str = "/run/pot/secrets.fifo";
 
 /// Where the run reaches pot's proxy: the run folder's `proxy.sock`, bound read-only (bwrap's path).
 pub const PROXY_SOCK: &str = "/run/pot/proxy.sock";
+
+/// The bindings' sockets: the run folder's, made by run's helpers before the engine starts, each bound read-only at the
+/// binding's `socket` (policy-1: `/run/pot/NAME`). Relative names: a run folder's path may be longer than `sun_path`'s
+/// 108 bytes, so the helpers start in the run folder.
+pub const RELAY_SOCKS: &[(&str, &str)] = &[
+    ("status.relay", "relay.sock"),
+    ("git.fetch", "git.sock"),
+    ("nix", "nix.sock"),
+];
+
+/// The nix relay's script in the run folder (bwrap's `nix-relay`), which run writes and socat runs for each connection.
+pub const NIX_SCRIPT: &str = "nix-relay";
 
 /// The proxy's address in the run, as bwrap's `run_env` gives it.
 pub const PROXY_URL: &str = "http://127.0.0.1:3128";
@@ -212,6 +224,10 @@ pub struct Inputs<'a> {
     pub net: Option<&'a NetTools>,
     /// The config's programs for the host's look at a write run, when it names them.
     pub look: Option<&'a LookTools>,
+    /// The config's programs for the status.relay and git.fetch bindings (the broker, the shims), when it names them.
+    pub broker: Option<&'a BrokerTools>,
+    /// The config's socat, which the nix binding's relay runs on the host, when it names one.
+    pub nix_socat: Option<&'a str>,
     pub host: &'a dyn Host,
 }
 
@@ -304,6 +320,17 @@ pub struct Plan {
     pub stat: Option<String>,
     /// X1, Y1: each bind the entry checks (its destination, and the source whose device and inode prepare records).
     pub checks: Vec<(String, String)>,
+    /// status.relay, git.fetch: pot's broker (bwrap's command), which run starts on the host in the run folder.
+    pub broker: Option<Vec<String>>,
+    /// nix: the relay (socat, bwrap's command), which run starts on the host in the run folder, and the script it runs
+    /// for each connection (`nix-relay`, which run writes there first).
+    pub nix_relay: Option<Vec<String>>,
+    pub nix_script: Option<String>,
+    /// status.relay with workmux and a pane: what run runs when the command ends (bwrap's: the agent is gone, its pane
+    /// cleared), workmux's argv then the pane (`TMUX_PANE`).
+    pub clear: Option<Vec<String>>,
+    /// A binding's host program missing from launch.json's hostTools: bwrap's message, which stops the run.
+    pub stop: Option<String>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -450,7 +477,8 @@ fn gaps(i: &Inputs) -> Vec<String> {
         )),
         Some(_) => {}
     }
-    // credential and mcp are carried out (their values over the named pipe, a via-file one's file in secrets/)
+    // credential and mcp are carried out (their values over the named pipe, a via-file one's file in secrets/);
+    // status.relay and git.fetch with the config's broker and shims; nix with the config's socat (the relay)
     let caps: BTreeSet<&str> = p
         .bindings
         .iter()
@@ -458,7 +486,20 @@ fn gaps(i: &Inputs) -> Vec<String> {
         .filter(|c| !matches!(*c, "credential" | "mcp"))
         .collect();
     for c in caps {
-        out.push(format!("the {c} binding"));
+        match c {
+            "status.relay" | "git.fetch" if i.broker.is_none() => out.push(format!(
+                "the {c} binding: the backend's --config names no python, broker and shim"
+            )),
+            "nix" if i.nix_socat.is_none() => out.push(
+                "the nix binding: the backend's --config names no socat (the nix relay runs it on the host)"
+                    .into(),
+            ),
+            "status.relay" | "git.fetch" | "nix" => {}
+            _ => out.push(format!("the {c} binding")),
+        }
+    }
+    if p.bindings.iter().any(|b| b.capability == "nix") && p.proves("closure-store") {
+        out.push("the closure-store guarantee with the nix binding (the run sees the whole store)".into());
     }
     if p.children.values().any(|c| c.how.as_deref() == Some("sibling")) {
         out.push("sibling children (the run's children broker)".into());
@@ -882,6 +923,36 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         });
         m.bind(&rd("secrets"), &format!("{run}/secrets"), READ, true);
     }
+    // status.relay, git.fetch and nix (bwrap's write_own, prepare and start_bindings): each socket the run folder's,
+    // which run's helpers make before the engine, bound read-only at the binding's path (a socket's I/O is not a write
+    // to the mount); the shims in the run folder's bin/, bound read-only at /run/pot/bin
+    let has_cap = |c: &str| p.bindings.iter().any(|b| b.capability == c);
+    for (cap, sock) in RELAY_SOCKS {
+        if let Some(b) = p.bindings.iter().find(|b| b.capability == *cap) {
+            m.bind(&rd(sock), b.socket.as_deref().unwrap_or_default(), READ, true);
+        }
+    }
+    let shims = i
+        .broker
+        .filter(|_| has_cap("status.relay") || has_cap("git.fetch"));
+    if let Some(t) = shims {
+        files.push(RunFile::FreshDir { name: "bin".into() });
+        let mut own = vec![];
+        if has_cap("status.relay") {
+            own.push(("workmux", "workmux"));
+        }
+        if has_cap("git.fetch") {
+            own.push(("pot-ssh", "ssh"));
+        }
+        for (n, mode) in own {
+            files.push(RunFile::File {
+                name: format!("bin/{n}"),
+                text: format!("#!/bin/sh\nexec {} -I -S {} {mode} \"$@\"\n", t.python, t.shim),
+                mode: 0o555,
+            });
+        }
+        m.bind(&rd("bin"), &format!("{run}/bin"), READ, true);
+    }
     let hidden_txt: String = p
         .effective("hidden")
         .flat_map(|h| [h.value.as_str(), "\n"])
@@ -910,14 +981,16 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         m.bind(&rd("potcfg"), &format!("{home}/.config/pot"), READ, true);
     }
 
-    // the closure: each store path read-only (closure-store), or the whole store read-only
-    let closure: Vec<String> = if p.proves("closure-store") {
+    // the closure: each store path read-only (closure-store), or the whole store read-only (also with nix, bwrap's)
+    let closure: Vec<String> = if p.proves("closure-store") && !has_cap("nix") {
         let net_closure = net_tools.map(|t| t.closure.as_slice()).unwrap_or_default();
+        let shim_closure = shims.map(|t| t.closure.as_slice()).unwrap_or_default();
         let set: BTreeSet<&String> = l
             .closure
             .iter()
             .chain(i.base_closure)
             .chain(net_closure)
+            .chain(shim_closure)
             .collect();
         set.into_iter().cloned().collect()
     } else {
@@ -1047,8 +1120,12 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         })
         .collect();
     sources.extend(closure.iter().cloned());
-    let (set, mut pass, defaults, hostless) =
-        environment(i, net_tools.is_some(), &crate::bindings::names(&creds));
+    let (set, mut pass, defaults, hostless) = environment(
+        i,
+        net_tools.is_some(),
+        shims.is_some(),
+        &crate::bindings::names(&creds),
+    );
     // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration).
     // S3: with a secret, a binding or the network, every variable passed by name goes over the named pipe, and the command
     // starts from an empty environment (env -i) with pot's values and the pipe's: the run's bash and the engine add
@@ -1198,7 +1275,118 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         notes,
         stat,
         checks,
+        broker: shims.map(|t| broker_argv(t, p, l, &rd("denials"))),
+        nix_relay: i
+            .nix_socat
+            .filter(|_| has_cap("nix"))
+            .map(|s| [s, "-lf", "/dev/null", "UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600", "EXEC:./nix-relay"].map(String::from).to_vec()),
+        nix_script: l.host_tools.nix.as_ref().filter(|_| has_cap("nix")).map(|nix| {
+            // verified on Nix 2.34.6 (bwrap's): both features, every time
+            format!(
+                "#!/bin/sh\nexec {nix} daemon --stdio --force-untrusted --process-ops --extra-experimental-features 'daemon-trust-override mounted-ssh-store'\n"
+            )
+        }),
+        clear: match (&l.host_tools.workmux, &l.pane) {
+            (Some(w), Some(pane)) if has_cap("status.relay") && shims.is_some() => {
+                Some([w.as_str(), "set-window-status", "clear", pane.as_str()].map(String::from).to_vec())
+            }
+            _ => None,
+        },
+        stop: if has_cap("git.fetch") && l.host_tools.ssh.is_none() {
+            Some("git.fetch's broker needs ssh on the host's PATH".into())
+        } else if has_cap("nix") && l.host_tools.nix.is_none() {
+            Some("the nix capability's relay needs nix on the host's PATH".into())
+        } else {
+            None
+        },
     })
+}
+
+/// pot's broker as bwrap's `start_bindings` starts it, in the run folder (its sockets relative there): status.relay's
+/// socket and host workmux (`/bin/false` when the host has none) aimed at the caller's pane; git.fetch's socket, host
+/// ssh, each binding's remotes and key file (`~` the caller's home, as bwrap's `expanduser`).
+#[allow(clippy::many_single_char_names)] // t, p, l, v, w: the tools, policy, launch, argv, workmux (bwrap.py's names)
+fn broker_argv(t: &BrokerTools, p: &Policy, l: &Launch, denials: &str) -> Vec<String> {
+    let mut v: Vec<String> = [
+        t.python.as_str(),
+        "-I",
+        "-S",
+        t.broker.as_str(),
+        "--context",
+        p.context.as_str(),
+        "--denials",
+        denials,
+    ]
+    .map(String::from)
+    .to_vec();
+    let caps = |c: &str| -> Vec<&crate::policy::Binding> {
+        p.bindings.iter().filter(|b| b.capability == c).collect()
+    };
+    if !caps("status.relay").is_empty() {
+        v.extend(["--status".to_string(), "relay.sock".into(), "--workmux".into()]);
+        match &l.host_tools.workmux {
+            Some(w) => {
+                v.push(w.clone());
+                if let Some(pane) = &l.pane {
+                    v.extend(["--pane".to_string(), pane.clone()]);
+                }
+            }
+            None => v.push("/bin/false".into()),
+        }
+    }
+    if !caps("git.fetch").is_empty() {
+        v.extend(["--git".to_string(), "git.sock".into(), "--ssh".into()]);
+        v.push(l.host_tools.ssh.clone().unwrap_or_default());
+        for b in caps("git.fetch") {
+            for r in b.remotes.iter().flatten() {
+                v.extend(["--remote".to_string(), r.clone()]);
+            }
+            if let Some(f) = b
+                .key
+                .as_ref()
+                .and_then(|k| k.get("file"))
+                .and_then(|f| f.as_str())
+                .filter(|f| !f.is_empty())
+            {
+                v.extend(["--key-file".to_string(), in_home(l.home.trim_end_matches('/'), f)]);
+            }
+        }
+    }
+    v
+}
+
+/// The broker's and the shims' programs: python and broker.py run on the host (files); the shims run python and
+/// shim.py in the run, so each, and its real path, must be a file under a path the run binds (shimClosure's, with
+/// closure-store). Not `--print`, which reads no host file.
+pub fn broker_gaps(t: &BrokerTools, plan: &Plan, host: &dyn Host) -> Vec<String> {
+    let bound = |f: &str| {
+        plan.sources
+            .iter()
+            .any(|s| f == s || f.starts_with(&format!("{}/", s.trim_end_matches('/'))))
+    };
+    let mut out = vec![];
+    let file = |f: &str| {
+        host.realpath(f)
+            .is_some_and(|r| host.lexists(&r) && !host.is_real_dir(&r))
+    };
+    for (what, f) in [("python", &t.python), ("shim", &t.shim)] {
+        let real = host.realpath(f);
+        let ok = bound(f) && real.as_deref().is_some_and(|r| real_file(r, host) && bound(r));
+        if !ok {
+            out.push(format!(
+                "the config's {what} {f} (the run's shims run it: it and its real path must be files under a path the run binds, such as shimClosure's)"
+            ));
+        }
+    }
+    for (what, f) in [("python", &t.python), ("broker", &t.broker)] {
+        if !file(f) {
+            out.push(format!(
+                "the config's {what} {f} (the broker runs it on the host: it must be a file)"
+            ));
+        }
+    }
+    out.dedup();
+    out
 }
 
 /// pot's proxy as bwrap's `run` starts it, in the run folder (its socket `proxy.sock`, relative: a run folder's
@@ -1279,6 +1467,7 @@ fn is_proxy_var(n: &str) -> bool {
 fn environment(
     i: &Inputs,
     net: bool,
+    shims: bool,
     bound: &[String],
 ) -> (
     BTreeMap<String, String>,
@@ -1301,6 +1490,15 @@ fn environment(
     }
     if let Some(pb) = &l.pot_bin {
         path.push(pb.clone());
+    }
+    // bwrap's run_env: nix's bin/ with the nix binding; the shims' folder first (bwrap's always is; here it is placed
+    // only with a binding that has a shim)
+    let nix = p.bindings.iter().any(|b| b.capability == "nix");
+    if let Some(n) = l.host_tools.nix.as_deref().filter(|_| nix) {
+        path.push(n.rsplit_once('/').map_or("", |(d, _)| d).to_string());
+    }
+    if shims {
+        path.insert(0, format!("{}/bin", p.mounts.run));
     }
     let ca = "/etc/ssl/certs/ca-certificates.crt";
     let mut env: BTreeMap<String, String> = [
@@ -1332,6 +1530,18 @@ fn environment(
         if let Some((n, v)) = e.value.split_once('=') {
             env.insert(n.to_string(), in_home(home, v));
         }
+    }
+    // bwrap's run_env, after env.set and before the items: git.fetch's ssh shim, nix's daemon socket
+    if p.bindings.iter().any(|b| b.capability == "git.fetch") {
+        env.insert("GIT_SSH_COMMAND".into(), format!("{}/bin/pot-ssh", p.mounts.run));
+        env.insert("GIT_SSH_VARIANT".into(), "ssh".into());
+    }
+    if nix {
+        env.insert("NIX_REMOTE".into(), format!("unix://{}/nix.sock", p.mounts.run));
+        env.insert(
+            "NIX_CONFIG".into(),
+            "experimental-features = nix-command flakes".into(),
+        );
     }
     // bwrap's order (run_env): pot's values, then the host's TERM and COLORTERM, then env.set, then the env items
     // the host has set. So env.set beats TERM and COLORTERM, and an item set on the host beats everything: an item
@@ -1522,6 +1732,8 @@ mod tests {
             base_closure: &base,
             net,
             look: Some(&look_tools()),
+            broker: Some(&broker_tools()),
+            nix_socat: Some("/nix/store/s-socat/bin/socat"),
             host,
         })
     }
@@ -1804,7 +2016,6 @@ mod tests {
                 "git-fetch",
                 &[
                     "write access without launch.json's pins for /tmp/pot-test/sbc (pot 0.3.0 or later resolves them)",
-                    "the git.fetch binding",
                 ],
             ),
             ("inspect", &["inspect's view"]),
@@ -1812,14 +2023,12 @@ mod tests {
                 "nix",
                 &[
                     "write access without launch.json's pins for /tmp/pot-test/sbc (pot 0.3.0 or later resolves them)",
-                    "the nix binding",
                 ],
             ),
             (
                 "pi-agent",
                 &[
                     "write access without launch.json's pins for /tmp/pot-test/piws (pot 0.3.0 or later resolves them)",
-                    "the status.relay binding",
                     "dir ~/.pi/agent/extensions (a folder of links)",
                     "dir ~/.pi/agent/git (a folder of links)",
                     "dir ~/.pi/agent/npm (a folder of links)",
@@ -1840,7 +2049,6 @@ mod tests {
                 "work-bindings",
                 &[
                     "write access without launch.json's pins for /tmp/pot-test/sbc (pot 0.3.0 or later resolves them)",
-                    "the status.relay binding",
                     "file ~/.st/conf.json (mode reassert)",
                 ],
             ),
@@ -2972,6 +3180,8 @@ mod tests {
                 base_closure: &[],
                 net: None,
                 look,
+                broker: None,
+                nix_socat: None,
                 host: &notes_host(),
             })
         };
@@ -3048,6 +3258,312 @@ mod tests {
         assert_eq!(
             gaps,
             ["a sealed folder's entry whose name is not UTF-8: /home/u/src/notes/.pi/bad\u{FFFD}name"]
+        );
+    }
+
+    /// The config's programs for the broker and the shims, as a test names them.
+    fn broker_tools() -> BrokerTools {
+        BrokerTools {
+            python: "/nix/store/p-python/bin/python3".into(),
+            broker: "/nix/store/q-pot/broker.py".into(),
+            shim: "/nix/store/q-pot/shim.py".into(),
+            closure: vec!["/nix/store/p-python".into(), "/nix/store/q-pot".into()],
+        }
+    }
+
+    fn relay_binding(cap: &str) -> serde_json::Value {
+        match cap {
+            "status.relay" => {
+                serde_json::json!({ "capability": "status.relay", "selector": "*", "kit": "root:test",
+                "request": "capability status.relay", "socket": "/run/pot/relay.sock", "see": ["workmux shim"],
+                "allow": ["set-window-status", "register-agent"] })
+            }
+            "git.fetch" => {
+                serde_json::json!({ "capability": "git.fetch", "selector": "ssh://git@fake.example/*",
+                "kit": "root:test", "request": "capability git.fetch ssh://git@fake.example/*",
+                "socket": "/run/pot/git.sock", "see": ["ssh shim (GIT_SSH_COMMAND)"],
+                "remotes": ["ssh://git@fake.example/*", "github.com/o/*"], "key": { "file": "~/.ssh/id_pot" } })
+            }
+            _ => serde_json::json!({ "capability": "nix", "selector": "*", "kit": "root:test",
+                "request": "capability nix", "socket": "/run/pot/nix.sock", "see": ["nix", "NIX_REMOTE"],
+                "via": "daemon-untrusted", "notes": [] }),
+        }
+    }
+
+    /// The read-only fixture with BINDINGS, closure-store dropped with nix (as pot drops it), and hostTools.
+    fn relayed(caps: &[&str], tools: &serde_json::Value, pane: Option<&str>) -> (Policy, Launch) {
+        let b: Vec<serde_json::Value> = caps.iter().map(|c| relay_binding(c)).collect();
+        let (mut p, _) = bound("read-only", &serde_json::Value::Array(b), false);
+        if caps.contains(&"nix") {
+            p.backend.proved.retain(|g| g != "closure-store");
+        }
+        let mut l: serde_json::Value =
+            serde_json::from_str(&read(&format!("{PREPARE}/read-only/launch.json"))).unwrap();
+        l["hostTools"] = tools.clone();
+        l["pane"] = pane.map_or(serde_json::Value::Null, Into::into);
+        (p, serde_json::from_value(l).unwrap())
+    }
+
+    fn go_relay(p: &Policy, l: &Launch, engine: Engine) -> Result<Plan, Vec<String>> {
+        let paths = paths();
+        let base = vec![
+            "/nix/store/b-bash".to_string(),
+            "/nix/store/c-coreutils".to_string(),
+        ];
+        render(&Inputs {
+            policy: p,
+            launch: l,
+            paths: &paths,
+            engine,
+            program: engine.name(),
+            image: DOCKER_IMAGE,
+            rundir: "/r",
+            base_closure: &base,
+            net: Some(&net_tools()),
+            look: Some(&look_tools()),
+            broker: Some(&broker_tools()),
+            nix_socat: Some("/nix/store/s-socat/bin/socat"),
+            host: &nothing(),
+        })
+    }
+
+    fn all_tools() -> serde_json::Value {
+        serde_json::json!({ "ssh": "/run/current-system/sw/bin/ssh", "workmux": "/nix/store/w-workmux/bin/workmux",
+            "nix": "/nix/store/n-nix/bin/nix" })
+    }
+
+    /// status.relay, git.fetch and nix as bwrap carries them out: each socket is the run folder's (run's helpers make
+    /// it before the engine), bound read-only at the binding's path; the shims (`workmux`, `pot-ssh`, bwrap's text) in
+    /// the run folder's bin/, bound read-only at /run/pot/bin, first on PATH; nix's bin/ on PATH; `GIT_SSH_COMMAND`,
+    /// `GIT_SSH_VARIANT`, `NIX_REMOTE` and `NIX_CONFIG` set; the whole store bound read-only with nix; the broker's and the
+    /// relay's commands bwrap's, for run to start in the run folder.
+    #[test]
+    fn the_relays_bind_their_sockets_and_shims_and_set_bwraps_variables() {
+        let (mut p, l) = relayed(&["status.relay", "git.fetch", "nix"], &all_tools(), Some("%3"));
+        p.backend.proved.retain(|g| g != "resource-limits");
+        for engine in [Engine::Podman, Engine::Docker] {
+            let plan = go_relay(&p, &l, engine).unwrap_or_else(|g| panic!("{g:?}"));
+            let ro = |src: &str, dest: &str| match engine {
+                Engine::Podman => format!("--volume {src}:{dest}:ro"),
+                Engine::Docker => format!("--mount type=bind,source={src},target={dest},readonly"),
+            };
+            for s in ["relay.sock", "git.sock", "nix.sock"] {
+                assert!(
+                    has(&plan, &ro(&format!("/r/{s}"), &format!("/run/pot/{s}"))),
+                    "{s}: {:#?}",
+                    lines(&plan)
+                );
+            }
+            assert!(has(&plan, &ro("/r/bin", "/run/pot/bin")));
+            assert!(
+                has(&plan, &ro("/nix/store", "/nix/store")),
+                "the whole store with nix"
+            );
+            assert!(!plan.opts.iter().any(|o| o.closure), "no closure binds with nix");
+            assert!(plan.files.contains(&RunFile::FreshDir { name: "bin".into() }));
+            for (n, mode) in [("workmux", "workmux"), ("pot-ssh", "ssh")] {
+                assert!(
+                    plan.files.contains(&RunFile::File {
+                        name: format!("bin/{n}"),
+                        text: format!(
+                            "#!/bin/sh\nexec /nix/store/p-python/bin/python3 -I -S /nix/store/q-pot/shim.py {mode} \"$@\"\n"
+                        ),
+                        mode: 0o555
+                    }),
+                    "{n}: {:#?}",
+                    plan.files
+                );
+            }
+            let path = "PATH=/run/pot/bin:/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin:\
+                /nix/store/scikhwasnkiqmjsi9iczrrx59bwbn379-pot-kits/bin:/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin:\
+                /nix/store/n-nix/bin";
+            for v in [
+                path,
+                "GIT_SSH_COMMAND=/run/pot/bin/pot-ssh",
+                "GIT_SSH_VARIANT=ssh",
+                "NIX_REMOTE=unix:///run/pot/nix.sock",
+                "NIX_CONFIG=experimental-features = nix-command flakes",
+            ] {
+                assert!(has(&plan, &format!("--env {v}")), "{v}: {:#?}", lines(&plan));
+            }
+            assert_eq!(
+                plan.broker.as_deref().unwrap(),
+                [
+                    "/nix/store/p-python/bin/python3",
+                    "-I",
+                    "-S",
+                    "/nix/store/q-pot/broker.py",
+                    "--context",
+                    "review",
+                    "--denials",
+                    "/r/denials",
+                    "--status",
+                    "relay.sock",
+                    "--workmux",
+                    "/nix/store/w-workmux/bin/workmux",
+                    "--pane",
+                    "%3",
+                    "--git",
+                    "git.sock",
+                    "--ssh",
+                    "/run/current-system/sw/bin/ssh",
+                    "--remote",
+                    "ssh://git@fake.example/*",
+                    "--remote",
+                    "github.com/o/*",
+                    "--key-file",
+                    "/home/u/.ssh/id_pot"
+                ]
+                .map(String::from)
+            );
+            assert_eq!(
+                plan.nix_relay.as_deref().unwrap(),
+                [
+                    "/nix/store/s-socat/bin/socat",
+                    "-lf",
+                    "/dev/null",
+                    "UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600",
+                    "EXEC:./nix-relay"
+                ]
+                .map(String::from)
+            );
+            assert_eq!(
+                plan.nix_script.as_deref().unwrap(),
+                "#!/bin/sh\nexec /nix/store/n-nix/bin/nix daemon --stdio --force-untrusted --process-ops \
+                 --extra-experimental-features 'daemon-trust-override mounted-ssh-store'\n"
+            );
+            assert_eq!(
+                plan.clear.as_deref().unwrap(),
+                [
+                    "/nix/store/w-workmux/bin/workmux",
+                    "set-window-status",
+                    "clear",
+                    "%3"
+                ]
+                .map(String::from)
+            );
+            assert_eq!(plan.stop, None);
+            // no fifo for these: their variables are pot's values, not secret
+            assert!(!plan.fifo);
+        }
+    }
+
+    /// bwrap's broker without workmux: `--workmux /bin/false`, no pane and nothing to clear; without the shims' bindings
+    /// no bin/ and no /run/pot/bin on PATH; a missing host program stops the run with bwrap's message; closure-store
+    /// with nix is refused (the run sees the whole store).
+    #[test]
+    fn the_relays_follow_bwrap_without_a_host_program() {
+        let (p, l) = relayed(&["status.relay"], &serde_json::json!({}), Some("%3"));
+        let plan = go_relay(&p, &l, Engine::Podman).unwrap();
+        assert_eq!(
+            plan.broker.as_deref().unwrap()[8..],
+            ["--status", "relay.sock", "--workmux", "/bin/false"].map(String::from)
+        );
+        assert_eq!(plan.clear, None);
+        assert!(
+            has(&plan, "--volume /nix/store/q-pot:/nix/store/q-pot:ro"),
+            "the shims' closure is bound with closure-store"
+        );
+        let (p, l) = relayed(&["git.fetch"], &serde_json::json!({}), None);
+        assert_eq!(
+            go_relay(&p, &l, Engine::Podman).unwrap().stop.as_deref(),
+            Some("git.fetch's broker needs ssh on the host's PATH")
+        );
+        let (p, l) = relayed(&["nix"], &serde_json::json!({}), None);
+        let plan = go_relay(&p, &l, Engine::Podman).unwrap();
+        assert_eq!(
+            plan.stop.as_deref(),
+            Some("the nix capability's relay needs nix on the host's PATH")
+        );
+        assert!(
+            !plan
+                .files
+                .iter()
+                .any(|f| matches!(f, RunFile::FreshDir { name } if name == "bin"))
+        );
+        assert!(
+            !lines(&plan).iter().any(|x| x.contains("/run/pot/bin")),
+            "{:#?}",
+            lines(&plan)
+        );
+        assert_eq!(plan.broker, None);
+        let (mut p, l) = relayed(&["nix"], &all_tools(), None);
+        p.backend.proved.push("closure-store".into());
+        assert_eq!(
+            go_relay(&p, &l, Engine::Podman).unwrap_err(),
+            ["the closure-store guarantee with the nix binding (the run sees the whole store)"]
+        );
+    }
+
+    /// Without the config's programs each binding is refused, naming them.
+    #[test]
+    fn the_relays_need_the_configs_programs() {
+        let (p, l) = relayed(&["status.relay", "git.fetch", "nix"], &all_tools(), None);
+        let paths = paths();
+        let got = render(&Inputs {
+            policy: &p,
+            launch: &l,
+            paths: &paths,
+            engine: Engine::Podman,
+            program: "podman",
+            image: DOCKER_IMAGE,
+            rundir: "/r",
+            base_closure: &[],
+            net: None,
+            look: None,
+            broker: None,
+            nix_socat: None,
+            host: &nothing(),
+        })
+        .unwrap_err();
+        assert_eq!(
+            got,
+            [
+                "the git.fetch binding: the backend's --config names no python, broker and shim",
+                "the nix binding: the backend's --config names no socat (the nix relay runs it on the host)",
+                "the status.relay binding: the backend's --config names no python, broker and shim",
+            ]
+        );
+    }
+
+    /// The shims run in the run: python and shim.py, and each one's real path, must be files under a path the run binds
+    /// (with closure-store, shimClosure's); python and broker.py run on the host and must be files.
+    #[test]
+    fn the_shims_programs_are_files_the_run_sees() {
+        let (p, l) = relayed(&["status.relay"], &all_tools(), None);
+        let plan = go_relay(&p, &l, Engine::Podman).unwrap();
+        let t = broker_tools();
+        let mut host = nothing();
+        host.files = vec![
+            "/nix/store/p-python/bin/python3",
+            "/nix/store/q-pot/broker.py",
+            "/nix/store/q-pot/shim.py",
+        ];
+        assert_eq!(broker_gaps(&t, &plan, &host), Vec::<String>::new());
+        let mut out = t.clone();
+        out.shim = "/opt/shim.py".into();
+        host.files.push("/opt/shim.py");
+        assert_eq!(
+            broker_gaps(&out, &plan, &host),
+            [
+                "the config's shim /opt/shim.py (the run's shims run it: it and its real path must be files under a path the run binds, such as shimClosure's)"
+            ]
+        );
+        host.links = vec![("/nix/store/p-python/bin/python3", "/opt/python3")];
+        host.files.push("/opt/python3");
+        assert_eq!(
+            broker_gaps(&t, &plan, &host),
+            [
+                "the config's python /nix/store/p-python/bin/python3 (the run's shims run it: it and its real path must be files under a path the run binds, such as shimClosure's)"
+            ]
+        );
+        let mut host = nothing();
+        host.files = vec!["/nix/store/p-python/bin/python3", "/nix/store/q-pot/shim.py"];
+        assert_eq!(
+            broker_gaps(&t, &plan, &host),
+            [
+                "the config's broker /nix/store/q-pot/broker.py (the broker runs it on the host: it must be a file)"
+            ]
         );
     }
 }

@@ -91,6 +91,19 @@ v2.14.0's `sandbox` on).
   folder and seal under a bound host folder, as it checks the pins (`/run/pot/binds.txt`), so a mask swapped away
   while the engine starts never shows the hidden path. The 125 message names the mount found there (its source and
   root). A path ending with a space is checked as it is. bubblewrap's re-check names a link above a pin as core does.
+- **The container backend carries out the `status.relay`, `git.fetch` and `nix` bindings**, under podman and docker,
+  as bubblewrap does. `run` starts pot's broker (status.relay, git.fetch) and the nix relay (socat running `nix daemon
+  --stdio --force-untrusted`) on the host in the run folder before the engine; each socket (`relay.sock`, `git.sock`,
+  `nix.sock`) is bound read-only at the binding's `/run/pot/` path, and the container keeps `--network none`. The run
+  gets bwrap's shims (`workmux`, `pot-ssh`) in `/run/pot/bin`, first on `PATH`, bwrap's `GIT_SSH_COMMAND`,
+  `GIT_SSH_VARIANT`, `NIX_REMOTE` and `NIX_CONFIG`, nix's `bin/` on `PATH`, and with nix the whole store read-only.
+  The helpers get environments of their own (the broker also `SSH_AUTH_SOCK`), never the run's or the engine's; links
+  planted at their sockets, script or log are removed, never followed. When the command ends `run` clears the
+  caller's workmux pane and stops the helpers; `cleanup` stops what a `run` killed with SIGKILL left (the relay and
+  its daemons never stop by themselves) and removes the sockets, the script and `bin/`. New config keys `broker`,
+  `shim` and `shimClosure` (bwrap's names, with `python`; nix needs `socat`); a missing `hostTools.ssh` or `.nix`
+  stops `prepare` with bwrap's message; `closure-store` with nix is refused. Siblings and clone mode are still
+  refused.
 
 ### Changed
 

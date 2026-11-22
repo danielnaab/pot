@@ -106,11 +106,18 @@ pub struct PinRefusal {
     pub message: String,
 }
 
-/// launch.json's `hostTools`, of which the backend reads `tmux` (the proxy's notices).
+/// launch.json's `hostTools`: the host programs the helpers run, never the run: `tmux` (the proxy's notices), `ssh`
+/// (git.fetch's broker), `workmux` (status.relay's broker) and `nix` (the nix relay, and its bin/ on the run's `PATH`).
 #[derive(Debug, Default, Deserialize)]
 pub struct HostTools {
     #[serde(default)]
     pub tmux: Option<String>,
+    #[serde(default)]
+    pub ssh: Option<String>,
+    #[serde(default)]
+    pub workmux: Option<String>,
+    #[serde(default)]
+    pub nix: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -143,6 +150,23 @@ pub struct Config {
     /// in-place run (bwrap's before.json and after event), with host `git`.
     pub pins: Option<String>,
     pub git: Option<String>,
+    /// The status.relay and git.fetch bindings (bwrap's names): pot's `broker.py`, which `python` runs on the host, and
+    /// `shim.py`, which the run's shims (`workmux`, `pot-ssh`) run with the same `python`; `shimClosure` a file of
+    /// store paths, python's and the shim's closure, bound into a run with either binding. The nix binding's relay is
+    /// `socat` on the host.
+    pub broker: Option<String>,
+    pub shim: Option<String>,
+    pub shim_closure: Option<String>,
+}
+
+/// The config's programs for the status.relay and git.fetch bindings, all present.
+#[derive(Debug, Clone)]
+pub struct BrokerTools {
+    pub python: String,
+    pub broker: String,
+    pub shim: String,
+    /// The lines of `shimClosure`.
+    pub closure: Vec<String>,
 }
 
 /// The config's programs for the host's look at a write run: `python -I -S PINS before|after GIT RUNDIR`.
@@ -181,21 +205,26 @@ impl Config {
         let (Some(python), Some(proxy), Some(socat)) = (&self.python, &self.proxy, &self.socat) else {
             return Ok(None);
         };
-        let closure = match &self.net_closure {
-            Some(f) => std::fs::read_to_string(f)
-                .map_err(|e| format!("can't read the net closure {f}: {e}"))?
-                .lines()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect(),
-            None => vec![],
-        };
+        let closure = closure_lines(self.net_closure.as_deref(), "net")?;
         Ok(Some(NetTools {
             python: python.clone(),
             proxy: proxy.clone(),
             socat: socat.clone(),
             closure,
+        }))
+    }
+
+    /// The broker's and the shims' programs, when the config names `python`, `broker` and `shim` (`shimClosure` may be
+    /// absent: the whole store is bound without closure-store, or with nix). `Err` when the closure file can't be read.
+    pub fn broker_tools(&self) -> Result<Option<BrokerTools>, String> {
+        let (Some(python), Some(broker), Some(shim)) = (&self.python, &self.broker, &self.shim) else {
+            return Ok(None);
+        };
+        Ok(Some(BrokerTools {
+            python: python.clone(),
+            broker: broker.clone(),
+            shim: shim.clone(),
+            closure: closure_lines(self.shim_closure.as_deref(), "shim")?,
         }))
     }
 
@@ -225,5 +254,19 @@ impl Config {
             terminfo: get(&self.terminfo, "terminfo")?,
             tzdir: get(&self.tzdir, "tzdir")?,
         })
+    }
+}
+
+/// A closure file's store paths, one a line; none without the file.
+fn closure_lines(file: Option<&str>, what: &str) -> Result<Vec<String>, String> {
+    match file {
+        Some(f) => Ok(std::fs::read_to_string(f)
+            .map_err(|e| format!("can't read the {what} closure {f}: {e}"))?
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()),
+        None => Ok(vec![]),
     }
 }
