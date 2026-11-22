@@ -499,6 +499,7 @@ mod tests {
         );
         let files: Vec<String> = via_file(&c).into_keys().collect();
         assert_eq!(files, ["A_TOK"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -592,6 +593,7 @@ mod tests {
             vals(&read(&[c], &none).unwrap()),
             [("OTHER".to_string(), "secret-other-value".to_string())]
         );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

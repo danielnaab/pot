@@ -59,6 +59,15 @@ v2.14.0's `sandbox` on).
   in order, then the sentinel), so records a same-user process wrote first never widen the run; probe and prepare
   share one test of the network's programs (socat a real file under `netClosure`); the pipe is unlinked from the run
   folder once the records are delivered.
+- **The container backend carries out the `credential` and `mcp` bindings**, both `via` modes, under podman and
+  docker, as bubblewrap does. `run` reads each value on the host when it starts, from the binding's `from` (a key
+  file, a host variable, or the host's variable of the same name), and hands it over the named pipe, which every run
+  with a binding now uses; a binding's variable beats every other value of the same name, as under bubblewrap.
+  `via: file` writes the value to the run folder's `secrets/NAME` (0400, the caller's, created exclusively without
+  following a link), bound read-only at `/run/pot/secrets`, and removes it when the command ends; `prepare` and
+  `cleanup` remove it too (after a `run` killed with SIGKILL). `/run/pot/mcp.json` is bubblewrap's, bound read-only
+  for every run, and holds no value; `run` refuses a via-file mcp key with a quote, a backslash or a control
+  character. The other bindings (`status.relay`, `git.fetch`, `nix`) are still refused.
 
 ### Changed
 

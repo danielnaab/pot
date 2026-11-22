@@ -54,7 +54,7 @@ pub const PROXY_SOCK: &str = "/run/pot/proxy.sock";
 /// The proxy's address in the run, as bwrap's `run_env` gives it.
 pub const PROXY_URL: &str = "http://127.0.0.1:3128";
 
-/// The run's bash, before the command (R3, S1, S3, T1), with a secret or the network. It starts in an environment
+/// The run's bash, before the command (R3, S1, S3, T1), with a secret, a binding or the network. It starts in an environment
 /// `env -i` cleared. It opens the named pipe (its first argument) read-write, so the open never waits for a writer,
 /// and reads records, each ended by a NUL and within 30 s: exactly one for each planned name (its third argument is
 /// their count, the names follow: they are not secret), in the planned order, `NAME=value`, or the bare `NAME` for one
@@ -91,7 +91,7 @@ pub const BASH_ADDS: &[&str] = &["_", "SHLVL", "PWD", "OLDPWD"];
 /// What the engines add to the command's environment that pot does not plan: `env -u` removes it (S3).
 pub const ENGINE_ADDS: &[&str] = &["HOSTNAME"];
 
-/// S5: with the entry script (a secret or the network), the config's shell must be a real file (not a link) under a
+/// S5: with the entry script (a secret, a binding or the network), the config's shell must be a real file (not a link) under a
 /// path the plan binds. Otherwise the gap.
 pub fn program_gaps(plan: &Plan, shell: &str, host: &dyn Host) -> Vec<String> {
     let bound = plan
@@ -223,10 +223,10 @@ pub struct Plan {
     /// U2: pot's values for variables passed by name (an env item named like one): run's value when the host has
     /// the variable unset.
     pub defaults: BTreeMap<String, String>,
-    /// The variables `run` hands over the named pipe, by name: with a secret or the network, every one passed by
+    /// The variables `run` hands over the named pipe, by name: with a secret, a binding or the network, every one passed by
     /// name.
     pub piped: Vec<String>,
-    /// Whether the entry reads the named pipe (a secret or the network): `run` makes `secrets.fifo` and writes it.
+    /// Whether the entry reads the named pipe (a secret, a binding or the network): `run` makes `secrets.fifo` and writes it.
     pub fifo: bool,
     /// With the network: the proxy's command, which `run` starts on the host in the run folder.
     pub proxy: Option<Vec<String>>,
@@ -660,7 +660,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         m.bind(&rd(n), &format!("{run}/{n}"), READ, true);
     }
     // the network: pot's proxy listens on the run folder's proxy.sock (run starts it before the engine), bound where
-    // the run's socat reaches it; the variables, with a secret or the network, over the run folder's named pipe
+    // the run's socat reaches it; the variables, with a secret, a binding or the network, over the run folder's named pipe
     let net: Vec<String> = p
         .effective("network")
         .filter(|n| n.class == "reach")
@@ -818,7 +818,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     let (set, mut pass, defaults, hostless) =
         environment(i, net_tools.is_some(), &crate::bindings::names(&creds));
     // R3: a secret variable never goes to the engine (it writes `--env` values into the container's configuration).
-    // S3: with a secret or the network, every variable passed by name goes over the named pipe, and the command
+    // S3: with a secret, a binding or the network, every variable passed by name goes over the named pipe, and the command
     // starts from an empty environment (env -i) with pot's values and the pipe's: the run's bash and the engine add
     // nothing to it
     let piped: Vec<String> = if fifo { std::mem::take(&mut pass) } else { vec![] };

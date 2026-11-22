@@ -6,9 +6,9 @@ status: draft
 pot's third backend, beside bubblewrap and Seatbelt: it carries out a run's [policy.json/1](../../contracts/policy-1.md)
 as one `podman run` or `docker run`, a fresh container per run, on any host or CI that has either. It is pot's
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
-`packages.pot-container`). This page is its third slice (pot phase 2, plan step 3): it probes, renders the
-command and runs it, for runs in place with read access or none, with the network through pot's proxy; no root
-offers the backend yet. The transcripts
+`packages.pot-container`). This page is its fourth slice (pot phase 2, plan step 3): it probes, renders the
+command and runs it, for runs in place with read access or none, with the network through pot's proxy and the
+`credential` and `mcp` bindings; no root offers the backend yet. The transcripts
 that test it are the pages under [container/](container/probe.md).
 
 ```
@@ -19,9 +19,9 @@ pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
 |---|---|
 | `probe` | Prints `{ "guarantees": [ … ] }`, or none beside an `error` ([transcript](container/probe.md)) |
 | `prepare` | Checks the policy and refuses what it can't carry out; places the run's files and `container.argv` (the command, NUL-separated). `--print` prints the command and writes nothing ([transcript](container/prepare.md)) |
-| `run` | Runs `container.argv` with the engine environment `prepare` recorded; exits with the command's status once the container is gone ([Run and cleanup](#run-and-cleanup)) |
+| `run` | Reads the bindings' values on the host, then runs `container.argv` with the engine environment `prepare` recorded; exits with the command's status once the container is gone ([Run and cleanup](#run-and-cleanup), [Bindings](#bindings)) |
 | `after` | Prints the run's `after` event: bwrap's, with the proxy's `denials` and `loopback` and nothing else (nothing a read-only run can leave) |
-| `cleanup` | Stops the run's proxy if it still runs, removes the run's container and store through the engine, then what `prepare` and `run` placed; names every removal it could not make (exit 1) |
+| `cleanup` | Stops the run's proxy if it still runs, removes the run's container and store through the engine, then what `prepare` and `run` placed (a via-file binding's values among them); names every removal it could not make (exit 1) |
 
 A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 
@@ -119,8 +119,9 @@ the value, so no value is in an argument). The engine writes that value into the
 (`enginestore/overlay-containers/ID/userdata/config.json`, `$XDG_RUNTIME_DIR/crun/ID/config.json`, docker's
 container config), which is acceptable for a plain variable and not for a secret (policy-1 rule 6: never in the
 run's files; the conformance audit of 2026-11-21 found a secret there, R3). **A secret variable** (an `env` item with
-`secret: true`) never reaches the engine. With one, every variable passed by name (the secrets, `TERM`, `COLORTERM`
-and the plain items) goes over a pipe instead. `run` writes `NAME=value` records, each ended by a NUL, then the
+`secret: true`) never reaches the engine, and neither does a `credential` or `mcp` binding's ([Bindings](#bindings)).
+With either, every variable passed by name (the secrets, the bindings', `TERM`, `COLORTERM` and the plain items) goes
+over a pipe instead. `run` writes `NAME=value` records, each ended by a NUL, then the
 sentinel record `.`. The pipe is a named pipe, `RUNDIR/secrets.fifo` (decided 2026-11-22, for both engines: docker
 passes no file descriptor, and podman's `--preserve-fd` passed one of the caller's): `run` makes it just before the
 engine starts, whatever is at its path removed first (a link is removed, never followed), mode 0600, and checks that
@@ -155,7 +156,7 @@ command (`SHLVL`, `PWD`, `OLDPWD`, `_`, `PIPESTATUS`), unset by it (`PS1`, `PS2`
 value is in no file, no argument and not in the engine's environment (checked in a real run: a marker value was in
 no file of the run folder or of `$XDG_RUNTIME_DIR/crun`, and in no engine process's arguments or environment, while
 the command printed it; and with every process on the host watched while a 100 000-byte variable slowed the
-script's reads, no process's arguments ever held a record's value). With a secret or the network, `prepare` refuses a shell that is not a real file under a path the run binds
+script's reads, no process's arguments ever held a record's value). With a secret, a binding or the network, `prepare` refuses a shell that is not a real file under a path the run binds
 (S5), and with the network a `socat` that is not one. The run's bash is used
 rather than this binary, which would need its own closure (glibc, libgcc) bound, a closure the config does not name. A plain variable may not be one the engine reads as configuration: `prepare` refuses an effective `env` item named `CONTAINERS_*`,
 `_CONTAINERS_*`, `CONTAINER_*`, `DOCKER_*`, `PODMAN_*`, `BUILDAH_*`, `STORAGE_*`, `XDG_*`, `DBUS_*`, `LD_*`, `LISTEN_*`, `HOME`,
@@ -163,11 +164,13 @@ rather than this binary, which would need its own closure (glibc, libgcc) bound,
 `GOGC`, `GOMAXPROCS`, `GOMEMLIMIT`, `GOTRACEBACK`) (`engine::configures_engine`). For a secret variable
 this list is no longer needed, since the engine never sees it: only the names pot sets itself (`HOME`, `PATH` and the
 rest of pot's variables) would stay refused. It still applies to secret variables for now; lifting it is a later
-change. Plain variables already take the same pipe when a secret or the network is there; otherwise they do not.
+change. Plain variables already take the same pipe when a secret, a binding or the network is there; otherwise they do
+not.
 
 `prepare` writes these as `container.env` for `run`: the names kept, the values set, the names that go over the
-pipe (and whether the pipe is used), the proxy's command, and the kind (file or folder) of every file of the run's that
-the plan binds, but for the pipe and the proxy's socket, which `run` makes. It holds no secret's value.
+pipe (and whether the pipe is used), the proxy's command, the `credential` and `mcp` bindings (their `capability`,
+`selector`, `env`, `from` and `via`: references, never a value), and the kind (file or folder) of every file of the
+run's that the plan binds, but for the pipe and the proxy's socket, which `run` makes. It holds no secret's value.
 `prepare --print` shows them, and the proxy's command. pot's default hidden list holds `~/.config/containers` and
 `~/.docker/config.json` (unreleased): no run can read or change the configuration of a later container run.
 
@@ -179,11 +182,11 @@ the plan binds, but for the pipe and the proxy's socket, which `run` makes. It h
 | (always) | `run --interactive --log-driver none --cidfile RUNDIR/container.id --hostname pot --ipc private --cgroupns private`; no `--rm` ([Run and cleanup](#run-and-cleanup)) | the same, and `--name pot-HASH` (16 hex digits of the run folder's path, FNV-1a) |
 | (always) | `--init`: the engine's init is PID 1 (catatonit, or docker's `docker-init`), a read-only bind of the engine's own file; the command is never PID 1, which ignores a signal it has no handler for | the same |
 | stdin a terminal | `--tty`, added by `run` | the same |
-| a secret `env` item, or the network | `--volume RUNDIR/secrets.fifo:/run/pot/secrets.fifo:ro`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-entry /run/pot/secrets.fifo SOCAT N NAMES… /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` (`SOCAT` empty without the network) | the same, with `--mount` |
+| a secret `env` item, a `credential` or `mcp` binding, or the network | `--volume RUNDIR/secrets.fifo:/run/pot/secrets.fifo:ro`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-entry /run/pot/secrets.fifo SOCAT N NAMES… /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` (`SOCAT` empty without the network) | the same, with `--mount` |
 | (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never --entrypoint ""` |
-| the working directory | `/usr/bin/env -C CWD -u HOSTNAME -- ARGV` (podman takes no `-w` with `--rootfs`); with a secret, as above | the same |
+| the working directory | `/usr/bin/env -C CWD -u HOSTNAME -- ARGV` (podman takes no `-w` with `--rootfs`); with a secret, a binding or the network, as above | the same |
 | `/tmp`, `/run`, `HOME` | `--tmpfs …,notmpcopyup` (podman's default copies the folder below into the tmpfs); the home `mode=0700,U` | `--tmpfs`; the home `mode=0700,uid=UID,gid=GID` |
 | (always, with the network or without) | `--network none`: only `lo` | the same |
 | an effective network reach item | `--volume RUNDIR/proxy.sock:/run/pot/proxy.sock:ro`; socat's closure (`netClosure`) bound read-only with the closure; the entry starts socat on 127.0.0.1:3128 ([The network](#the-network)) | the same, with `--mount` |
@@ -203,7 +206,9 @@ the plan binds, but for the pipe and the proxy's socket, which `run` makes. It h
 | `env` items (not secret), `TERM`, `COLORTERM` | `--env NAME`: the engine reads the value from its own environment, so no value is in an argument | the same |
 | an `env` item named like one of pot's values | passed by name, with no `--env NAME=VALUE`; pot's value is its default, which `run` uses when the host has it unset (bwrap's order: pot's values, the host's `TERM` and `COLORTERM`, `env.set`, then the items the host has set) | the same |
 | pot's variables | `HOME USER LOGNAME SHELL PATH LANG TERMINFO_DIRS SSL_CERT_FILE NIX_SSL_CERT_FILE TZDIR POT POT_POLICY POT_RUN PS1`, `POT_TOOLS`, `POT_CLONE` (bwrap's `run_env`) | the same |
-| `mounts.run` | `/run/pot/policy.json` and `/run/pot/denials`, read-only | the same |
+| `mounts.run` | `/run/pot/policy.json`, `/run/pot/denials` and `/run/pot/mcp.json` (bwrap's, for every run), read-only | the same |
+| a `credential` or `mcp` binding | its variables over the named pipe, last (they beat pot's values, `env.set`, the items and the proxy's variables), never `--env` ([Bindings](#bindings)) | the same |
+| a binding with `via: file` | `--volume RUNDIR/secrets:/run/pot/secrets:ro` (a folder of the run's, 0700) | the same, with `--mount` |
 | `mounts.launcher` | `POTBIN/pot` at `/run/pot/launcher`; `~/.config/pot/launcher` links to it | the same |
 | `resource-limits` proved | `--cgroups split` | refused |
 
@@ -315,6 +320,49 @@ never the host's.
 - **`after`** reads `proxy.log` (a regular file only) as bwrap's does: each `DENY host:port` counted in `denials`,
   each `LOOPBACK host:port address` in `loopback`.
 
+## Bindings
+
+A `credential` or `mcp` binding (policy-1 `bindings[]`) is carried out as bwrap.py carries it out (`credentials`,
+`deliver`, `mcp_servers`; `bindings.rs`). A binding holds references only, and so do `prepare`'s files.
+
+- **The values, at run time.** Before it starts anything, `run` reads each binding's variables on the host, from its
+  `from`: `file` or `envFile`, a key file of `NAME=VALUE` lines (`export NAME=VALUE`, `#` comments, one pair of quotes
+  stripped; `~` is the caller's home), or for a `credential` of one variable with no such line in `file`, the whole
+  file, stripped (a token file); `env`, a host variable of another name (a binding of one variable); nothing, the
+  host's variables of the same names. A variable the host has unset is left out. A key file that can't be read, has
+  no `NAME=VALUE` line where one is needed, or lacks a variable (but `AWS_CREDENTIAL_EXPIRATION`) stops the run before
+  the engine starts, with bwrap's message, which names the binding and the file and never the value: `the credential
+  binding SELECTOR reads FILE: No such file or directory`. So does a via-file mcp key with a quote, a backslash or a
+  control character (below), and a NUL in a value that goes as a variable (bwrap would pass it truncated).
+- **`via: env`.** The value goes over the named pipe as the variable's record, as a secret's does: never in a file, an
+  argument or the engine's environment. Every run with a binding uses the pipe, under both engines.
+- **`via: file`.** `prepare` makes the run folder's `secrets/` (mode 0700, emptied) and binds it read-only at
+  `/run/pot/secrets`, as bwrap binds its own. `run` opens it without following a link (it must be the caller's, 0700)
+  and writes each value to `NAME` there, created exclusively (`openat` with `O_EXCL|O_NOFOLLOW`, whatever was at the
+  name removed first), mode 0400, owned by the caller, which is the run's user under both engines (podman's
+  `keep-id`, docker's `--user` with no user namespace). Just before the engine starts it checks the folder again: the
+  caller's, 0700, holding exactly those files, each a regular file of the caller's, 0400. The variable's record is the
+  file's path in the run, `/run/pot/secrets/NAME`. The run reads the file, and can't write, replace, `chmod` or remove
+  it, or add one beside it (a read-only bind; every process of the run is its user, with no capability). `run`
+  removes `secrets/` when the command ends and on every early return; after a `run` killed with SIGKILL, `cleanup`
+  removes it, and so does the next `prepare`, before anything else, even when it then stops. This is the one file
+  policy-1 rule 6 allows.
+- **Precedence**, as bwrap's `run` (`env.update(deliver(credentials()))` after `run_env`): a binding's variable beats
+  pot's values, `env.set`, the items and the proxy's variables. So a binding's variable is never set by the entry's
+  last hop: it goes over the pipe, and when the binding has no value at run time, its record is what the plan would
+  have given it (the host's value when it is also an env item, `TERM` or `COLORTERM`, else pot's value, else unset).
+- **`mcp.json`** is bwrap's, byte for byte (`json.dump(…, indent=2)`, ASCII only): `{"mcpServers": {SERVER: {"type":
+  "http", "url": URL, …}}}`, written by `prepare` for every run (`{"mcpServers": {}}` without an mcp binding) and bound
+  read-only at `/run/pot/mcp.json`. With `via: env`, `headers` holds `HEADER: "SCHEME ${NAME}"`: the client expands the
+  variable, and no value is in the file. With `via: file`, a `headersHelper`, `read -r v < "$NAME"; printf '%s%s%s'
+  '{"HEADER": "SCHEME ' "$v" '"}'`, reads the key with shell builtins and prints the header; `run` refuses a key with a
+  quote, a backslash or a control character, which that JSON could not carry (bwrap's message, `… use via = "env"`).
+- **Shown**, as bwrap's `print_command`: `prepare --print` names each binding's variable, a via-file one with its
+  file's path, another as `(the run holds it)`.
+- **Names.** `prepare` refuses a binding's variable bash can't hand over (`engine::bash_sets`, as for an env item) or
+  that is not a `NAME`. The engine list (`engine::configures_engine`) does not apply: no binding's variable reaches
+  the engine.
+
 ## Refusals
 
 `prepare` refuses, naming every gap in one line, never running without one (policy-1 rules 1-5):
@@ -335,14 +383,14 @@ refused, since a field this backend does not know could narrow the run):
 - clone mode: the clone at its original path, its pins, proposal links, and the `after` staging fetch;
 - the network, and `private-proxy`, when the config's `python`, `proxy`, `socat` and `netClosure` do not pass
   `probe`'s test (above);
-- every binding: `status.relay`, `git.fetch`, `nix`, `credential`, `mcp` (with `via: file` as a 0400 file under
-  `/run/pot`, decided 2026-11-21);
+- the `status.relay`, `git.fetch` and `nix` bindings (the broker, the nix relay);
 - a children table with a `sibling` row (the run's children broker);
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
 - a path a bind can't name (`:`, `,` or `"`), and a command whose name holds `=` (`env` would read it as a variable);
-- a run's variable that configures the container engine, or that bash can't hand over (above);
+- a run's variable that configures the container engine, or that bash can't hand over (above); a binding's variable
+  that bash can't hand over, or that is not a `NAME`;
 - a path that is not its real path, and a bind source that does not exist (above).
 
 A decoding error names where it is and what was expected there (`items[2].effective: expected a boolean`), never the
@@ -350,14 +398,14 @@ value found: a secret misplaced into a field is never printed. `prepare` can run
 writing through a link planted in the run folder, and names the file it could not write.
 
 Not placed yet, which leaves the run narrower than bubblewrap's, never wider: `/run/pot/README.md`, `explain.txt`,
-`why.json`, `bin/` (the shims), `notfound/` and `bash_env` (the not-found advice), `mcp.json`, `~/.gitconfig`, and
-`/run/current-system`. Sealed folders are read-only (only read access is carried out, so every workspace folder
+`why.json`, `bin/` (the shims), `notfound/` and `bash_env` (the not-found advice), `~/.gitconfig`, and
+`/run/current-system`. So the command's environment is bwrap's but for `BASH_ENV`, the exported not-found handler, and
+`/run/pot/bin` and `/run/pot/notfound` on `PATH` (tested against bwrap.py's own `run_env` and `deliver`). Sealed folders are read-only (only read access is carried out, so every workspace folder
 is).
 
 ## What's next
 
-1. The bindings: `credential` and `mcp` (with `via: file` as a 0400 file under `/run/pot`), `status.relay`,
-   `git.fetch`, `nix`; then siblings.
+1. The other bindings: `status.relay`, `git.fetch`, `nix` (the broker and the nix relay); then siblings.
 2. Write access: pot's core resolves the workspace's protected paths and pins and passes them to the backend
    (decided 2026-11-21: one implementation, no port of bwrap's `Pins`); the backend binds them read-only.
 3. `after` and `cleanup` for clones; the conformance review with executed evidence per guarantee (plan step 4).
@@ -367,7 +415,8 @@ is).
 ## Sources
 
 - [backends/container/src/](../../backends/container/src/): `policy.rs` (reading policy.json/1), `probe.rs`,
-  `render.rs` (the flags), `lifecycle.rs` (run's and cleanup's commands, the after event), `main.rs` (the verbs)
+  `render.rs` (the flags), `bindings.rs` (the credential and mcp bindings), `lifecycle.rs` (run's and cleanup's
+  commands, the after event), `main.rs` (the verbs)
 - [backends/container/tests/run.rs](../../backends/container/tests/run.rs): real containers, when `POT_TEST_PODMAN`
   or `POT_TEST_DOCKER` names the engine (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, 2026-11-21): `true`
   and `exit 3` with no engine process or container left at return, SIGTERM stopping the run (143), a killed run's
@@ -388,7 +437,17 @@ is).
   (`loopback` in the after event) and the host's listener on 127.0.0.1 is never reached, `/proc/net/dev` shows only
   `lo`; the command's environment with the network is exactly the plan's; the proxy is gone within seconds of a
   SIGKILL of `run`; `cleanup` stops a live proxy and removes its socket
-- [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `masked`, `Pins`, `cleanup`, `run` (the proxy),
+- The bindings slice's tests (rootless podman 5.4.1 and docker 27.5.1 on platform-vm, 2026-11-22), under both
+  engines, with fake key files: a marker from each `from` kind (key file, `envFile`, a host variable, the same-named
+  one) arrives in each `via` mode; no marker is in a file of the run folder (but its via-file file) or of
+  `$XDG_RUNTIME_DIR/crun`, in `container inspect`, in `container.argv`, or in any exec's arguments (`strace -f -e
+  execve`); the via-file file is 0400 and the caller's, inside and out, and the run can't write, replace, `chmod` or
+  remove it, or create one beside it; `secrets/` is gone when the command ends, after a SIGKILL of `run` then
+  `cleanup`, and after a `prepare` that stops (a link planted there is removed, not followed); `mcp.json` has bwrap's
+  shape with no value; a via-file mcp key with a quote, and a missing key file, are refused before the engine starts,
+  naming the binding and file; the command's environment equals what bwrap.py's `run_env` plus `deliver` computes for
+  the same policy (but for what is not placed yet, above)
+- [core/bwrap.py](../../core/bwrap.py): `prepare`, `run_env`, `credentials`, `deliver`, `mcp_servers`, `masked`, `Pins`, `cleanup`, `run` (the proxy),
   `after` (denials and loopback) (the reference backend); [core/proxy.py](../../core/proxy.py)
 - [core/pot.py](../../core/pot.py): `launch_facts` (launch.json), `scope_for` (resource-limits)
 - The phase 2 spike, executed on platform-vm on 2026-11-21 (flexion-assistant session record
