@@ -105,7 +105,10 @@ fn read_config(path: Option<&Path>) -> Result<Config, String> {
     };
     let text = fs::read_to_string(path)
         .map_err(|e| format!("can't read the backend's --config {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("the backend's --config {}: {e}", path.display()))
+    serde_json::from_str(&text)
+        .map_err(|e| e.to_string())
+        .and_then(policy::decode)
+        .map_err(|e| format!("the backend's --config {}: {e}", path.display()))
 }
 
 fn load(rundir: &Path) -> Result<(Policy, Launch), Refusal> {
@@ -116,6 +119,8 @@ fn load(rundir: &Path) -> Result<(Policy, Launch), Refusal> {
     let p = policy::parse(&read("policy.json")?)?;
     policy::check_backend(&p)?;
     let l: Launch = serde_json::from_str(&read("launch.json")?)
+        .map_err(|e| e.to_string())
+        .and_then(policy::decode)
         .map_err(|e| Refusal::new(&p.context, format!("launch.json: {e}")))?;
     Ok((p, l))
 }

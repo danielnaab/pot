@@ -30,11 +30,11 @@ pot (work): policy.json version 2: this backend reads version 1 only
 
 $ pot-container --config config.json prepare --print invalid-unknown-field
 ? 1
-pot (work): policy.json/1: unknown field `owner`, expected one of `version`, `run`, `context`, `mode`, `access`, `backend`, `workspace`, `items`, `mounts`, `bindings`, `children`, `grants`
+pot (work): policy.json/1: owner: unknown field `owner`
 
 $ pot-container --config config.json prepare --print invalid-credential-value
 ? 1
-pot (work): policy.json/1: unknown field `value`, expected one of `capability`, `selector`, `kit`, `request`, `socket`, `see`, `allow`, `remotes`, `key`, `via`, `notes`, `env`, `from`, `holds`, `refresh`, `server`, `url`, `header`, `scheme`, `config`
+pot (work): policy.json/1: bindings[1].value: unknown field `value`
 
 $ pot-container --config config.json prepare --print invalid-effective-unsandboxed
 ? 1

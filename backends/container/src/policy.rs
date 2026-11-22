@@ -273,10 +273,35 @@ pub fn parse(text: &str) -> Result<Policy, Refusal> {
             ));
         }
     }
-    let policy: Policy =
-        serde_json::from_value(raw).map_err(|e| Refusal::new(&context, format!("policy.json/1: {e}")))?;
+    let policy: Policy = decode(raw).map_err(|e| Refusal::new(&context, format!("policy.json/1: {e}")))?;
     check_rules(&policy).map_err(|m| Refusal::new(&context, format!("policy.json/1: {m}")))?;
     Ok(policy)
+}
+
+/// Decode V as T. An error names where it is (a JSON path) and what was expected there, never the value found:
+/// a secret misplaced into a field would otherwise be printed (audit F7).
+pub fn decode<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, String> {
+    serde_path_to_error::deserialize(v).map_err(|e| {
+        let path = e.path().to_string();
+        let msg = e.inner().to_string();
+        let said = if let Some((_, expected)) = msg
+            .split_once(", expected ")
+            .filter(|_| msg.starts_with("invalid "))
+        {
+            format!("expected {expected}")
+        } else if msg.starts_with("unknown field") {
+            msg.split(", expected").next().unwrap_or(&msg).to_string()
+        } else if msg.starts_with("missing field") {
+            msg
+        } else {
+            "not what this field holds".to_string()
+        };
+        if path == "." {
+            said
+        } else {
+            format!("{path}: {said}")
+        }
+    })
 }
 
 /// Rule 1 (the backend's name) and rule 2's first half (every proved guarantee is one this contract knows).
@@ -632,5 +657,29 @@ mod tests {
         );
         let e = parse("{").unwrap_err();
         assert!(e.to_string().starts_with("pot (run): policy.json is not JSON"));
+    }
+
+    /// F7: a type error names where and what was expected, never the value (a misplaced secret would print).
+    #[test]
+    fn a_type_error_never_shows_the_value() {
+        let text = include_str!("../../../docs/reference/container/prepare.in/read-only/policy.json");
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        v["items"][2]["effective"] = serde_json::json!("sk-live-123");
+        let e = parse(&v.to_string()).unwrap_err().to_string();
+        assert!(!e.contains("sk-live-123"), "{e}");
+        assert_eq!(
+            e,
+            "pot (review): policy.json/1: items[2].effective: expected a boolean"
+        );
+        v["items"][2]["effective"] = serde_json::json!(true);
+        v["bindings"] = serde_json::json!([{ "capability": "credential", "selector": "x", "kit": "k",
+                                             "request": "capability credential", "value": "sk-live-123" }]);
+        let e = parse(&v.to_string()).unwrap_err().to_string();
+        assert!(!e.contains("sk-live-123"), "{e}");
+        assert!(e.ends_with("bindings[0].value: unknown field `value`"), "{e}");
+        v["bindings"] = serde_json::json!([]);
+        v["run"] = serde_json::json!(["sk-live-123"]);
+        let e = parse(&v.to_string()).unwrap_err().to_string();
+        assert_eq!(e, "pot (review): policy.json/1: run: expected a string");
     }
 }
