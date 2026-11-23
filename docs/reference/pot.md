@@ -1653,7 +1653,9 @@ notebook-kit is `unverified` here because the bump branch pins it before its rel
 - `backend` probes every backend the root offers, a row each, the one `pot CMD` runs under first, then a row
   `pot CMD runs under NAME: WHY (context CONTEXT)` ([Which backend](#which-backend)). A container backend's row is
   `container (podman): the engine works; proves …; lacks …`, or, marked, `! backend  container (podman): podman:
-  can't run …: not found; no run starts under it` (a marked row for any offered backend makes doctor exit 1).
+  can't run …: not found; no run starts under it`. Only a backend the root selects (its `defaultBackend`, or a
+  context's `backend`) is marked, so makes doctor exit 1; another is a note, `… no run starts under it (only
+  --backend container selects it)`.
   bubblewrap's row is the probe (`… cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)`
   when it fails; when `PATH` has no `true` for it to run, `! backend  bubblewrap: its probe runs true, and PATH has
   none (PATH=…); user namespaces were not tested`). A run that meets the same probe failure stops (exit 1):

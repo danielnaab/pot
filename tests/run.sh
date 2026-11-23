@@ -2741,6 +2741,13 @@ exit 1
   out=$(cp_ doctor 2>&1 || true)
   expect "backend: a fake podman first on PATH is never run (explain, a run, doctor)" test ! -e "$work/fake-engine-ran"
   expect "the root's own podman is the one doctor names" holds "container (podman)"
+  # QA I1: an offered backend that nothing selects is a note in pot doctor, never a mark: doctor exits as the bubblewrap
+  # root's does
+  ran "backend: a root offering a broken container backend it never selects builds" nix build -o "$work/offered" "path:$work/nroot#packages.$sys.offered"
+  local want && want=$(exit_of nb_ doctor)
+  expect "backend: pot doctor exits as without it" test "$(exit_of env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/offered/bin/pot" doctor)" = "$want"
+  out=$(cat "$work/exit.out")
+  expect "its row is a note, unmarked" has "           container (podman): podman: can't run $work/no-such-podman: not found; no run starts under it (only --backend container selects it)"
 
 }
 

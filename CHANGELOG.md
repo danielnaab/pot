@@ -18,7 +18,9 @@ v2.14.0's `sandbox` on).
   a `defaultBackend` or context `backend` it does not offer, an unknown engine or field, and the container backend on
   Darwin. A container backend whose probe proves nothing (its engine missing) stops the run naming the engine's error
   and the way out. `pot explain` says why (`chosen by …`); `pot doctor` probes every offered backend and names the
-  one `pot CMD` runs under. The root manifest's `backends.container` carries `engine` and `enginePath`. The root
+  one `pot CMD` runs under; a broken one marks it (exit 1) only when the root selects it (its default or a context's),
+  else it is a note (QA I1). Known: evaluating such a root prints crane's warning that it wants nixpkgs 26.05 (pot's flake
+  pins 25.05; the backend builds and its tests pass). The root manifest's `backends.container` carries `engine` and `enginePath`. The root
   always names the engine's program (podman's default `pkgs.podman`; docker's must be given): pot never runs an engine
   it finds on `PATH` (QA B2). pot probes the container backend for every run, never from its cache ([container.md](docs/reference/container.md#probe)).
 - **The container backend runs dispatch clones** ([container.md](docs/reference/container.md#clone-mode)) and proves

@@ -4176,8 +4176,17 @@ def doctor(host, root, rootjson):
     # no lack; it is one only when the probe fails (L1), or the backend can't uphold it (C1: its probe lacks it)
     sc = scope_for(host, root, {"requires": ["resource-limits"]}, {}, True)
     held0 = g0 = None
+    # QA I1: a broken backend marks the report (exit 1) only when something in the root selects it (its default, or a
+    # context's backend); one only --backend reaches is a note
+    selected = {root.get("defaultBackend") or first}
+    for cn in set(C.BUILTIN_CONTEXTS) | set(root.get("contexts") or {}):
+        try:
+            selected.add(C.resolve_context(root, cn).get("backend"))
+        except C.Refusal:
+            pass
     for i, bname in enumerate([first] + sorted(n for n in backends if n != first)):
         label = "backend" if i == 0 else ""
+        bad = bname in selected
         b = backends.get(bname) or {}
         try:
             r = subprocess.run([b["program"], "probe", host.state], capture_output=True, text=True)
@@ -4199,14 +4208,15 @@ def doctor(host, root, rootjson):
                 + ("; resource-limits: for runs without a terminal" if held else "") + f"; lacks {' '.join(lacks)}")
         elif container:
             # its error when the engine is missing or can't run a run
-            row(label, f"{name}: {(p.get('error') or 'its probe proves nothing').strip()}; no run starts under it", True)
+            row(label, f"{name}: {(p.get('error') or 'its probe proves nothing').strip()}; no run starts under it"
+                + ("" if bad else f" (only --backend {bname} selects it)"), bad)
         elif not shutil.which("true"):
             # F9: the probe runs true from PATH; without one it says nothing about user namespaces
-            row(label, f"{bname}: its probe runs true, and PATH has none (PATH={os.environ.get('PATH', '')}); user namespaces were not tested", True)
+            row(label, f"{bname}: its probe runs true, and PATH has none (PATH={os.environ.get('PATH', '')}); user namespaces were not tested", bad)
         elif sys.platform == "darwin":
-            row(label, f"{bname}: /usr/bin/sandbox-exec does not start a sandbox here, so no run starts (pot host CMD runs unsandboxed)", True)
+            row(label, f"{bname}: /usr/bin/sandbox-exec does not start a sandbox here, so no run starts (pot host CMD runs unsandboxed)", bad)
         else:
-            row(label, f"{bname}: cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)", True)
+            row(label, f"{bname}: cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)", bad)
     if chosen:
         row("", f"pot CMD runs under {chosen['name']}: {chosen['why']} (context {chosen['context']})")
     # the resources row is the first backend's (the one pot CMD runs under)
