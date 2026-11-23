@@ -142,6 +142,15 @@ v2.14.0's `sandbox` on).
   (Seatbelt untested here).
 - **`pot --backend NAME`'s cleanup is that backend's** (and a context's `backend`), not the root's default.
 
+### Upgrading
+
+1. **End every run pot v0.2.0 started before switching** (`pot runs` lists them; let each end, or stop it). A v0.2.0
+   pot that ends after the switch removes its S1 placeholders as v0.2.0 did, without asking whether a newer run in a
+   worktree of the same repository took one on. That run has it bound read-only. Removed on the host, its bind is
+   gone too (Linux detaches a mount whose file is removed in another namespace), so the run could create
+   `config.worktree` or `commondir` there and point host git at a config it wrote. A v0.2.0 run that is lost (its pot
+   killed) is safe: the newer pot's cleanup of it leaves what a live run relies on.
+
 ## v0.2.0 - 2026-11-21
 
 ### Added
