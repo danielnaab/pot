@@ -1532,7 +1532,8 @@ def tidy_lost(host):
     """K4: a run whose pot was killed (its process gone) leaves its sockets in its run folder, and a top run with
     siblings its tree's slots (<state>/trees/<id>); the next pot removes both with the backend's cleanup, once the
     run's backend is gone too (helpers_alive). A clone-mode run that still needs its after event gets it, and its
-    cleanup, from its recovery."""
+    cleanup, from its recovery. A pot explain killed mid-way leaves its scratch folder (runs/explain-*) with its
+    placeholders: cleaned up, and removed, the same way."""
     runs = os.path.join(host.state, "runs")
     try:
         names = os.listdir(runs)
@@ -1540,6 +1541,17 @@ def tidy_lost(host):
         return
     for n in names:
         rd = os.path.join(runs, n)
+        if re.fullmatch(r"explain-[0-9a-f]{6}", n):
+            # pot explain --backend-command, killed between its prepare and its cleanup: its placeholders and its
+            # scratch folder (a live one holds its list; one with no list placed nothing, and may be gathering)
+            if os.path.lexists(os.path.join(rd, PINS_USED)) and not pins_live(rd):
+                try:
+                    prog = backend_cmd(host, run_backend(rd))[1]
+                except C.Refusal:
+                    continue
+                if cleanup_run(host, prog, rd, lost=True):
+                    scratch_done(host, rd)
+            continue
         if not re.fullmatch(r"[0-9a-f]{4}", n):
             continue
         used = os.path.lexists(os.path.join(rd, PINS_USED))

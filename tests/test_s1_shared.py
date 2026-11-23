@@ -134,6 +134,35 @@ class Shared(unittest.TestCase):
                 pot.unlock(fds)
         self.assertTrue(inodes(l1) & inodes(l2), "two runs that place the same placeholders take no lock in common")
 
+    def test_a_killed_explain_is_tidied(self):
+        # pot explain --backend-command killed outright between its prepare and its cleanup leaves runs/explain-*
+        # with its list and its placeholders: the next start's tidy_lost cleans it up, folder and all
+        e, le = self.resolve("explain-a1b2c3", self.w1)
+        with open(os.path.join(e, "policy.json"), "w") as f:
+            json.dump({"backend": {"name": "spy"}}, f)
+        fe = self.start(e, le)
+        self.assertTrue(os.path.isfile(self.ph))
+        self.fds.remove(fe)
+        os.close(fe)                                  # its pot gone: the kernel drops its lock
+        real = pot.backend_cmd
+        pot.backend_cmd = lambda host, name: (name, self.prog)
+        self.addCleanup(setattr, pot, "backend_cmd", real)
+        pot.tidy_lost(self.host)
+        self.assertFalse(os.path.exists(self.ph))
+        self.assertFalse(os.path.exists(e))
+
+    def test_a_live_explain_is_left(self):
+        e, le = self.resolve("explain-a1b2c3", self.w1)
+        with open(os.path.join(e, "policy.json"), "w") as f:
+            json.dump({"backend": {"name": "spy"}}, f)
+        self.start(e, le)
+        real = pot.backend_cmd
+        pot.backend_cmd = lambda host, name: (name, self.prog)
+        self.addCleanup(setattr, pot, "backend_cmd", real)
+        pot.tidy_lost(self.host)
+        self.assertTrue(os.path.isfile(self.ph))
+        self.assertTrue(os.path.isdir(e))
+
     def test_a_lost_cleanup_rechecks_under_the_lock(self):
         # tidy_lost decides a run is lost before it takes the git directory's lock; a start that had created its list
         # but not yet locked it looks lost. Under the lock the run is live again: its cleanup does nothing

@@ -1815,8 +1815,9 @@ depth: the tree after a run is untrusted output.
   lost run, removing its sockets, its tree's slots and the placeholders that still hold what pot wrote. It waits for
   the lost run's backend: a pot killed alone leaves its backend running until the command ends, and a lost run whose
   sockets still answer is left as it is. A clone-mode run that still needs its after event gets that cleanup from its
-  recovery (`pot runs`, `pot review`). Until then they are harmless: host git works with them as with absent names.
-  The rest is writable, so a run can commit. It can also delete other branches' refs.
+  recovery (`pot runs`, `pot review`). A `pot explain --backend-command` killed between its prepare and its cleanup is
+  cleaned up the same way, its scratch folder (`runs/explain-*`) removed. Until then they are harmless: host git works
+  with them as with absent names. The rest is writable, so a run can commit. It can also delete other branches' refs.
 
 Protection covers the paths that exist when the run starts. A host-run file that the run creates (a new `justfile`
 or `.envrc` in a subfolder, say) is not stopped: the exit line, and `pot review` for a clone, flag it as a changed
