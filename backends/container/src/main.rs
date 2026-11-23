@@ -456,6 +456,7 @@ fn make_placeholders(rundir: &Path, p: &Plan) -> std::io::Result<()> {
     result
 }
 
+#[allow(clippy::too_many_lines)] // what prepare places, in order, each with what run checks again
 fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -> std::io::Result<()> {
     // the engines refuse a cidfile that exists: one left from before goes (a link: the link); so does what an earlier
     // run left of its own (never a folder)
@@ -520,6 +521,33 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
             .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{src}: {why}")))?;
         let _ = writeln!(listed, "{}:{} {dest}", id.dev, id.ino);
     }
+    // A1: the shims in bin/ (no mount points: their device, inode and one link) and, for run to check again before
+    // the engine, bin/ and each shim as prepare made them
+    let mut own_ids = vec![];
+    for (dest, src) in &p.file_checks {
+        let (_, id, _) = pin_now(src)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{src}: {why}")))?;
+        let _ = writeln!(listed, "={}:{}:1 {dest}", id.dev, id.ino);
+    }
+    let abs_dir = fs::canonicalize(rundir).map_err(at(rundir))?;
+    let checked_own = p
+        .checks
+        .iter()
+        .chain(&p.file_checks)
+        .filter(|(_, src)| Path::new(src).starts_with(&abs_dir));
+    for (_, src) in checked_own {
+        let (kind, id, _) = pin_now(src)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{src}: {why}")))?;
+        own_ids.push(PinRecord {
+            path: src.clone(),
+            kind,
+            dev: id.dev,
+            ino: id.ino,
+            size: id.size,
+            ctime: id.ctime,
+            single: kind == launch::Kind::File,
+        });
+    }
     if p.stat.is_some() {
         write_new(&rundir.join("binds.txt"), listed.as_bytes(), 0o444)?;
     }
@@ -556,7 +584,8 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
     let set: std::collections::BTreeMap<_, _> = p.engine_set.iter().cloned().collect();
     let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults,
         "fifo": p.fifo, "proxy": p.proxy, "credentials": p.creds, "hostless": p.hostless, "secretsAt": p.secrets_at,
-        "pins": pins, "broker": p.broker, "nixRelay": p.nix_relay, "nixScript": p.nix_script, "clear": p.clear });
+        "pins": pins, "broker": p.broker, "nixRelay": p.nix_relay, "nixScript": p.nix_script, "clear": p.clear,
+        "ownIds": own_ids, "socketChecks": p.socket_checks });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -573,8 +602,9 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
             .map_err(|e| Refusal::new(&context_of(rundir), format!("can't remove {}: {e}", s.display())))?;
     }
     let (p, l, plan) = plan(cfg, rundir)?;
-    // bwrap's run stops so when a binding's host program is missing (launch-1: before the command starts)
-    if let (Some(stop), false) = (&plan.stop, print) {
+    // bwrap's run stops so when a binding's host program is missing (launch-1: before the command starts); --print
+    // too (A5), rather than show a command prepare would not place
+    if let Some(stop) = &plan.stop {
         return Err(Refusal::new(&p.context, stop.clone()));
     }
     if print {
@@ -924,12 +954,18 @@ struct EngineEnv {
     /// status.relay: workmux's argv and the pane, run when the command ends.
     #[serde(default)]
     clear: Option<Vec<String>>,
+    /// A1: the run folder's files the entry checks (bin/, the shims), as prepare made them, for run to check again.
+    #[serde(default, rename = "ownIds")]
+    own_ids: Vec<PinRecord>,
+    /// A1: the bindings' sockets the entry checks (destination, name in the run folder), recorded by run.
+    #[serde(default, rename = "socketChecks")]
+    socket_checks: Vec<(String, String)>,
 }
 
 /// Write access, just before the engine starts: each pin is the inode prepare recorded, of its kind, no link, and a
 /// protected file has no second hard link. The engine resolves a bind's source when it mounts it, so this narrows
 /// the window between the check and the bind to the engine's own start; bwrap binds at its start with no such check.
-fn pins_unchanged(pins: &[PinRecord]) -> Result<(), String> {
+fn pins_unchanged(pins: &[PinRecord], what: &str) -> Result<(), String> {
     let changed: Vec<String> = pins
         .iter()
         .filter_map(|r| {
@@ -946,7 +982,7 @@ fn pins_unchanged(pins: &[PinRecord]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "the workspace changed since prepare: {}; run prepare again",
+            "{what} changed since prepare: {}; run prepare again",
             changed.join(", ")
         ))
     }
@@ -1207,6 +1243,8 @@ const BROKER_KEEP: &[&str] = &[
     "TMUX_TMPDIR",
     "XDG_RUNTIME_DIR",
     "SSH_AUTH_SOCK",
+    // A4: GSSAPI ssh's credential cache
+    "KRB5CCNAME",
 ];
 
 /// The caller's variables the nix relay keeps (when set): what host nix reads to reach the caller's store and its
@@ -1226,7 +1264,50 @@ const RELAY_KEEP: &[&str] = &[
     "NIX_CONF_DIR",
     "NIX_USER_CONF_FILES",
     "NIX_CONFIG",
+    // A4: where host nix finds the caller's daemon and store
+    "NIX_DAEMON_SOCKET_PATH",
+    "NIX_STATE_DIR",
+    "NIX_STORE_DIR",
 ];
+
+/// A1 (QA 2026-11-22): each binding's socket as the entry must find it, appended to `binds.txt` (prepare's lines
+/// kept, the file written afresh): its device and inode as `lstat` sees it now, just before the engine starts, never
+/// through a link. A link or another kind there is refused. The entry then stops the command (125) when the engine bound
+/// another file at a socket's path: one swapped in after this check.
+fn record_sockets(abs: &Path, socks: &[(String, String)]) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    if socks.is_empty() {
+        return Ok(());
+    }
+    let list = abs.join("binds.txt");
+    let mut text = String::from_utf8(read_own(&list).map_err(|e| e.to_string())?)
+        .map_err(|_| format!("{}: not text", list.display()))?;
+    for (dest, name) in socks {
+        let path = abs.join(name);
+        match path.symlink_metadata() {
+            Ok(m) if m.file_type().is_socket() => {
+                let _ = writeln!(text, "{}:{} {dest}", m.dev(), m.ino());
+            }
+            _ => return Err(format!("not what run made just now: {}", path.display())),
+        }
+    }
+    write_new(&list, text.as_bytes(), 0o444).map_err(|e| e.to_string())
+}
+
+/// A2 (QA 2026-11-22): git.fetch's key files in the broker's command, each `~` the caller's `HOME` (bwrap's
+/// `expanduser`, as the credential bindings take it), never launch.json's `home`.
+fn expand_key_files(argv: &[String], getenv: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(argv.len());
+    for a in argv {
+        let key = out.last().is_some_and(|p| p == "--key-file");
+        out.push(if key {
+            bindings::expand_home(a, getenv).to_string_lossy().into_owned()
+        } else {
+            a.clone()
+        });
+    }
+    out
+}
 
 /// The bindings' sockets the run folder's helpers make: status.relay's and git.fetch's (the broker), nix's (the relay).
 fn binding_socks(env: &EngineEnv) -> Vec<&'static str> {
@@ -1280,7 +1361,10 @@ fn start_bindings(abs: &Path, env: &EngineEnv, helpers: &mut Helpers) -> Result<
             .map_err(|e| format!("can't start the run's bindings ({}): {e}", argv[0]))
     };
     if let Some(b) = &env.broker {
-        helpers.procs.push(spawn(b, BROKER_KEEP)?);
+        helpers.procs.push(spawn(
+            &expand_key_files(b, &|n| std::env::var_os(n)),
+            BROKER_KEEP,
+        )?);
     }
     if let (Some(relay), Some(script)) = (&env.nix_relay, &env.nix_script) {
         let path = abs.join(render::NIX_SCRIPT);
@@ -1354,6 +1438,8 @@ struct Helpers {
     clear: Option<Vec<String>>,
     /// With the bindings' helpers: the run folder, where a relay daemon still serving a connection is stopped too.
     rundir: Option<PathBuf>,
+    /// The programs the helpers run (A3).
+    exes: HelperExes,
 }
 
 impl Drop for Helpers {
@@ -1385,7 +1471,7 @@ impl Drop for Helpers {
             stop_process(c);
         }
         if let Some(r) = &self.rundir {
-            for f in stop_helpers(r) {
+            for f in stop_helpers(r, &self.exes) {
                 eprintln!("{}", visible(&format!("pot: {f}")));
             }
         }
@@ -1660,6 +1746,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     let (vals, secret_files) = bound_values(&env).map_err(refuse)?;
     // the named pipe and the proxy, just before the engine; stopped and removed when the command ends (Helpers' drop)
     let mut helpers = Helpers::default();
+    helpers.exes = HelperExes::new(Some(cfg), &abs);
     if env.fifo {
         helpers.files.push(abs.join("secrets.fifo"));
         make_fifo(&abs.join("secrets.fifo")).map_err(refuse)?;
@@ -1686,7 +1773,9 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         secret_names.as_deref(),
     )
     .map_err(refuse)?;
-    pins_unchanged(&env.pins).map_err(refuse)?;
+    pins_unchanged(&env.pins, "the workspace").map_err(refuse)?;
+    pins_unchanged(&env.own_ids, "the run folder").map_err(refuse)?;
+    record_sockets(&abs, &env.socket_checks).map_err(refuse)?;
     let argv = lifecycle::run_argv(&argv, std::io::stdin().is_terminal());
 
     // U2: a variable passed by name that the host has unset takes pot's value: in the engine's environment (the
@@ -1993,7 +2082,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         }
     };
     let rd = |n: &str| abs.join(n);
-    let mut failed = stop_helpers(&abs);
+    let mut failed = stop_helpers(&abs, &HelperExes::new(cfg.ok(), &abs));
     failed.extend(cleanup_engine(cfg, &abs));
     // write access: the placeholders that still hold what prepare wrote (bwrap's cleanup), and the seals' bases
     failed.extend(remove_placeholders(&rd("placeholders.json")));
@@ -2068,10 +2157,46 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     }
 }
 
+/// A3 (QA 2026-11-22): the programs pot's helpers run, as their real files: the config's python (the proxy, the
+/// broker) and socat (the nix relay), and launch.json's `hostTools.nix` (a relay daemon). A helper is stopped only when
+/// its program is one of these.
+#[derive(Default)]
+struct HelperExes {
+    python: Option<PathBuf>,
+    socat: Option<PathBuf>,
+    nix: Option<PathBuf>,
+}
+
+impl HelperExes {
+    fn new(cfg: Option<&Config>, abs: &Path) -> Self {
+        let real = |p: Option<&str>| p.and_then(|p| fs::canonicalize(p).ok());
+        let nix = read_own(&abs.join("launch.json"))
+            .ok()
+            .and_then(|t| serde_json::from_slice::<serde_json::Value>(&t).ok())
+            .and_then(|l| {
+                l.pointer("/hostTools/nix")
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            });
+        HelperExes {
+            python: real(cfg.and_then(|c| c.python.as_deref())),
+            socat: real(cfg.and_then(|c| c.socat.as_deref())),
+            nix: real(nix.as_deref()),
+        }
+    }
+    fn of(&self, h: lifecycle::Helper) -> Option<&PathBuf> {
+        match h {
+            lifecycle::Helper::Python => self.python.as_ref(),
+            lifecycle::Helper::Socat => self.socat.as_ref(),
+            lifecycle::Helper::Nix => self.nix.as_ref(),
+        }
+    }
+}
+
 /// pot's helpers for this run still alive, each started in the run folder: the proxy and the broker (a `run` killed with
 /// SIGKILL a moment ago leaves them for up to a second), the nix relay and a daemon it started for a connection (which
 /// never stop by themselves): stopped, SIGTERM then SIGKILL after 2 s. Returns those that would not stop.
-fn stop_helpers(abs: &Path) -> Vec<String> {
+fn stop_helpers(abs: &Path, exes: &HelperExes) -> Vec<String> {
     let r = abs.to_string_lossy().into_owned();
     let me = std::process::id().to_string();
     let find = || -> Vec<rustix::process::Pid> {
@@ -2083,8 +2208,14 @@ fn stop_helpers(abs: &Path) -> Vec<String> {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|pid| pid.bytes().all(|b| b.is_ascii_digit()) && *pid != me)
             .filter(|pid| {
-                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| lifecycle::names_helper(&c, &r))
-                    && fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|c| c == abs)
+                fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|c| c == abs)
+                    && fs::read(format!("/proc/{pid}/cmdline"))
+                        .ok()
+                        .and_then(|c| lifecycle::helper_program(&c, &r))
+                        .and_then(|h| exes.of(h))
+                        .is_some_and(|want| {
+                            fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|e| &e == want)
+                        })
             })
             .filter_map(|pid| pid.parse().ok().and_then(rustix::process::Pid::from_raw))
             .collect()
@@ -2214,6 +2345,38 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A2 (QA 2026-11-22): git.fetch's key file's `~` is the caller's `HOME` at run, as bwrap's `expanduser` and the
+    /// credential bindings take it, never launch.json's `home`; nothing else in the broker's command changes.
+    #[test]
+    fn a_key_files_tilde_is_the_callers_home() {
+        let argv: Vec<String> = [
+            "py",
+            "broker.py",
+            "--key-file",
+            "~/.ssh/id_pot",
+            "--remote",
+            "~/x",
+            "--key-file",
+            "/k",
+        ]
+        .map(String::from)
+        .to_vec();
+        let home = |n: &str| (n == "HOME").then(|| std::ffi::OsString::from("/home/caller/"));
+        assert_eq!(
+            expand_key_files(&argv, &home),
+            [
+                "py",
+                "broker.py",
+                "--key-file",
+                "/home/caller/.ssh/id_pot",
+                "--remote",
+                "~/x",
+                "--key-file",
+                "/k"
+            ]
+        );
+    }
 
     #[test]
     fn visible_escapes_controls_and_bidi() {

@@ -233,11 +233,12 @@ pub fn names_proxy(cmdline: &[u8], rundir: &str) -> bool {
             .any(|w| w[0] == b"--denials" && w[1] == denials.as_bytes())
 }
 
-/// Whether CMDLINE is one of pot's helpers for this run (main.rs checks its working folder, the run folder, too): the
-/// proxy ([`names_proxy`]); the broker (its socket `relay.sock` or `git.sock` and the run's `--denials`); the nix relay
-/// (socat listening on `nix.sock`, running `./nix-relay`) or a daemon it started for a connection (`nix daemon --stdio
-/// --force-untrusted`).
-pub fn names_helper(cmdline: &[u8], rundir: &str) -> bool {
+/// Which of pot's helpers for this run CMDLINE is, by the program it must be (main.rs checks that program,
+/// `/proc/PID/exe`, and the working folder, the run folder, too: A3): the proxy ([`names_proxy`]) and the broker (its
+/// socket `relay.sock` or `git.sock` and the run's `--denials`) are the config's python; the nix relay (socat listening
+/// on `nix.sock`, running `./nix-relay`) is the config's socat; a daemon it started for a connection (`nix daemon
+/// --stdio --force-untrusted`) is `hostTools.nix`.
+pub fn helper_program(cmdline: &[u8], rundir: &str) -> Option<Helper> {
     let denials = format!("{}/denials", rundir.trim_end_matches('/'));
     let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
     let has = |w: &str| args.iter().any(|a| *a == w.as_bytes());
@@ -245,9 +246,23 @@ pub fn names_helper(cmdline: &[u8], rundir: &str) -> bool {
         && args
             .windows(2)
             .any(|w| w[0] == b"--denials" && w[1] == denials.as_bytes());
-    let relay = has("UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600") && has("EXEC:./nix-relay");
-    let daemon = has("daemon") && has("--stdio") && has("--force-untrusted");
-    names_proxy(cmdline, rundir) || broker || relay || daemon
+    if names_proxy(cmdline, rundir) || broker {
+        Some(Helper::Python)
+    } else if has("UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600") && has("EXEC:./nix-relay") {
+        Some(Helper::Socat)
+    } else if has("daemon") && has("--stdio") && has("--force-untrusted") {
+        Some(Helper::Nix)
+    } else {
+        None
+    }
+}
+
+/// The program a helper runs: the config's python or socat, or `hostTools.nix`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Helper {
+    Python,
+    Socat,
+    Nix,
 }
 
 /// The names the configured engine program runs under: its own name, its real file's, and nix's wrapped name

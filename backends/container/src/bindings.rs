@@ -118,7 +118,7 @@ pub fn is_name(s: &str) -> bool {
 }
 
 /// Python's `os.path.expanduser` for `~` and `~/…` (HOME, as the host has it).
-fn expand_home(f: &str, getenv: &dyn Fn(&str) -> Option<OsString>) -> std::path::PathBuf {
+pub fn expand_home(f: &str, getenv: &dyn Fn(&str) -> Option<OsString>) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt as _;
     match (f.strip_prefix('~'), getenv("HOME")) {
         (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {

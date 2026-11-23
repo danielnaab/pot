@@ -149,13 +149,15 @@ pub const PIN_CHECK: &str = concat!(
     r#"__pot_stat=$1 __pot_list=$2; shift 2; __pot_mp=$'\n'; __pot_bad=; "#,
     r#"__pot_at() { local m=$1 r= x root mp rest src; while read -r x x x root mp rest; do if [ "$mp" = "$m" ]; then rest=${rest#* - }; read -r x src x <<<"$rest"; r="mounted from $src, root $root"; fi; done </proc/self/mountinfo; printf %s "${r:-no mount}"; }; "#,
     r#"while read -r __pot_x __pot_x __pot_x __pot_x __pot_m __pot_x; do __pot_mp+="$__pot_m"$'\n'; done </proc/self/mountinfo; "#,
-    r#"while IFS= read -r __pot_l; do __pot_want=${__pot_l%% *} __pot_p=${__pot_l#* }; "#,
+    r#"while IFS= read -r __pot_l; do __pot_want=${__pot_l%% *} __pot_p=${__pot_l#* } __pot_f=%d:%i; "#,
     r#"__pot_m=${__pot_p//\\/\\134}; __pot_m=${__pot_m// /\\040}; "#,
-    r#"case $__pot_mp in *$'\n'"$__pot_m"$'\n'*) ;; *) __pot_bad+=" $__pot_p (not a mount point)"; continue ;; esac; "#,
-    r#"[ "$("$__pot_stat" -c %d:%i -- "$__pot_p" 2>/dev/null)" = "$__pot_want" ] || __pot_bad+=" $__pot_p (another file: $(__pot_at "$__pot_m"))"; "#,
+    r#"case $__pot_want in =*) __pot_want=${__pot_want#=} __pot_f=%d:%i:%h ;; "#,
+    r#"*) case $__pot_mp in *$'\n'"$__pot_m"$'\n'*) ;; *) __pot_bad+=" $__pot_p (not a mount point)"; continue ;; esac ;; esac; "#,
+    r#"if [ "$("$__pot_stat" -c "$__pot_f" -- "$__pot_p" 2>/dev/null)" != "$__pot_want" ]; then "#,
+    r#"if [ "$__pot_f" = %d:%i ]; then __pot_bad+=" $__pot_p (another file: $(__pot_at "$__pot_m"))"; else __pot_bad+=" $__pot_p (another file, or a second hard link)"; fi; fi; "#,
     r#"done <"$__pot_list"; "#,
     r#"if [ -n "$__pot_bad" ]; then echo "pot: the container is not the binds prepare recorded:$__pot_bad; the engine may have bound another folder there and made mount points in it; nothing ran" >&2; exit 125; fi; "#,
-    r#"unset -f __pot_at; unset -v __pot_stat __pot_list __pot_mp __pot_bad __pot_x __pot_m __pot_l __pot_want __pot_p; exec "$@""#
+    r#"unset -f __pot_at; unset -v __pot_stat __pot_list __pot_mp __pot_bad __pot_x __pot_m __pot_l __pot_want __pot_p __pot_f; exec "$@""#
 );
 
 /// A real file: it exists, is not a folder, and is its own real path (no link, no `..`).
@@ -331,6 +333,12 @@ pub struct Plan {
     pub clear: Option<Vec<String>>,
     /// A binding's host program missing from launch.json's hostTools: bwrap's message, which stops the run.
     pub stop: Option<String>,
+    /// A1 (QA 2026-11-22): files in a bound run-folder folder the entry checks too, not mount points (the shims in
+    /// `bin/`): each destination and its source, whose device and inode prepare records (`=DEV:INO:1`: one link).
+    pub file_checks: Vec<(String, String)>,
+    /// A1: the bindings' sockets the entry checks: each destination and its name in the run folder, whose device and
+    /// inode run records once its helpers have made them, just before the engine starts.
+    pub socket_checks: Vec<(String, String)>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -1010,7 +1018,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             _ => None,
         })
         .collect();
-    let checks: Vec<(String, String)> = m
+    let mut checks: Vec<(String, String)> = m
         .by_dest
         .iter()
         .filter_map(|(d, (_, mt))| match mt {
@@ -1022,7 +1030,27 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             _ => None,
         })
         .collect();
-    if !checks.is_empty() {
+    // A1 (QA 2026-11-22): the relays' run-folder files too: bin/ (a mount point) and each shim in it (one link), and
+    // each binding's socket, which run records once its helpers have made it
+    let mut file_checks: Vec<(String, String)> = vec![];
+    let mut socket_checks: Vec<(String, String)> = vec![];
+    if shims.is_some() {
+        checks.push((format!("{run}/bin"), rd("bin")));
+        for f in &files {
+            if let RunFile::File { name, .. } = f {
+                if let Some(n) = name.strip_prefix("bin/") {
+                    file_checks.push((format!("{run}/bin/{n}"), rd(name)));
+                }
+            }
+        }
+    }
+    for (cap, sock) in RELAY_SOCKS {
+        if let Some(b) = p.bindings.iter().find(|b| b.capability == *cap) {
+            socket_checks.push((b.socket.clone().unwrap_or_default(), (*sock).to_string()));
+        }
+    }
+    let any_check = !checks.is_empty() || !socket_checks.is_empty();
+    if any_check {
         m.bind(&rd("binds.txt"), &format!("{run}/binds.txt"), READ, true);
     }
     let mut mounts: Vec<(String, Mount)> = m.by_dest.into_iter().map(|(d, (_, mt))| (d, mt)).collect();
@@ -1189,7 +1217,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     let mut entry = vec![];
     // X1: with pins, the entry checks them first, then runs the rest; without the pipe the last hop then drops what
     // bash adds, as the pipe's last hop does
-    let stat = (!checks.is_empty()).then(|| {
+    let stat = any_check.then(|| {
         let dir = i.paths.env.rsplit_once('/').map_or("", |(d, _)| d);
         format!("{dir}/stat")
     });
@@ -1292,6 +1320,8 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             }
             _ => None,
         },
+        file_checks,
+        socket_checks,
         stop: if has_cap("git.fetch") && l.host_tools.ssh.is_none() {
             Some("git.fetch's broker needs ssh on the host's PATH".into())
         } else if has_cap("nix") && l.host_tools.nix.is_none() {
@@ -1304,7 +1334,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
 
 /// pot's broker as bwrap's `start_bindings` starts it, in the run folder (its sockets relative there): status.relay's
 /// socket and host workmux (`/bin/false` when the host has none) aimed at the caller's pane; git.fetch's socket, host
-/// ssh, each binding's remotes and key file (`~` the caller's home, as bwrap's `expanduser`).
+/// ssh, each binding's remotes and key file (as written: `run` expands its `~` with the caller's `HOME`).
 #[allow(clippy::many_single_char_names)] // t, p, l, v, w: the tools, policy, launch, argv, workmux (bwrap.py's names)
 fn broker_argv(t: &BrokerTools, p: &Policy, l: &Launch, denials: &str) -> Vec<String> {
     let mut v: Vec<String> = [
@@ -1348,7 +1378,8 @@ fn broker_argv(t: &BrokerTools, p: &Policy, l: &Launch, denials: &str) -> Vec<St
                 .and_then(|f| f.as_str())
                 .filter(|f| !f.is_empty())
             {
-                v.extend(["--key-file".to_string(), in_home(l.home.trim_end_matches('/'), f)]);
+                // A2: as written; run expands `~` with the caller's HOME (bwrap's expanduser)
+                v.extend(["--key-file".to_string(), f.to_string()]);
             }
         }
     }
@@ -3412,7 +3443,7 @@ mod tests {
                     "--remote",
                     "github.com/o/*",
                     "--key-file",
-                    "/home/u/.ssh/id_pot"
+                    "~/.ssh/id_pot"
                 ]
                 .map(String::from)
             );
@@ -3445,6 +3476,23 @@ mod tests {
             assert_eq!(plan.stop, None);
             // no fifo for these: their variables are pot's values, not secret
             assert!(!plan.fifo);
+            // A1: the entry checks bin/ (a mount point), each shim (one link) and each socket (run records it)
+            assert!(
+                plan.checks
+                    .contains(&("/run/pot/bin".to_string(), "/r/bin".to_string()))
+            );
+            assert_eq!(
+                plan.file_checks,
+                [
+                    ("/run/pot/bin/workmux".to_string(), "/r/bin/workmux".to_string()),
+                    ("/run/pot/bin/pot-ssh".to_string(), "/r/bin/pot-ssh".to_string())
+                ]
+            );
+            assert_eq!(
+                plan.socket_checks,
+                ["relay.sock", "git.sock", "nix.sock"].map(|n| (format!("/run/pot/{n}"), n.to_string()))
+            );
+            assert!(plan.stat.is_some() && has(&plan, &ro("/r/binds.txt", "/run/pot/binds.txt")));
         }
     }
 
@@ -3482,7 +3530,9 @@ mod tests {
                 .any(|f| matches!(f, RunFile::FreshDir { name } if name == "bin"))
         );
         assert!(
-            !lines(&plan).iter().any(|x| x.contains("/run/pot/bin")),
+            !lines(&plan)
+                .iter()
+                .any(|x| x.contains("/run/pot/bin:") || x.ends_with("/run/pot/bin")),
             "{:#?}",
             lines(&plan)
         );

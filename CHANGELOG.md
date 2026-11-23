@@ -104,6 +104,15 @@ v2.14.0's `sandbox` on).
   `shim` and `shimClosure` (bwrap's names, with `python`; nix needs `socat`); a missing `hostTools.ssh` or `.nix`
   stops `prepare` with bwrap's message; `closure-store` with nix is refused. Siblings and clone mode are still
   refused.
+- **The container backend's relays, after their conformance review (A1-A5):** the run-folder files the relays bind
+  are checked as the pins are: `prepare` records `bin/` and each shim (one link), `run` refuses one changed since
+  and records each socket it checks, and the entry's in-container check stops the command (125) when the engine bound
+  another file there (a socket swapped for a link while the engine starts, which the review won 11 of 15 times under
+  podman and 10 of 10 under docker, never reaches the run now). git.fetch's key file's `~` is the caller's `HOME`, as
+  under bubblewrap. `cleanup` stops a helper only when its program is the config's python or socat or `hostTools.nix`,
+  so a decoy with the same words is left alone. The broker keeps `KRB5CCNAME`, the nix relay `NIX_DAEMON_SOCKET_PATH`,
+  `NIX_STATE_DIR` and `NIX_STORE_DIR`. `prepare --print` stops as `prepare` does when a binding's host program is
+  missing.
 
 ### Changed
 

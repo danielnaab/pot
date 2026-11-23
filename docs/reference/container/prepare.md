@@ -343,6 +343,7 @@ podman
   --tmpfs /home/u:rw,exec,nosuid,nodev,mode=0700,U,notmpcopyup
   --volume [CWD]/relays/hidden.txt:/home/u/.pot-hidden:ro
   --volume [CWD]/relays/bin:/run/pot/bin:ro
+  --volume [CWD]/relays/binds.txt:/run/pot/binds.txt:ro
   --volume [CWD]/relays/denials:/run/pot/denials:ro
   --volume [CWD]/relays/git.sock:/run/pot/git.sock:ro
   --volume /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/bin/pot:/run/pot/launcher:ro
@@ -381,7 +382,7 @@ podman
   --env COLORTERM
   --env NOTES_TOKEN
   --rootfs [CWD]/relays/rootfs:O
-  /usr/bin/env -C /home/u -u HOSTNAME -- notes check --all
+  /nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash --noprofile --norc -c [..] pot-pins /nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/stat /run/pot/binds.txt /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C /home/u -u HOSTNAME -- notes check --all
 # before the engine, run starts pot's broker in the run folder: /nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3 -I -S /nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/broker.py --context review --denials [CWD]/relays/denials --status relay.sock --workmux /nix/store/4w3kq0c3l2v2m1xz8ls6n5p0qk7d9r1a-workmux-0.1.0/bin/workmux --pane %3 --git git.sock --ssh /run/current-system/sw/bin/ssh --remote 'ssh://git@github.com/u/*'
 # before the engine, run starts the nix relay in the run folder: /nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat -lf /dev/null UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600 EXEC:./nix-relay; each connection runs ./nix-relay: exec /nix/store/679vq5k0j0mzl1li55gf3x5awpd9gvl1-nix-2.34.6/bin/nix daemon --stdio --force-untrusted --process-ops --extra-experimental-features 'daemon-trust-override mounted-ssh-store'
 

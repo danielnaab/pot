@@ -4480,7 +4480,7 @@ fn cleanup_stops_live_relays_and_removes_their_sockets() {
     }
 }
 
-/// prepare stops, as bwrap's run does, when a binding's host program is missing from launch.json's hostTools (ssh for
+/// prepare (and `prepare --print`) stops, as bwrap's run does, when a binding's host program is missing from launch.json's hostTools (ssh for
 /// git.fetch, nix for the nix relay); status.relay without workmux runs (bwrap gives its broker /bin/false).
 #[test]
 fn prepare_stops_when_a_bindings_host_program_is_missing() {
@@ -4500,6 +4500,16 @@ fn prepare_stops_when_a_bindings_host_program_is_missing() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{err}");
         assert!(err.contains(said), "{err}");
+        // A5 (QA 2026-11-22): --print stops as prepare does, never showing `--ssh ''`
+        let out = verb(&w.top, &w.run, "prepare").arg("--print").output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "--print: {err}{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(err.contains(said), "--print: {err}");
     }
     let mut l2 = l.clone();
     l2["hostTools"].as_object_mut().unwrap().remove("workmux");
@@ -4525,6 +4535,7 @@ fn prepare_stops_when_a_bindings_host_program_is_missing() {
 /// no exec at all (the broker hands ssh its path); the caller's `SSH_AUTH_SOCK` (git.fetch's `key.agent`) reaches the
 /// broker and the host ssh and workmux it runs (beside run itself, whose environment it is), and never the engine, the
 /// nix relay or the run.
+#[allow(clippy::too_many_lines)] // one traced run, then each exec looked at
 fn relay_strace_case(engine: &str) {
     let Some(program) = engine_program(engine) else {
         return;
@@ -4579,6 +4590,8 @@ fn relay_strace_case(engine: &str) {
         .arg(&w.run)
         .env("REMOTE", &w.remote)
         .env("SSH_AUTH_SOCK", sock_marker)
+        .env("KRB5CCNAME", "FILE:/tmp/pot-relay-krb5-marker")
+        .env("NIX_DAEMON_SOCKET_PATH", "/nix/var/nix/daemon-socket/socket")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -4621,6 +4634,19 @@ fn relay_strace_case(engine: &str) {
             .any(|l| l.contains(sock_marker) && l.contains("broker.py")),
         "the broker lacks SSH_AUTH_SOCK"
     );
+    // A4 (QA 2026-11-22): what bwrap's whole environment gave them, which the lists had dropped
+    assert!(
+        execs
+            .lines()
+            .any(|l| l.contains("broker.py") && l.contains("KRB5CCNAME=FILE:/tmp/pot-relay-krb5-marker")),
+        "the broker lacks KRB5CCNAME"
+    );
+    assert!(
+        execs
+            .lines()
+            .any(|l| l.contains("EXEC:./nix-relay") && l.contains("NIX_DAEMON_SOCKET_PATH=")),
+        "the nix relay lacks NIX_DAEMON_SOCKET_PATH"
+    );
     ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
 }
 
@@ -4632,4 +4658,240 @@ fn podman_no_exec_is_handed_a_relays_value() {
 #[test]
 fn docker_no_exec_is_handed_a_relays_value() {
     relay_strace_case("docker");
+}
+
+/// A1 (QA 2026-11-22): a run-folder file the plan binds for the relays is checked by more than its kind. A shim
+/// replaced by a hard link to another file, a shim given a second hard link, and `bin/` replaced by another folder are
+/// each refused by run before the engine starts; the decoy is never run.
+fn relay_swaps_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(w) = relay_world(
+        &format!("{engine}-relay-swaps"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", "workmux set-window-status swapped; echo ran"],
+        &["status.relay"],
+    ) else {
+        return;
+    };
+    let decoy = w.top.join("decoy");
+    fs::create_dir_all(&decoy).unwrap();
+    let mark = decoy.join("ran");
+    fs::write(
+        decoy.join("workmux"),
+        format!("#!/bin/sh\ntouch {}\n", mark.display()),
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("755")
+        .arg(decoy.join("workmux"))
+        .status()
+        .unwrap();
+    let hard_link = |run: &Path| {
+        fs::hard_link(decoy.join("workmux"), run.join("bin/.w")).unwrap();
+        fs::rename(run.join("bin/.w"), run.join("bin/workmux")).unwrap();
+    };
+    let second_link = |run: &Path| {
+        let _ = fs::remove_file(decoy.join("second"));
+        fs::hard_link(run.join("bin/workmux"), decoy.join("second")).unwrap();
+    };
+    let other_bin = |run: &Path| {
+        let other = run.join(".bin");
+        fs::create_dir_all(&other).unwrap();
+        fs::copy(decoy.join("workmux"), other.join("workmux")).unwrap();
+        fs::remove_dir_all(run.join("bin")).unwrap();
+        fs::rename(&other, run.join("bin")).unwrap();
+    };
+    #[allow(clippy::type_complexity)] // each swap, named
+    let swaps: [(&str, &dyn Fn(&Path)); 3] = [
+        ("a shim swapped for a hard link", &hard_link),
+        ("a shim with a second hard link", &second_link),
+        ("bin/ swapped for another folder", &other_bin),
+    ];
+    for (what, swap) in swaps {
+        prepare(&w.top, &w.run);
+        swap(&w.run);
+        let out = verb(&w.top, &w.run, "run").stdin(Stdio::null()).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(1), "{what}: {err}{said}");
+        assert!(err.contains("run prepare again"), "{what}: {err}");
+        assert!(!said.contains("ran"), "{what}: the command ran");
+        assert!(!mark.exists(), "{what}: the decoy ran");
+        ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+        let _ = fs::remove_file(decoy.join("second"));
+    }
+}
+
+#[test]
+fn podman_a_relays_run_folder_file_swapped_after_prepare_is_refused() {
+    relay_swaps_case("podman");
+}
+
+#[test]
+fn docker_a_relays_run_folder_file_swapped_after_prepare_is_refused() {
+    relay_swaps_case("docker");
+}
+
+/// A1 (QA 2026-11-22), the reviewer's race: once run's broker has made `relay.sock`, a link to a decoy listener is
+/// renamed over it, at a range of delays, while run checks the run folder and the engine binds it. The run never
+/// reaches the decoy: run refuses (the link seen), or the entry's check stops the command (125: the socket in the
+/// container is not the one run recorded), or the swap came too late to matter.
+#[test]
+fn a_socket_swapped_for_a_link_while_run_starts_is_never_used() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let tries: usize = std::env::var("POT_TEST_RACE_TRIES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(10);
+    for engine in ["podman", "docker"] {
+        let Some(program) = engine_program(engine) else {
+            continue;
+        };
+        let Some(w) = relay_world(
+            &format!("{engine}-relay-race"),
+            engine,
+            &program,
+            &["/bin/sh", "-c", "workmux set-window-status raced; echo wm=$?"],
+            &["status.relay"],
+        ) else {
+            continue;
+        };
+        let lsock = w.top.join("decoy.sock");
+        let (mut ran, mut refused, mut checked) = (0, 0, 0);
+        for i in 0..tries {
+            prepare(&w.top, &w.run);
+            let _ = fs::remove_file(&lsock);
+            let listener = std::os::unix::net::UnixListener::bind(&lsock).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let child = verb(&w.top, &w.run, "run")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let target = w.run.join("relay.sock");
+            let start = Instant::now();
+            while !target.symlink_metadata().is_ok_and(|m| m.file_type().is_socket())
+                && start.elapsed() < Duration::from_secs(10)
+            {
+                std::thread::sleep(Duration::from_micros(200));
+            }
+            std::thread::sleep(Duration::from_micros(300 * (i as u64 % 10)));
+            let tmp = w.run.join(".qa-link");
+            let _ = fs::remove_file(&tmp);
+            symlink(&lsock, &tmp).unwrap();
+            let _ = fs::rename(&tmp, &target);
+            // a run whose shim reached the decoy waits for an answer that never comes: stopped after 60 s
+            let mut child = child;
+            let start = Instant::now();
+            while child.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(60) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let hung = child.try_wait().unwrap().is_none();
+            if hung {
+                Command::new("kill").arg(child.id().to_string()).status().unwrap();
+            }
+            let out = child.wait_with_output().unwrap();
+            let (said, err) = (
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+            assert!(
+                listener
+                    .accept()
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
+                    && !hung,
+                "{engine} try {i}: the decoy listener was reached (hung: {hung}): {said}{err}"
+            );
+            match out.status.code() {
+                Some(0) => ran += 1,
+                Some(125) => {
+                    assert!(
+                        err.contains("not the binds prepare recorded"),
+                        "{engine} try {i}: {err}"
+                    );
+                    assert!(!said.contains("wm="), "{engine} try {i}: the command ran");
+                    checked += 1;
+                }
+                _ => {
+                    assert!(!said.contains("wm="), "{engine} try {i}: the command ran: {err}");
+                    refused += 1;
+                }
+            }
+            ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+        }
+        eprintln!(
+            "{engine}: {tries} tries: {ran} ran, {refused} refused by run, {checked} stopped by the entry's check"
+        );
+    }
+}
+
+/// A3 (QA 2026-11-22): cleanup stops a helper only when its program is the config's (python for the broker and the
+/// proxy, socat for the relay, hostTools.nix for a relay daemon), never a decoy in the run folder whose arguments hold
+/// the same words. The control, the run's own broker, is stopped.
+#[test]
+fn cleanup_leaves_a_decoy_with_a_helpers_words() {
+    let Some(w) = relay_world("relay-decoys", "podman", "podman", &["true"], RELAY_CAPS) else {
+        return;
+    };
+    prepare(&w.top, &w.run);
+    let cenv: serde_json::Value =
+        serde_json::from_slice(&fs::read(w.run.join("container.env")).unwrap()).unwrap();
+    let broker: Vec<String> = cenv["broker"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap().to_string())
+        .collect();
+    let denials = format!("{}/denials", fs::canonicalize(&w.run).unwrap().display());
+    let sh = which("sh");
+    let script = format!("{} 30; :", coreutils("sleep"));
+    let decoys: Vec<Vec<String>> = vec![
+        vec!["daemon".into(), "--stdio".into(), "--force-untrusted".into()],
+        vec!["relay.sock".into(), "--denials".into(), denials.clone()],
+        vec![
+            "UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600".into(),
+            "EXEC:./nix-relay".into(),
+        ],
+        vec!["proxy.sock".into(), "--denials".into(), denials],
+    ];
+    let mut started = vec![];
+    for d in &decoys {
+        started.push(
+            Command::new(&sh)
+                .arg("-c")
+                .arg(&script)
+                .args(d)
+                .current_dir(&w.run)
+                .stdin(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+    }
+    let mut control = Command::new(&broker[0])
+        .args(&broker[1..])
+        .current_dir(&w.run)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the broker's socket", || w.run.join("relay.sock").exists());
+    ok(&verb(&w.top, &w.run, "cleanup").output().unwrap());
+    let start = Instant::now();
+    while control.try_wait().unwrap().is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the run's broker still runs"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for (d, mut c) in decoys.iter().zip(started) {
+        let alive = c.try_wait().unwrap().is_none();
+        let _ = c.kill();
+        let _ = c.wait();
+        assert!(alive, "the decoy {d:?} was stopped");
+    }
 }

@@ -373,11 +373,13 @@ reads it.
 
 **`cleanup`** (audit N6) removes, in order:
 
-- The run's helpers, if they still run, each a process whose working folder is the run folder and whose arguments
-  are a helper's (`lifecycle::names_helper`): the proxy (`proxy.sock` and the run's own `--denials RUNDIR/denials`)
-  and the broker (`relay.sock` or `git.sock` and the same `--denials`), which a `run` killed with SIGKILL leaves for
-  up to a second; the nix relay (socat on `nix.sock` running `./nix-relay`) and a daemon it started for a connection
-  (`daemon --stdio --force-untrusted`), which never stop by themselves. Each is stopped with SIGTERM, then SIGKILL
+- The run's helpers, if they still run, each a process whose working folder is the run folder, whose arguments are a
+  helper's and whose program (`/proc/PID/exe`) is that helper's real file (`lifecycle::helper_program`; A3, QA
+  2026-11-22: a decoy with the same words is left alone): the proxy (`proxy.sock` and the run's own `--denials
+  RUNDIR/denials`) and the broker (`relay.sock` or `git.sock` and the same `--denials`), the config's python, which a
+  `run` killed with SIGKILL leaves for up to a second; the nix relay (socat on `nix.sock` running `./nix-relay`), the
+  config's socat, and a daemon it started for a connection (`daemon --stdio --force-untrusted`), `hostTools.nix`,
+  which never stop by themselves. Each is stopped with SIGTERM, then SIGKILL
   after 2 s; one that would not stop is named.
 - The container, through the engine (podman's when the run's store is not empty; docker's by the run's name),
   waiting for the engine's processes as `run` does. The engine is never handed a linked path (R2). When
@@ -500,27 +502,44 @@ The `status.relay`, `git.fetch` and `nix` bindings are carried out as bwrap.py c
   environment of its own and its stderr in `bindings.log` (made afresh, never through a link):
   - **pot's broker** (`status.relay`, `git.fetch`): `PYTHON -I -S BROKER --context CTX --denials RUNDIR/denials
     [--status relay.sock --workmux WORKMUX [--pane PANE]] [--git git.sock --ssh SSH --remote PATTERN… [--key-file
-    FILE]]`, bwrap's command (`/bin/false` as workmux when the host has none; a key file's `~` is the caller's home).
+    FILE]]`, bwrap's command (`/bin/false` as workmux when the host has none; a key file's `~` is the caller's `HOME`,
+    expanded by `run`, as bwrap's `expanduser` and the credential bindings take it: A2).
     It relays only `set-window-status` and `register-agent` to host workmux, on the pane that launched the run, and
     brokers only `git-upload-pack` to a bound remote, through host ssh with `BatchMode` (and the key file); a refused
     fetch is recorded in `denials`. Its environment is the proxy's list (`PATH HOME USER LOGNAME LANG TMUX TMUX_TMPDIR
-    XDG_RUNTIME_DIR`) and `SSH_AUTH_SOCK` (for `key.agent`), nothing else of the caller's (bwrap passes the whole
-    environment). It stops itself once `run` is gone (`broker.py`'s `orphaned`).
+    XDG_RUNTIME_DIR`), `SSH_AUTH_SOCK` (for `key.agent`) and `KRB5CCNAME` (GSSAPI ssh), nothing else of the
+    caller's (bwrap passes the whole environment; what is dropped fails narrower: ssh lacks that credential). It stops itself once `run` is gone (`broker.py`'s `orphaned`).
   - **the nix relay** (`nix`): `SOCAT -lf /dev/null UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600 EXEC:./nix-relay`,
     bwrap's, where `nix-relay` (written by `run`, mode 0500, never through a link) is `exec NIX daemon --stdio
     --force-untrusted --process-ops --extra-experimental-features 'daemon-trust-override mounted-ssh-store'`: the run
     is an untrusted client of the host's daemon (tested: `nix store info` says `Trusted: 0`), and builds and adds to
     the store through it. Its environment is `PATH HOME USER LOGNAME LANG TMPDIR XDG_RUNTIME_DIR XDG_CONFIG_HOME
-    XDG_CONFIG_DIRS XDG_CACHE_HOME NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES NIX_CONFIG`. It does not stop by itself
+    XDG_CONFIG_DIRS XDG_CACHE_HOME NIX_REMOTE NIX_CONF_DIR NIX_USER_CONF_FILES NIX_CONFIG NIX_DAEMON_SOCKET_PATH
+    NIX_STATE_DIR NIX_STORE_DIR` (A4: what reaches the caller's daemon and store). It does not stop by itself
     (socat has no parent-death option, and a backend without `unsafe` can't set one): `run` stops it, and `cleanup`
     after a SIGKILL of `run`, as bwrap's `cleanup` would have to.
 
   Each socket is relative to the run folder (a run folder's path may be longer than `sun_path`'s 108 bytes). Whatever
   is at a socket's or the script's name is removed first (a link is removed, never followed; a folder refuses); `run`
-  waits up to 5 s for every socket, else refuses with `bindings.log`'s last line. Just before the engine it checks that
-  each is a socket (`lstat`). A missing `hostTools.ssh` (git.fetch) or `hostTools.nix` stops `prepare` with bwrap's
+  waits up to 5 s for every socket, else refuses with `bindings.log`'s last line. A missing `hostTools.ssh` (git.fetch) or `hostTools.nix` stops `prepare` with bwrap's
   message (`git.fetch's broker needs ssh on the host's PATH`, `the nix capability's relay needs nix on the host's
-  PATH`); a missing workmux does not.
+  PATH`); a missing workmux does not. `prepare --print` stops so too (A5).
+- **The run-folder files, checked as the pins are** (A1, QA 2026-11-22). The engine binds `bin/` and each socket by
+  path, so a process that can write the run folder (the caller's uid: a process of the caller's, never the run, which
+  can't write pot's state) could hand the run another file between a check and the engine's mount: the review won
+  that race 11 of 15 times under podman and 10 of 10 under docker with a socket swapped for a link, before these
+  checks. Now: `prepare` records `bin/`'s and each shim's device, inode, size and status-change time, each shim with
+  one link, and `run` refuses one that changed before the engine starts (`the run folder changed since prepare: …;
+  run prepare again`: a shim replaced by a hard link, a second hard link, `bin/` replaced). Just before the engine,
+  `run` checks that each socket is a socket (`lstat`, never through a link) and appends its device and inode to
+  `binds.txt`. The entry's check ([Write access](#write-access): `PIN_CHECK`) then compares, inside the container and
+  before the command, `/run/pot/bin` and each `/run/pot/*.sock` (each a mount point of the recorded inode) and each
+  shim in `/run/pot/bin` (`=DEV:INO:1`: the recorded inode with one link), and stops the run (125, naming each) on a
+  mismatch: the command never reaches a socket or shim swapped in after `run`'s check (tested: 10 tries of the race
+  under each engine, `a_socket_swapped_for_a_link_while_run_starts_is_never_used`, the decoy never reached). What
+  stays out of reach, as under bubblewrap: a writer of the run folder that replaces a socket with another socket
+  before `run`'s check, rewrites a shim in place after it, or rewrites `binds.txt` itself; such a writer is the
+  caller.
 - **The end.** When the command ends (and on every early return), `run` clears the caller's pane when it relayed to
   workmux (`WORKMUX set-window-status clear` with `TMUX_PANE`, bwrap's), stops the broker and the relay (SIGTERM, then
   SIGKILL after 2 s), stops a relay daemon still serving a connection, and removes the sockets and `nix-relay`. A
