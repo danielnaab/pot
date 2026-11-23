@@ -110,6 +110,35 @@ by_hand() {
 }
 commit() { git_ add -A && git_ commit -q --allow-empty -m "${1:-commit}"; }
 
+# The container backend (pot phase 2) under the engines a test is given: POT_TEST_PODMAN and POT_TEST_DOCKER name the
+# programs (rootless podman; a docker the caller may use), as backends/container/tests/run.rs takes them. engines:
+# "ENGINE PROGRAM" a line, for each that is set.
+engines() {
+  [ -z "${POT_TEST_PODMAN:-}" ] || echo "podman $POT_TEST_PODMAN"
+  [ -z "${POT_TEST_DOCKER:-}" ] || echo "docker $POT_TEST_DOCKER"
+}
+# container_root NAME ROOT ENGINE PROGRAM: the built root ROOT (a link to its package) offering the container backend
+# too, as `--backend container` (no root offers it yet: choosing it from a root is a later step). pot-container is
+# built from this checkout; its --config is ROOT's own bubblewrap config less bwrap's own keys, plus the engine, core's
+# pins.py and the shims' closure (python's and pot's). Writes $work/NAME.json (ROOT's manifest plus backends.container)
+# and $work/NAME-pot (ROOT's pot with that manifest, so a sibling's host entry is it too).
+container_root() {
+  local name=$1 root=$2 engine=$3 program=$4 pc m bprog bcfg src python
+  pc=$(nix build --no-link --print-out-paths "path:$pot#pot-container")/bin/pot-container
+  m=$(grep -o '/nix/store/[^ ]*-pot-root-[^ ]*\.json' "$(readlink -f "$root/bin/pot")" | head -1)
+  bprog=$(jq -r '.backends.bubblewrap.program' "$m")
+  bcfg=$(grep -o -- '--config [^ ]*' "$bprog" | cut -d' ' -f2)
+  src=$(dirname "$(jq -r .broker "$bcfg")") && python=$(jq -r .python "$bcfg")
+  nix-store -qR "$(dirname "$(dirname "$python")")" "$src" > "$work/$name-shim.txt"
+  jq --arg e "$engine" --arg p "$program" --arg sc "$work/$name-shim.txt" --arg pins "$src/pins.py" \
+    'del(.bwrap, .bpf, .netwrap, .fd, .find, .gitClosure) + {engine: $e, ($e): $p, shimClosure: $sc, pins: $pins}' \
+    "$bcfg" > "$work/$name-cfg.json"
+  printf '#!/bin/sh\nexec %s --config %s "$@"\n' "$pc" "$work/$name-cfg.json" > "$work/$name-backend"
+  chmod +x "$work/$name-backend"
+  jq --arg p "$work/$name-backend" '.backends.container = {kind: "container", program: $p}' "$m" > "$work/$name.json"
+  sed "s|$m|$work/$name.json|" "$(readlink -f "$root/bin/pot")" > "$work/$name-pot" && chmod +x "$work/$name-pot"
+}
+
 # The contracts' schemas are JSON Schema 2020-12, and their golden fixtures (what readers test against) validate.
 # What pot really prints is validated where it prints it: pot, dispatch, sibling, pi.
 sec_contracts() {
@@ -2607,9 +2636,64 @@ EOF
   refused "sibling: F2, a read wrapper whose kit here writes, in a root repository" bash -c "cd '$work/nrr' && '$bw' --dev-bind / / --bind '$work/nlaunch' \"\$HOME/.config/pot\" -- '$work/nct/bin/nk-chk' rr"
   expect "is refused, as work refuses a root" holds "is a root"
   refuse "nothing ran" holds "args=rr"
+  # the container backend (pot phase 2): the same siblings from a run in a container, under each engine given
+  local eng prog
+  while read -r eng prog; do sibling_container "$eng" "$prog"; done < <(engines)
+  [ -n "$(engines)" ] || echo "skip sibling: the container backend (POT_TEST_PODMAN and POT_TEST_DOCKER are unset)"
   expect "sibling: runs/1, every log line and record validates (siblings, wrappers, hooks)" runs_valid "$work/nstate" nb_
   expect "sibling: policy.json/1, every policy.json validates (siblings, wrappers, hooks)" policies_valid "$work/nstate"
   expect "sibling: launch.json/1, every launch.json validates (siblings, hooks)" launches_valid "$work/nstate"
+}
+
+# sibling_container ENGINE PROGRAM: sec_sibling's siblings from a run under the container backend (its workspace $c, its
+# root $work/nr): each sibling is started by the host under its own grant, and runs under the container backend too
+# (its caller's), never in the caller's container.
+sibling_container() {
+  local e=$1 st n
+  container_root "nc-$e" "$work/nr" "$e" "$2"
+  # shellcheck disable=SC2317
+  cb_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok STAND=standing WIDE_TOK=w "$work/nc-$e-pot" --backend container "$@"; }
+  ran "sibling ($e): a wrapped command inside a container run" cb_ agent -c 'nk-chk a b'
+  expect "runs, in its own run" holds "nk-chk POT=work parent=- args=a b"
+  expect "read-only, as its access says" has "nk-chk: read-only"
+  expect "without the caller's network, variable or token, or the standing reach" has "nk-chk proxy=none tok=none stand=none"
+  n=$(grep -l '"via":"sibling"' "$work"/nstate/runs/*/log.jsonl | xargs ls -t | head -1)
+  expect "its record names the run that asked, and the container backend (its caller's)" \
+    jq -e 'select(.ev == "start") | select(.by == "host" and .backend == "container" and .invoker == "run" and .depth == 1 and (.caller | test("^[0-9a-f]{4}$")))' "$n"
+  expect "and its caller ran under the container backend too" \
+    jq -e 'select(.ev == "start") | select(.backend == "container")' "$work/nstate/runs/$(jq -r 'select(.ev == "start") | .caller' "$n")/log.jsonl"
+  cb_ agent -c 'nk-chk fail' >/dev/null 2>&1 && st=0 || st=$?
+  expect "sibling ($e): its exit code, 7, comes back" test "$st" = 7
+  ran "sibling ($e): its stdin and stdout" cb_ agent -c 'echo piped | nk-chk cat; nk-chk cat < notes.md'
+  expect "a pipe passes" has "piped"
+  expect "a file is piped by the client" holds "data"
+  ran "sibling ($e): a directory as stdin" cb_ agent -c 'nk-chk fd0 < .'
+  expect "gets /dev/null for it" has "nk-chk fd0: not a pipe"
+  ran "sibling ($e): a sibling with network" cb_ agent -c 'nk-net 1 2'
+  expect "reaches its own host (the port is closed: 502)" has "nk-net 1 502"
+  expect "and is refused, by its own proxy, a host only the caller reaches" has "nk-net 2 403"
+  refused "sibling ($e): a command that needs reach the caller lacks" cb_ agent -c 'nk-wide'
+  expect "is refused at start" holds "pot (work): nk-wide needs WIDE_TOK, which this run (agent) lacks: run it on the host (just wide)"
+  # shellcheck disable=SC2016 # the run's own $?
+  out=$( (sleep 8; printf '\003'; sleep 5) | script -qec "env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=x $work/nc-$e-pot --backend container agent -c 'nk-chk sleep 3121; echo client-exit=\$?'" /dev/null 2>&1 | tr -d '\r')
+  pass "sibling ($e): ^C at the terminal"
+  expect "reaches the sibling" holds "nk-chk: INT"
+  expect "whose status comes back" holds "client-exit=130"
+  # shellcheck disable=SC2016 # the run's own variables
+  ran "sibling ($e): the client's SIGTERM (a tool timeout)" cb_ agent -c 'nk-chk sleep 3122 & sleep 5; kill $!; wait $!; echo "client-exit=$?"; sleep 5'
+  expect "the client exits 143" has "client-exit=143"
+  expect "and the sibling is stopped" test "$(pgrep -fc 'sleep 3122' || true)" = 0
+  ran "sibling ($e): the caller's run ends" cb_ agent -c 'nk-chk sleep 3123 & sleep 5; echo leaving'
+  expect "stops the sibling with it" test "$(pgrep -fc 'sleep 3123' || true)" = 0
+  echo container >> notes.md
+  ran "sibling ($e): git commit -a inside a container run" cb_ agent -c 'git commit -q -a -m container'
+  expect "runs the hook command as a sibling, on the caller's index (hookEnv)" holds "nk-hook POT=work index=$c/.git/index.lock staged=notes.md"
+  ran "sibling ($e): the runs' folders" bash -c "ls -d '$work'/nstate/runs/*/enginestore '$work'/nstate/runs/*/children.sock '$work'/nstate/trees/* 2>/dev/null || true"
+  expect "hold no engine store, children socket or tree of slots: each run was cleaned up by its own backend" test -z "$out"
+  if [ "$e" = docker ]; then
+    ran "sibling ($e): docker's containers" "$2" ps -a --filter name=pot- --format '{{.Names}}'
+    expect "none of pot's is left" test -z "$out"
+  fi
 }
 
 # pi (kits/pi.nix): a root with the pi kit, its program a stub that reports what it sees. The run's pi

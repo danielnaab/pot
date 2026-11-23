@@ -246,6 +246,13 @@ fn print_plan(engine: &str, p: &Plan) -> String {
             words(broker)
         );
     }
+    if let Some(sib) = &p.siblings {
+        let _ = writeln!(
+            out,
+            "# before the engine, run starts the run's children broker in the run folder, with the caller's environment: {}",
+            words(sib)
+        );
+    }
     if let (Some(relay), Some(script)) = (&p.nix_relay, &p.nix_script) {
         let _ = writeln!(
             out,
@@ -348,6 +355,7 @@ const RUNTIME: &[&str] = &[
     "git.sock",
     "nix.sock",
     "nix-relay",
+    "children.sock",
 ];
 
 /// A workspace path the plan binds, as `prepare` found it: `run` checks it again just before the engine starts.
@@ -585,7 +593,7 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
     let env = serde_json::json!({ "keep": p.engine_keep, "set": set, "piped": p.piped, "own": own, "defaults": p.defaults,
         "fifo": p.fifo, "proxy": p.proxy, "credentials": p.creds, "hostless": p.hostless, "secretsAt": p.secrets_at,
         "pins": pins, "broker": p.broker, "nixRelay": p.nix_relay, "nixScript": p.nix_script, "clear": p.clear,
-        "ownIds": own_ids, "socketChecks": p.socket_checks });
+        "ownIds": own_ids, "socketChecks": p.socket_checks, "siblings": p.siblings });
     write_new(
         &rundir.join("container.env"),
         format!("{env}\n").as_bytes(),
@@ -639,6 +647,14 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
     if plan.broker.is_some() {
         if let Some(t) = cfg.broker_tools().map_err(|m| Refusal::new(&p.context, m))? {
             gaps.extend(render::broker_gaps(&t, &plan, &host::RealHost));
+        }
+    }
+    // v2.20.0: the children broker, siblings.py beside the config's broker.py, a file
+    if let Some(sib) = plan.siblings.as_ref().and_then(|a| a.get(3)) {
+        if !fs::metadata(sib).is_ok_and(|m| m.is_file()) {
+            gaps.push(format!(
+                "the children broker {sib} (siblings.py, beside the config's broker: it must be a file)"
+            ));
         }
     }
     if let (Some(relay), Some(socat)) = (&plan.nix_relay, &cfg.socat) {
@@ -960,6 +976,9 @@ struct EngineEnv {
     /// A1: the bindings' sockets the entry checks (destination, name in the run folder), recorded by run.
     #[serde(default, rename = "socketChecks")]
     socket_checks: Vec<(String, String)>,
+    /// v2.20.0: the run's children broker (siblings.py), started in the run folder before the engine.
+    #[serde(default)]
+    siblings: Option<Vec<String>>,
 }
 
 /// Write access, just before the engine starts: each pin is the inode prepare recorded, of its kind, no link, and a
@@ -1402,6 +1421,67 @@ fn start_bindings(abs: &Path, env: &EngineEnv, helpers: &mut Helpers) -> Result<
     ))
 }
 
+/// v2.20.0, bwrap's `start_bindings`: the run's children broker (siblings.py), in the run folder, its socket
+/// `children.sock` (whatever is there removed first, never a folder), its stderr appended to `bindings.log` (never through
+/// a link), and the caller's whole environment, as bwrap's: each sibling is a host start of pot (`hostPot`), which reads
+/// the caller's variables as `pot CONTEXT KIT:CMD` on the host would (its own bindings' values among them). The engine
+/// never sees them. It stops itself once `run` is gone (`orphaned`), stopping every sibling first.
+fn start_siblings(abs: &Path, argv: &[String], helpers: &mut Helpers) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
+    let sock = abs.join(render::CHILDREN_SOCK);
+    helpers.files.push(sock.clone());
+    helpers.rundir = Some(abs.to_path_buf());
+    make_room(&sock)?;
+    let log_path = abs.join("bindings.log");
+    let log = match log_path.symlink_metadata() {
+        Ok(m) if m.file_type().is_file() => fs::OpenOptions::new()
+            .append(true)
+            .custom_flags(libc_nofollow())
+            .open(&log_path)
+            .map_err(|e| format!("{}: {e}", log_path.display()))?,
+        _ => fresh_log(&log_path)?,
+    };
+    let child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(abs)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log)
+        .spawn()
+        .map_err(|e| format!("can't start the run's children broker ({}): {e}", argv[0]))?;
+    helpers.siblings = Some(child);
+    let start = std::time::Instant::now();
+    let up = || sock.symlink_metadata().is_ok_and(|m| m.file_type().is_socket());
+    while !up() && start.elapsed() < std::time::Duration::from_secs(5) {
+        if helpers
+            .siblings
+            .as_mut()
+            .is_some_and(|c| matches!(c.try_wait(), Ok(Some(_))))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if up() {
+        return Ok(());
+    }
+    let said = read_own(&log_path).unwrap_or_default();
+    let said = String::from_utf8_lossy(&said);
+    Err(format!(
+        "the run's children broker did not start: {}",
+        said.lines().last().unwrap_or("(nothing in bindings.log)")
+    ))
+}
+
+/// `O_NOFOLLOW`, as `OpenOptionsExt::custom_flags` takes it.
+fn libc_nofollow() -> i32 {
+    i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).unwrap_or(0)
+}
+
+/// How long the children broker has to stop every sibling (each SIGTERM, up to 10 s, then SIGKILL) and exit: bwrap's
+/// `stop_helpers` waits 12 s for it.
+const SIBLINGS_GRACE: std::time::Duration = std::time::Duration::from_secs(12);
+
 /// SIGTERM, then SIGKILL after 2 s (bwrap's `stop_helpers`); the child is reaped.
 fn stop_process(child: &mut std::process::Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
@@ -1440,6 +1520,8 @@ struct Helpers {
     rundir: Option<PathBuf>,
     /// The programs the helpers run (A3).
     exes: HelperExes,
+    /// v2.20.0: the run's children broker, which gets `SIBLINGS_GRACE` to stop its siblings.
+    siblings: Option<std::process::Child>,
 }
 
 impl Drop for Helpers {
@@ -1459,7 +1541,7 @@ impl Drop for Helpers {
                 .stderr(std::process::Stdio::null())
                 .status();
         }
-        for c in &mut self.procs {
+        for c in self.procs.iter_mut().chain(self.siblings.as_mut()) {
             if let Some(pid) = i32::try_from(c.id())
                 .ok()
                 .and_then(rustix::process::Pid::from_raw)
@@ -1469,6 +1551,15 @@ impl Drop for Helpers {
         }
         for c in &mut self.procs {
             stop_process(c);
+        }
+        // the children broker stops each sibling (SIGTERM to its session, again each second, SIGKILL after 10 s)
+        if let Some(c) = &mut self.siblings {
+            let start = std::time::Instant::now();
+            while start.elapsed() < SIBLINGS_GRACE && matches!(c.try_wait(), Ok(None)) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let _ = c.kill();
+            let _ = c.wait();
         }
         if let Some(r) = &self.rundir {
             for f in stop_helpers(r, &self.exes) {
@@ -1543,6 +1634,7 @@ fn runtime_paths(
     proxy: bool,
     socks: &[&str],
     secrets: Option<&[String]>,
+    siblings: bool,
 ) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
     let mut bad = vec![];
@@ -1582,6 +1674,9 @@ fn runtime_paths(
     }
     for s in socks {
         check(s, &|t| t.is_socket(), &mut bad);
+    }
+    if siblings {
+        check(render::CHILDREN_SOCK, &|t| t.is_socket(), &mut bad);
     }
     if bad.is_empty() {
         Ok(())
@@ -1756,6 +1851,9 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         helpers.procs.push(start_proxy(&abs, proxy).map_err(refuse)?);
     }
     start_bindings(&abs, &env, &mut helpers).map_err(refuse)?;
+    if let Some(sib) = &env.siblings {
+        start_siblings(&abs, sib, &mut helpers).map_err(refuse)?;
+    }
     let secret_names = (!bindings::via_file(&env.credentials).is_empty()).then(|| {
         helpers.secrets = Some(abs.join("secrets"));
         secret_files.iter().map(|f| f.0.clone()).collect::<Vec<_>>()
@@ -1771,6 +1869,7 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         env.proxy.is_some(),
         &binding_socks(&env),
         secret_names.as_deref(),
+        env.siblings.is_some(),
     )
     .map_err(refuse)?;
     pins_unchanged(&env.pins, "the workspace").map_err(refuse)?;
@@ -2094,6 +2193,13 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
             failed.push(format!("{}: {e}", rd(n).display()));
         }
     }
+    // v2.20.0, bwrap's cleanup: the tree's sibling slots (pot's state, trees/ and this run folder's name), once its top run
+    // has ended (its broker stopped every sibling first); a sibling's leaves them to its top run
+    if let Some(t) = tree_slots(&abs) {
+        if let Err(e) = remove_tree(&t) {
+            failed.push(format!("{}: {e}", t.display()));
+        }
+    }
     // pot's launcher link, only inside a real potcfg folder (never through a link in its place)
     if is_real_dir(&rd("potcfg")) {
         let l = rd("potcfg").join("launcher");
@@ -2121,6 +2227,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "git.sock",
         "nix.sock",
         "nix-relay",
+        "children.sock",
         "mcp.json",
         "placeholders.json",
         "sealed.json",
@@ -2155,6 +2262,17 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
             format!("cleanup could not remove: {}", failed.join("; ")),
         ))
     }
+}
+
+/// The tree's sibling slots a top run's cleanup removes (bwrap's): pot's state (the run folder's grandparent), `trees/`,
+/// and the run folder's name; none for a sibling (`siblingOf` in launch.json), or when launch.json can't be read.
+fn tree_slots(abs: &Path) -> Option<PathBuf> {
+    let l: serde_json::Value = serde_json::from_slice(&read_own(&abs.join("launch.json")).ok()?).ok()?;
+    if !l.get("siblingOf").is_none_or(serde_json::Value::is_null) {
+        return None;
+    }
+    let state = abs.parent()?.parent()?;
+    Some(state.join("trees").join(abs.file_name()?))
 }
 
 /// A3 (QA 2026-11-22): the programs pot's helpers run, as their real files: the config's python (the proxy, the

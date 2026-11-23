@@ -2504,6 +2504,10 @@ def sibling_entry(host, root, flags):
     others = [t for t in tops if t != src]
     fl = {"commandKit": row["kit"], "commandSlot": row["slot"], "wrapped": True, "noInclude": True,
           "mode": caller.get("mode") or "in-place", "repo": others, "wsFacts": plaunch.get("wsFacts")}
+    # pot phase 2: the sibling runs under its caller's backend (a container run's sibling is a container run of its
+    # own); the root's default when the caller names none
+    if (caller.get("backend") or {}).get("name"):
+        fl["backend"] = caller["backend"]["name"]
     if fl["wsFacts"] is None:
         raise C.Refusal(f"pot ({ctxn}): {row['command']}: the caller's start recorded no workspace facts: run it on the host")
     if row.get("hook"):

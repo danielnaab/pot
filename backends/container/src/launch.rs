@@ -46,6 +46,16 @@ pub struct Launch {
     /// 0.3.0, with write access in place: each workspace's pins, as pot's core resolved them at the run's start.
     #[serde(default)]
     pub pins: Option<Vec<WsPins>>,
+    /// v2.20.0: the host's pot as a sibling's host entry runs it (`pot run --sibling`), the children broker's
+    /// `--entry`, when a children row has `how: sibling`. `None` (no root manifest): no children broker, as bwrap's.
+    #[serde(default)]
+    pub host_pot: Option<Vec<String>>,
+    /// The top run's folder: the siblings' slots are under pot's state, named after it.
+    #[serde(default)]
+    pub tree: Option<String>,
+    /// A sibling's or a pre-commit hook's `GIT_INDEX_FILE` and `GIT_PREFIX`, added to the run's environment last.
+    #[serde(default)]
+    pub hook_env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// One workspace's pins (launch.json/1 `pins`): read strictly, since a key this backend does not know could narrow

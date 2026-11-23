@@ -9,6 +9,11 @@ v2.14.0's `sandbox` on).
 
 ### Added
 
+- **The container backend starts siblings** ([container.md](docs/reference/container.md#siblings)): with a sibling row
+  and `hostPot`, `run` starts pot's children broker (`siblings.py`) on the host, bound at `/run/pot/children.sock` and
+  checked by the entry; the broker stops each sibling at the run's end (12 s), and `cleanup` stops a broker left and
+  removes the top run's tree of slots. launch.json's `hookEnv` is set last, as bwrap's. A sibling runs under its
+  caller's backend.
 - **The container backend, a first slice** (draft, [docs/reference/container.md](docs/reference/container.md)):
   `pot-container`, pot's first Rust code (`packages.pot-container`). It reads policy.json/1 strictly, probes podman
   or docker, and renders a run as one `podman run` / `docker run`, refusing what it does not carry out yet; no

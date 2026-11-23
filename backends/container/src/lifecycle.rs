@@ -246,7 +246,12 @@ pub fn helper_program(cmdline: &[u8], rundir: &str) -> Option<Helper> {
         && args
             .windows(2)
             .any(|w| w[0] == b"--denials" && w[1] == denials.as_bytes());
-    if names_proxy(cmdline, rundir) || broker {
+    // v2.20.0: the children broker (siblings.py): its socket and the run's own `--run RUNDIR`
+    let children = has(crate::render::CHILDREN_SOCK)
+        && args
+            .windows(2)
+            .any(|w| w[0] == b"--run" && w[1] == rundir.trim_end_matches('/').as_bytes());
+    if names_proxy(cmdline, rundir) || broker || children {
         Some(Helper::Python)
     } else if has("UNIX-LISTEN:nix.sock,fork,unlink-early,mode=600") && has("EXEC:./nix-relay") {
         Some(Helper::Socat)

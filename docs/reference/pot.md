@@ -907,7 +907,8 @@ a hook command, its two git variables, with its standard input, output and error
    own policy. A start **8** deep is refused: `pot (work): C: this run is 8 starts deep (pot's cap): run it on the
    host`.
 3. It runs as any wrapped start does: quiet, logged with `via: "sibling"`, its `caller` and its `depth`, in a run
-   folder of its own; `pot runs --all` lists it.
+   folder of its own; `pot runs --all` lists it. It runs under the backend the run that asked ran under (its
+   `backend.name`): a container run's sibling is a container run of its own (unreleased).
 
 - **The working directory** is the caller's, when it is inside a repository of the run (and on the host still
   inside it, links resolved); otherwise that repository's top.

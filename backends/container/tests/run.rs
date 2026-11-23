@@ -4895,3 +4895,231 @@ fn cleanup_leaves_a_decoy_with_a_helpers_words() {
         assert!(alive, "the decoy {d:?} was stopped");
     }
 }
+
+/// The siblings test world: `relay_world` with no binding (its config names python, pot's broker and shim), python's
+/// closure in the run's, the work-siblings fixture's children table (a sibling row) and launch.json's `hostPot` a fake host
+/// entry (`fake-entry.py`): it reads the broker's request from its fd, logs it (and any signal it gets) to `entry.log`,
+/// then, by its first argument, prints and exits 7 (`ok`), prints what it reads on stdin (`cat`), or sleeps (`sleep`).
+/// The run's client (`CLIENT`) asks the run's broker as pot's in-run client does: one JSON line, its fds 0-2 by
+/// `SCM_RIGHTS`, then the answer line.
+fn sibling_world(
+    name: &str,
+    engine: &str,
+    program: &str,
+    script: &str,
+) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let python = find("python3")?;
+    let w = relay_world(name, engine, program, &["/bin/sh", "-c", script], &[])?;
+    let (top, run) = (w.top, w.run);
+    let (entry, log) = (top.join("fake-entry.py"), top.join("entry.log"));
+    fs::write(
+        &entry,
+        r#"import json, os, signal, sys, time
+log, fd = sys.argv[1], int(sys.argv[4])
+def note(s):
+    with open(log, "a") as f:
+        f.write(s + "\n")
+def on(sig, _):
+    note(f"SIG {sig}")
+    sys.exit(128 + sig)
+signal.signal(signal.SIGTERM, on)
+signal.signal(signal.SIGINT, on)
+data = b""
+while True:
+    b = os.read(fd, 65536)
+    if not b:
+        break
+    data += b
+req = json.loads(data)
+note(json.dumps({"pid": os.getpid(), "sid": os.getsid(0), "req": req}))
+mode = req["args"][0]
+if mode == "ok":
+    print("sibling-ran", *req["args"], flush=True)
+    sys.exit(7)
+if mode == "cat":
+    print("sibling-read", sys.stdin.readline().strip(), flush=True)
+    sys.exit(0)
+print("sibling-sleeping", flush=True)
+time.sleep(60)
+"#,
+    )
+    .unwrap();
+    let path = run.join("policy.json");
+    let mut p: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let fx: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/fixtures/policy-1/work-siblings.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    p["children"] = fx["children"].clone();
+    fs::write(&path, p.to_string()).unwrap();
+    let lpath = run.join("launch.json");
+    let mut l: serde_json::Value = serde_json::from_str(&fs::read_to_string(&lpath).unwrap()).unwrap();
+    let closure: Vec<String> = String::from_utf8(closure_of(&[&python]))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    l["closure"] = closure.into();
+    l["hostPot"] = serde_json::json!([python, "-I", "-S", entry, log]);
+    fs::write(&lpath, l.to_string()).unwrap();
+    Some((top, run, log))
+}
+
+/// The run's client for a sibling, as pot's in-run client asks (`python3 -I -c CLIENT ARGS`).
+const CLIENT: &str = r#"import json, os, socket, sys
+key = [k for k, r in json.load(open("/run/pot/policy.json"))["children"].items() if r.get("how") == "sibling"][0]
+s = socket.socket(socket.AF_UNIX)
+s.connect("/run/pot/children.sock")
+head = {"v": 1, "key": key, "args": sys.argv[1:], "cwd": os.getcwd(), "hook": {}}
+socket.send_fds(s, [json.dumps(head).encode() + b"\n"], [0, 1, 2])
+print("answer", s.makefile().readline().strip(), flush=True)
+"#;
+
+fn entry_lines(log: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// v2.20.0 under ENGINE: a run's sibling is started by the host, never in the container. The run's client reaches the
+/// run's children broker through /run/pot/children.sock; the broker starts the host entry (`hostPot`, `run --sibling FD`)
+/// in a session of its own with the client's fds 0-2 and the request (the run folder, the row's key, the arguments, the
+/// cwd) on FD; the sibling's output reaches the run's, its stdin is the run's, and its exit status comes back. A
+/// request that goes away (the client killed) stops the sibling; so does the run's end; and the broker, its socket and
+/// (cleanup) the tree's slots go.
+#[allow(clippy::too_many_lines)] // three runs, each with what the host saw
+fn siblings_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(python) = find("python3") else {
+        return;
+    };
+    let py = python.display().to_string();
+    let script = format!(
+        r#""{py}" -I -c '{CLIENT}' ok a b; echo "client-exit=$?"
+echo piped-in | "{py}" -I -c '{CLIENT}' cat
+"#
+    );
+    let Some((top, run, log)) = sibling_world(&format!("{engine}-siblings"), engine, &program, &script)
+    else {
+        return;
+    };
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}{err}");
+    assert!(
+        said.lines().any(|l| l == "sibling-ran ok a b"),
+        "the sibling's stdout is the run's: {said}{err}"
+    );
+    assert!(
+        said.lines().any(|l| l == r#"answer {"exit": 7}"#),
+        "its status comes back: {said}{err}"
+    );
+    assert!(
+        said.lines().any(|l| l == "sibling-read piped-in"),
+        "its stdin is the run's: {said}{err}"
+    );
+    let reqs = entry_lines(&log);
+    assert_eq!(reqs.len(), 2, "{reqs:?}");
+    let r = &reqs[0]["req"];
+    assert_eq!(r["parent"], fs::canonicalize(&run).unwrap().display().to_string());
+    assert_eq!(r["key"], "git:file:///tmp/pot-test/nkp.git:nk-chk");
+    assert_eq!(r["args"], serde_json::json!(["ok", "a", "b"]));
+    assert_eq!(
+        r["cwd"],
+        fs::canonicalize(top.join("ws")).unwrap().display().to_string()
+    );
+    // started on the host, in a session of its own: a host pid (not the container's), the session's leader
+    assert_eq!(reqs[0]["pid"], reqs[0]["sid"], "{reqs:?}");
+    assert_eq!(
+        helpers_in(&run),
+        Vec::<String>::new(),
+        "the broker is gone with the run"
+    );
+    assert!(
+        run.join("children.sock").symlink_metadata().is_err(),
+        "children.sock is left"
+    );
+    let trees = run.parent().unwrap().parent().unwrap().join("trees").join("run");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert!(
+        !trees.exists(),
+        "cleanup leaves the top run's tree of slots: {}",
+        trees.display()
+    );
+
+    // the client killed (the agent's tool timeout): the broker stops the sibling (SIGTERM to its session). The client's
+    // stdout is a pipe (a file never crosses: pot's client puts a pipe of its own in front of one)
+    fs::remove_file(&log).unwrap();
+    let script = format!(
+        r#"{{ "{py}" -I -c '{CLIENT}' sleep & echo $! > /tmp/pid; wait; }} | while read -r l; do echo "$l" >> /tmp/o; done &
+until case "$(cat /tmp/o 2>/dev/null)" in *sibling-sleeping*) true ;; *) false ;; esac; do sleep 0.1; done; kill -9 "$(cat /tmp/pid)"; sleep 4; echo done"#
+    );
+    let Some((top, run, log)) = sibling_world(&format!("{engine}-siblings-kill"), engine, &program, &script)
+    else {
+        return;
+    };
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        text.lines().any(|l| l == "SIG 15"),
+        "the sibling got SIGTERM when its request went away: {text}"
+    );
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+
+    // the run ends while its sibling runs: the broker stops it first, and run returns only then
+    let script = format!(
+        r#""{py}" -I -c '{CLIENT}' sleep | while read -r l; do echo "$l" >> /tmp/o; done &
+until case "$(cat /tmp/o 2>/dev/null)" in *sibling-sleeping*) true ;; *) false ;; esac; do sleep 0.1; done; echo leaving"#
+    );
+    let Some((top, run, log)) = sibling_world(&format!("{engine}-siblings-end"), engine, &program, &script)
+    else {
+        return;
+    };
+    prepare(&top, &run);
+    let started = Instant::now();
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(started.elapsed() < Duration::from_secs(30));
+    let reqs = entry_lines(&log);
+    let pid = reqs[0]["pid"].as_u64().unwrap();
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the sibling outlived the run that asked: {}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert_eq!(helpers_in(&run), Vec::<String>::new());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_a_sibling_is_started_by_the_host() {
+    siblings_case("podman");
+}
+
+#[test]
+fn docker_a_sibling_is_started_by_the_host() {
+    siblings_case("docker");
+}

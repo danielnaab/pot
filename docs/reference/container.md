@@ -62,7 +62,9 @@ each one's real path, are files under a path the run binds (`render::broker_gaps
 | `hostTools.ssh` | git.fetch's broker runs host ssh; without it `prepare` stops with bwrap's message |
 | `hostTools.nix` | The nix relay runs host nix; its `bin/` is on the run's `PATH`; without it `prepare` stops with bwrap's message |
 | `netFix` | The permanent fix a denial names (the proxy's `--fix`) |
-| `siblingOf` | A sibling's proxy shows no one-run fix (`--sibling`) |
+| `siblingOf` | A sibling's proxy shows no one-run fix (`--sibling`); its `cleanup` leaves the tree's slots to the top run |
+| `hostPot`, `tree` | The run's children broker ([Siblings](#siblings)): the host pot it starts each sibling with, and the top run whose tree of slots it takes one from |
+| `hookEnv` | A sibling's or a pre-commit hook's `GIT_INDEX_FILE` and `GIT_PREFIX`, set last (bwrap's `env.update(hookEnv)`: they beat an item, a binding's variable and pot's values); another name is refused |
 | `pins` | Write access: each workspace's pins, as pot's core resolved them ([Write access](#write-access)); read strictly (an unknown key is refused) |
 | `repoKitPaths` | Write access: the look's `repo_kit_change` (read by `pins.py`) |
 
@@ -546,6 +548,41 @@ The `status.relay`, `git.fetch` and `nix` bindings are carried out as bwrap.py c
   SIGTERM of `run` does the same once the container has stopped. After a SIGKILL of `run`, `cleanup` stops what is
   left and removes them ([Run and cleanup](#run-and-cleanup)).
 
+## Siblings
+
+v2.20.0's siblings, not nesting ([pot-siblings](pot-siblings.md)), as bubblewrap carries them out (`has_siblings`,
+`start_bindings`, `stop_helpers`, `cleanup`): a narrower child is never started inside the container; the host starts it
+beside the run, under its own policy only.
+
+- **When.** A children row of `how: sibling` and launch.json's `hostPot` (bwrap's `has_siblings`). Without `hostPot` no
+  broker starts, as under bubblewrap, and a wrapper in the run finds none (exit 126: run it on the host).
+- **The broker.** `run` starts pot's `siblings.py` (beside the config's `broker`) with the config's `python`, in the run
+  folder, before the engine: `PYTHON -I -S SIBLINGS --socket children.sock --run RUNDIR --tree STATE/trees/TOP --context
+  CTX --entry HOSTPOT`, bwrap's command (`STATE` the run folder's grandparent, `TOP` the name of launch.json's `tree`).
+  Its stderr is appended to `bindings.log`. It gets the caller's whole environment, as bubblewrap's does, and unlike
+  this backend's other helpers: each sibling is a host start of pot (`pot run --sibling`), which composes and admits
+  the sibling and reads its own bindings' values from the caller's variables, as `pot CONTEXT KIT:CMD` on the host
+  would. The engine never sees that environment.
+- **What the run sees.** The run folder's `children.sock`, bound read-only at `/run/pot/children.sock` (connecting is not
+  a write to the mount), checked as the relays' sockets are: `run` checks it is a socket and records its device and
+  inode in `binds.txt`, and the entry's check stops the command (125) when the engine bound another file there.
+- **fds 0-2** cross the container's boundary by `SCM_RIGHTS` as they cross bubblewrap's: the client and the broker take
+  only a terminal (the engine's own pty with `--tty`), a pipe (the engine's, or the client's own in front of anything
+  else), a socket or `/dev/null`.
+- **The sibling's backend** is its caller's (pot's `sibling_entry` asks for the caller's `backend.name`): a sibling of a
+  container run is a container run of its own, never a container in the caller's container.
+- **The end.** When the command ends (and on every early return) `run` sends the broker SIGTERM and gives it 12 s
+  (bwrap's), which it spends stopping each sibling (SIGTERM to its session, again each second, SIGKILL after 10 s); the
+  broker also stops itself once `run` is gone. `cleanup` stops one still there (a process in the run folder whose
+  arguments hold `children.sock` and `--run RUNDIR`, and whose program is the config's python), removes `children.sock`,
+  and, for a top run (no `siblingOf`), the tree's slots, `STATE/trees/NAME`.
+
+Tested in `run.rs` under both engines with a fake host entry (`podman_a_sibling_is_started_by_the_host`,
+`docker_…`): the request reaches the host entry with the run folder, the row's key, the arguments and the cwd; the
+entry is a session leader on the host; its output is the run's and its stdin the run's pipe; its status (7) comes back;
+the client killed stops it (SIGTERM); the run's end stops it before `run` returns; no broker, socket or tree is left.
+End to end through pot, `tests/run.sh sibling` with `POT_TEST_PODMAN` or `POT_TEST_DOCKER`.
+
 ## Refusals
 
 `prepare` refuses, naming every gap in one line, never running without one (policy-1 rules 1-5):
@@ -568,7 +605,9 @@ refused, since a field this backend does not know could narrow the run):
   `probe`'s test (above);
 - `status.relay` or `git.fetch` when the config names no `python`, `broker` and `shim`, or they fail
   `render::broker_gaps` (above); `nix` when it names no `socat`, or that is not a file; `closure-store` with `nix`;
-- a children table with a `sibling` row (the run's children broker);
+- a children table with a `sibling` row, with launch.json's `hostPot`, when the config names no `python`, `broker` and
+  `shim`, or `siblings.py` is not a file beside `broker` ([Siblings](#siblings));
+- a `hookEnv` naming a variable other than `GIT_INDEX_FILE` and `GIT_PREFIX`;
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
 - `resource-limits` under docker;
@@ -597,11 +636,10 @@ write runs only.
 
 ## What's next
 
-1. Siblings: a children table with a `sibling` row (the run's children broker, `siblings.py`).
-2. Clone mode: the clone at its original path, its pins (the same `core/pins.py`), `after` and `cleanup` for clones;
+1. Clone mode: the clone at its original path, its pins (the same `core/pins.py`), `after` and `cleanup` for clones;
    the conformance review with executed evidence per guarantee, write access included (plan step 4).
-3. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
-4. pot choosing the backend from a root, probing it for every run.
+2. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
+3. pot choosing the backend from a root, probing it for every run.
 
 ## Sources
 

@@ -339,6 +339,9 @@ pub struct Plan {
     /// A1: the bindings' sockets the entry checks: each destination and its name in the run folder, whose device and
     /// inode run records once its helpers have made them, just before the engine starts.
     pub socket_checks: Vec<(String, String)>,
+    /// v2.20.0: the run's children broker (bwrap's `start_bindings`: siblings.py beside the config's broker.py), which
+    /// run starts on the host in the run folder, with the caller's whole environment (a sibling is a host start of pot).
+    pub siblings: Option<Vec<String>>,
 }
 
 /// The sources that do not exist on the host, but for the run folder's (prepare places them) and the state
@@ -509,8 +512,19 @@ fn gaps(i: &Inputs) -> Vec<String> {
     if p.bindings.iter().any(|b| b.capability == "nix") && p.proves("closure-store") {
         out.push("the closure-store guarantee with the nix binding (the run sees the whole store)".into());
     }
-    if p.children.values().any(|c| c.how.as_deref() == Some("sibling")) {
-        out.push("sibling children (the run's children broker)".into());
+    if has_siblings(p, i.launch) && i.broker.is_none() {
+        out.push(
+            "sibling children: the backend's --config names no python, broker and shim (the children broker is siblings.py, beside broker.py)"
+                .into(),
+        );
+    }
+    if let Some(h) = &i.launch.hook_env {
+        for n in h.keys().filter(|n| !HOOK_ENV.contains(&n.as_str())) {
+            out.push(format!(
+                "launch.json's hookEnv names {} (only GIT_INDEX_FILE and GIT_PREFIX)",
+                crate::visible(n)
+            ));
+        }
     }
     for f in p.effective("file") {
         if f.mode.as_deref() != Some("fixed") {
@@ -561,6 +575,18 @@ fn gaps(i: &Inputs) -> Vec<String> {
     }
     out
 }
+
+/// bwrap's `has_siblings`: a children row of `how: sibling`, and the host pot to start it (launch.json's `hostPot`).
+pub fn has_siblings(p: &Policy, l: &Launch) -> bool {
+    l.host_pot.as_ref().is_some_and(|h| !h.is_empty())
+        && p.children.values().any(|c| c.how.as_deref() == Some("sibling"))
+}
+
+/// The children broker's socket, in the run folder and in the run (bwrap's).
+pub const CHILDREN_SOCK: &str = "children.sock";
+
+/// What launch.json's `hookEnv` may name (launch.json/1: no other variable).
+pub const HOOK_ENV: &[&str] = &["GIT_INDEX_FILE", "GIT_PREFIX"];
 
 /// The paths a `--volume` names: one with ':' or ',' can't be said there; nor (X5) one with a control character, which
 /// docker's `--mount` can't carry (a newline failed docker at run).
@@ -940,6 +966,11 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             m.bind(&rd(sock), b.socket.as_deref().unwrap_or_default(), READ, true);
         }
     }
+    // v2.20.0: the run's children broker's socket (bwrap's), which run makes before the engine
+    let siblings = i.broker.filter(|_| has_siblings(p, l));
+    if siblings.is_some() {
+        m.bind(&rd(CHILDREN_SOCK), &format!("{run}/{CHILDREN_SOCK}"), READ, true);
+    }
     let shims = i
         .broker
         .filter(|_| has_cap("status.relay") || has_cap("git.fetch"));
@@ -1048,6 +1079,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         if let Some(b) = p.bindings.iter().find(|b| b.capability == *cap) {
             socket_checks.push((b.socket.clone().unwrap_or_default(), (*sock).to_string()));
         }
+    }
+    if siblings.is_some() {
+        socket_checks.push((format!("{run}/{CHILDREN_SOCK}"), CHILDREN_SOCK.to_string()));
     }
     let any_check = !checks.is_empty() || !socket_checks.is_empty();
     if any_check {
@@ -1322,6 +1356,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         },
         file_checks,
         socket_checks,
+        siblings: siblings.map(|t| siblings_argv(t, p, l, i.rundir, host)),
         stop: if has_cap("git.fetch") && l.host_tools.ssh.is_none() {
             Some("git.fetch's broker needs ssh on the host's PATH".into())
         } else if has_cap("nix") && l.host_tools.nix.is_none() {
@@ -1330,6 +1365,47 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             None
         },
     })
+}
+
+/// The run's children broker as bwrap's `start_bindings` starts it, in the run folder: siblings.py beside the config's
+/// broker.py, its socket `children.sock` there, the run folder, the tree's slots (pot's state, the run folder's
+/// grandparent, `trees/` and the top run's folder's name) and the host pot it starts each sibling with (`--entry`).
+fn siblings_argv(t: &BrokerTools, p: &Policy, l: &Launch, rundir: &str, host: &dyn Host) -> Vec<String> {
+    let parent = |d: &str| {
+        d.rsplit_once('/')
+            .map_or("/", |(a, _)| if a.is_empty() { "/" } else { a })
+            .to_string()
+    };
+    let rundir = rundir.trim_end_matches('/');
+    let state = parent(&parent(rundir));
+    let tree = l.tree.as_deref().unwrap_or(rundir);
+    let tree = host.realpath(tree).unwrap_or_else(|| tree.to_string());
+    let top = tree
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let siblings = format!("{}/siblings.py", parent(&t.broker));
+    let entry = serde_json::Value::from(l.host_pot.clone().unwrap_or_default()).to_string();
+    [
+        t.python.as_str(),
+        "-I",
+        "-S",
+        &siblings,
+        "--socket",
+        CHILDREN_SOCK,
+        "--run",
+        rundir,
+        "--tree",
+        &format!("{}/trees/{top}", state.trim_end_matches('/')),
+        "--context",
+        &p.context,
+        "--entry",
+        &entry,
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// pot's broker as bwrap's `start_bindings` starts it, in the run folder (its sockets relative there): status.relay's
@@ -1495,6 +1571,7 @@ fn is_proxy_var(n: &str) -> bool {
 /// name, and what the plan would have set is its default; those not passed from the host otherwise are returned as
 /// `hostless`.
 #[allow(clippy::type_complexity)] // the set values, the names passed, their defaults, the hostless ones
+#[allow(clippy::too_many_lines)] // bwrap's run_env, in its order
 fn environment(
     i: &Inputs,
     net: bool,
@@ -1605,6 +1682,17 @@ fn environment(
             pass.push(n.clone());
             hostless.push(n.clone());
         }
+    }
+    // bwrap's run: env.update(hookEnv), last of all: it beats an item, a binding's variable and pot's values
+    for (n, v) in l
+        .hook_env
+        .iter()
+        .flatten()
+        .filter(|(n, _)| HOOK_ENV.contains(&n.as_str()))
+    {
+        pass.retain(|x| x != n);
+        hostless.retain(|x| x != n);
+        env.insert(n.clone(), v.clone());
     }
     let defaults = pass
         .iter()
@@ -2038,10 +2126,7 @@ mod tests {
         let expect: &[(&str, &[&str])] = &[
             (
                 "dispatch-clone",
-                &[
-                    "clone mode (the clone at its original path, its pins, the staging fetch)",
-                    "sibling children (the run's children broker)",
-                ],
+                &["clone mode (the clone at its original path, its pins, the staging fetch)"],
             ),
             (
                 "git-fetch",
@@ -2070,12 +2155,9 @@ mod tests {
             ),
             (
                 "seatbelt",
-                &[
-                    "clone mode (the clone at its original path, its pins, the staging fetch)",
-                    "sibling children (the run's children broker)",
-                ],
+                &["clone mode (the clone at its original path, its pins, the staging fetch)"],
             ),
-            ("sibling", &["sibling children (the run's children broker)"]),
+            ("sibling", &[]),
             (
                 "work-bindings",
                 &[
@@ -2087,7 +2169,6 @@ mod tests {
                 "work-siblings",
                 &[
                     "write access without launch.json's pins for /tmp/pot-test/nc (pot 0.3.0 or later resolves them)",
-                    "sibling children (the run's children broker)",
                 ],
             ),
         ];
@@ -2101,7 +2182,9 @@ mod tests {
                 .filter(|g| had_store || **g != "closure-store")
                 .map(|g| (*g).to_string())
                 .collect();
-            let got = go_net(&p, &l, Engine::Podman, &nothing()).unwrap_err();
+            let got = go_net(&p, &l, Engine::Podman, &nothing())
+                .err()
+                .unwrap_or_default();
             assert_eq!(&got, want, "{name}");
         }
     }
@@ -3614,6 +3697,143 @@ mod tests {
             [
                 "the config's broker /nix/store/q-pot/broker.py (the broker runs it on the host: it must be a file)"
             ]
+        );
+    }
+
+    /// The read-only fixture with the work-siblings fixture's children table (a sibling row) and LAUNCH's extra keys.
+    fn with_siblings(extra: &serde_json::Value) -> (Policy, Launch) {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&read(&format!("{PREPARE}/read-only/policy.json"))).unwrap();
+        let fx: serde_json::Value =
+            serde_json::from_str(&read("contracts/fixtures/policy-1/work-siblings.json")).unwrap();
+        v["children"] = fx["children"].clone();
+        let mut l: serde_json::Value =
+            serde_json::from_str(&read(&format!("{PREPARE}/read-only/launch.json"))).unwrap();
+        for (k, x) in extra.as_object().unwrap() {
+            l[k] = x.clone();
+        }
+        (
+            policy::parse(&v.to_string()).unwrap(),
+            serde_json::from_value(l).unwrap(),
+        )
+    }
+
+    fn host_pot() -> serde_json::Value {
+        serde_json::json!([
+            "/nix/store/p-python/bin/python3",
+            "-I",
+            "-c",
+            "import pot",
+            "/nix/store/r-root.json"
+        ])
+    }
+
+    /// v2.20.0, as bwrap's `has_siblings`: a children row of `how: sibling` and launch.json's `hostPot` start the run's
+    /// children broker (siblings.py, beside the config's broker.py) on the host, in the run folder, bwrap's command; its
+    /// socket, the run folder's children.sock, is bound read-only at /run/pot/children.sock and checked by the entry
+    /// (A1's pattern). The tree's slots are under pot's state (the run folder's grandparent), named after the top run.
+    #[test]
+    fn a_sibling_row_starts_the_runs_children_broker() {
+        let (mut p, l) = with_siblings(&serde_json::json!({ "hostPot": host_pot(), "tree": "/s/runs/06fb" }));
+        p.backend.proved.retain(|g| g != "resource-limits");
+        for engine in [Engine::Podman, Engine::Docker] {
+            let plan = go(&p, &l, engine, &nothing()).unwrap_or_else(|g| panic!("{g:?}"));
+            let bind = match engine {
+                Engine::Podman => "--volume /r/children.sock:/run/pot/children.sock:ro".to_string(),
+                Engine::Docker => {
+                    "--mount type=bind,source=/r/children.sock,target=/run/pot/children.sock,readonly"
+                        .to_string()
+                }
+            };
+            assert!(has(&plan, &bind), "{:#?}", lines(&plan));
+            assert_eq!(
+                plan.siblings,
+                Some(
+                    [
+                        "/nix/store/p-python/bin/python3",
+                        "-I",
+                        "-S",
+                        "/nix/store/q-pot/siblings.py",
+                        "--socket",
+                        "children.sock",
+                        "--run",
+                        "/r",
+                        "--tree",
+                        "/trees/06fb",
+                        "--context",
+                        "review",
+                        "--entry",
+                        &host_pot().to_string(),
+                    ]
+                    .map(String::from)
+                    .to_vec()
+                )
+            );
+            assert!(
+                plan.socket_checks
+                    .contains(&("/run/pot/children.sock".to_string(), "children.sock".to_string())),
+                "{:?}",
+                plan.socket_checks
+            );
+        }
+        // no hostPot (no root manifest): no broker, as bwrap; a wrapper then finds no broker (126, run it on the host)
+        let (p, l) = with_siblings(&serde_json::json!({}));
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap_or_else(|g| panic!("{g:?}"));
+        assert_eq!(plan.siblings, None);
+        assert!(!lines(&plan).iter().any(|x| x.contains("children.sock")));
+    }
+
+    /// Without the config's python and broker, a sibling row is a gap, named.
+    #[test]
+    fn a_sibling_row_needs_the_configs_python_and_broker() {
+        let (p, l) = with_siblings(&serde_json::json!({ "hostPot": host_pot(), "tree": "/s/runs/06fb" }));
+        let paths = paths();
+        let gaps = render(&Inputs {
+            policy: &p,
+            launch: &l,
+            paths: &paths,
+            engine: Engine::Podman,
+            program: "podman",
+            image: DOCKER_IMAGE,
+            rundir: "/r",
+            base_closure: &[],
+            net: None,
+            look: None,
+            broker: None,
+            nix_socat: None,
+            host: &nothing(),
+        })
+        .unwrap_err();
+        assert_eq!(
+            gaps,
+            [
+                "sibling children: the backend's --config names no python, broker and shim (the children broker is siblings.py, beside broker.py)"
+            ]
+        );
+    }
+
+    /// launch.json's hookEnv (a sibling's, a pre-commit hook's) is set last, as bwrap's `run` updates the environment
+    /// with it: it beats an env item of the same name. Any other name is refused (launch.json/1: no other variable).
+    #[test]
+    fn the_hook_env_is_set_last_and_holds_only_gits_two_variables() {
+        let hook =
+            serde_json::json!({ "GIT_INDEX_FILE": "/home/u/src/notes/.git/index.lock", "GIT_PREFIX": "" });
+        let (mut p, l) = with_siblings(&serde_json::json!({ "hookEnv": hook }));
+        let mut item = p.items.iter().find(|i| i.kind == "env").unwrap().clone();
+        item.value = "GIT_PREFIX".into();
+        p.items.push(item);
+        let plan = go(&p, &l, Engine::Podman, &nothing()).unwrap_or_else(|g| panic!("{g:?}"));
+        assert!(
+            has(&plan, "--env GIT_INDEX_FILE=/home/u/src/notes/.git/index.lock"),
+            "{:#?}",
+            lines(&plan)
+        );
+        assert!(has(&plan, "--env GIT_PREFIX="), "{:#?}", lines(&plan));
+        assert!(!has(&plan, "--env GIT_PREFIX"), "the item is not passed by name");
+        let (p, l) = with_siblings(&serde_json::json!({ "hookEnv": { "LD_PRELOAD": "/x.so" } }));
+        assert_eq!(
+            go(&p, &l, Engine::Podman, &nothing()).unwrap_err(),
+            ["launch.json's hookEnv names LD_PRELOAD (only GIT_INDEX_FILE and GIT_PREFIX)"]
         );
     }
 }
