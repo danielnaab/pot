@@ -2076,13 +2076,8 @@ def run(host, root, context, flags, cmd):
     finally:
         if not background:
             # the run's own backend (--backend, the context's), never the root's default
-            prog = None
-            try:
-                prog = backend_cmd(host, None)[1]
-            except C.Refusal:
-                pass
-            if prog and os.path.exists(os.path.join(rundir, "launch.json")):
-                cleanup_run(host, prog, rundir)
+            if bprog and os.path.exists(os.path.join(rundir, "launch.json")):
+                cleanup_run(host, bprog, rundir)
             if used_fd is not None:
                 os.close(used_fd)
             # F2: a dispatch refused before its start was logged leaves no clone without a record

@@ -847,6 +847,20 @@ while True:
   git_ worktree remove --force "$wt1" && git_ worktree remove --force "$wt2"
   git_ branch -q -D sbwt1 sbwt2
 
+  # --backend NAME: the named backend does the whole run, its cleanup too, never the root's default (a root with a
+  # second backend: a spy that logs each verb it is given, then runs bubblewrap's)
+  local spy=$work/sbspy rj
+  mkdir -p "$spy"
+  rj=$(grep -o '/nix/store/[^ ]*-pot-root-test\.json' "$work/sbr/bin/pot")
+  # shellcheck disable=SC2016 # the spy expands them
+  printf '#!/bin/sh\necho "$1" >> '"'%s/verbs'"'\nexec %s "$@"\n' "$spy" "$(jq -r .backends.bubblewrap.program "$rj")" > "$spy/backend"
+  chmod +x "$spy/backend"
+  jq --arg p "$spy/backend" '.backends.spy = {kind: "bwrap", program: $p}' "$rj" > "$spy/root.json"
+  sed "s|$rj|$spy/root.json|" "$work/sbr/bin/pot" > "$spy/pot" && chmod +x "$spy/pot"
+  ran "pot: --backend NAME, a second backend" env -u CLAUDECODE -u CODEX_SANDBOX -u POT POT_QUIET=1 "$spy/pot" --backend spy true
+  expect "runs it" grep -qx run "$spy/verbs"
+  expect "and it does the run's cleanup" grep -qx cleanup "$spy/verbs"
+
   # S: §16.11: names a run chose reach the host escaped
   # shellcheck disable=SC2016 # the run's shell expands them
   ran "pot: a run-made name with an escape byte" sb_loud bash -c 'd=$(printf "e\033]0;x\007v"); mkdir "$d" && git -C "$d" init -q'

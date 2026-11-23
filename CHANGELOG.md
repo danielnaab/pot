@@ -138,6 +138,7 @@ v2.14.0's `sandbox` on).
   the last run out removes it. Each run lists what it relies on in `pins-used.json`, held while its pot lives, so a
   run killed outright counts for nothing: the next start takes its placeholders on, or removes them. On every
   backend (Seatbelt untested here).
+- **`pot --backend NAME`'s cleanup is that backend's** (and a context's `backend`), not the root's default.
 
 ## v0.2.0 - 2026-11-21
 
