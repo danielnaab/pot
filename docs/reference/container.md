@@ -30,7 +30,8 @@ A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 ## Inputs
 
 A root that offers the backend (mkRoot's `container`) writes this config itself: bubblewrap's programs and closures
-by the same names, `engine` and its program, `image`, `pins` (core's `pins.py`), `shimClosure` (python's and pot's
+by the same names, `engine` and its program (always named: the root's `pkgs.podman` by default, never the engine on
+`PATH`), `image`, `pins` (core's `pins.py`), `shimClosure` (python's and pot's
 closure) and `socat` as its real file (`bin/socat` is a link to `socat1`); its `pot-backend-container` runs
 `pot-container --config` with it.
 

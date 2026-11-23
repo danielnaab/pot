@@ -323,8 +323,18 @@ sec_kits() {
   ran "kits: a root that offers the container backend" stdout_of nix eval --impure --json --expr "$mr container = { engine = \"podman\"; program = \"/x/podman\"; }; }).passthru.root"
   expect "names it, its kind and its engine" test "$(jq -c '.backends.container | {kind, engine}' <<<"$out")" = '{"kind":"container","engine":"podman"}'
   expect "beside bubblewrap, still the default" test "$(jq -r '[(.backends | keys | join(" ")), .defaultBackend] | join(";")' <<<"$out")" = "bubblewrap container;bubblewrap"
-  ran "kits: a root whose default is the container backend" stdout_of nix eval --impure --raw --expr "$mr container.engine = \"docker\"; defaultBackend = \"container\"; }).passthru.root.defaultBackend"
+  ran "kits: a root whose default is the container backend" stdout_of nix eval --impure --raw --expr "$mr container = { engine = \"docker\"; program = \"/x/docker\"; }; defaultBackend = \"container\"; }).passthru.root.defaultBackend"
   expect "says so" test "$out" = container
+  # QA B2: the root always pins the engine, which pot never looks up on PATH (a program a run could plant there):
+  # podman's default is the root's nixpkgs podman; docker's must be named; a program is absolute or a package
+  ran "kits: podman with no program" stdout_of nix eval --impure --raw --expr "$mr container.engine = \"podman\"; }).passthru.root.backends.container.enginePath"
+  expect "is the root's nixpkgs podman" test "$out" = "$(nix eval --impure --raw --expr "$ex pkgs.podman.outPath" 2>/dev/null)/bin/podman"
+  ran "kits: a package as the program" stdout_of nix eval --impure --raw --expr "$mr container = { engine = \"docker\"; program = pkgs.docker-client; }; }).passthru.root.backends.container.enginePath"
+  expect "is its bin/ENGINE" test "$out" = "$(nix eval --impure --raw --expr "$ex pkgs.docker-client.outPath" 2>/dev/null)/bin/docker"
+  refused "kits: docker with no program" nix eval --impure --raw --expr "$mr container.engine = \"docker\"; }).drvPath"
+  expect "names what to give" holds 'pot.lib.mkRoot: container.program: give docker'"'"'s program (pkgs.docker-client, or an absolute path such as "/run/current-system/sw/bin/docker"): pot never runs an engine it finds on PATH'
+  refused "kits: a program that is not an absolute path" nix eval --impure --raw --expr "$mr container = { engine = \"podman\"; program = \"podman\"; }; }).drvPath"
+  expect "is refused, saying why" holds 'pot.lib.mkRoot: container.program = "podman": give an absolute path or a package (pot never runs an engine it finds on PATH)'
   refused "kits: a defaultBackend the root does not offer" nix eval --impure --raw --expr "$mr defaultBackend = \"container\"; }).drvPath"
   expect "names what it offers, and how to offer the container backend" holds 'pot.lib.mkRoot: defaultBackend = "container": the root offers bubblewrap (container = { engine = "podman"; } offers the container backend)'
   refused "kits: an unknown defaultBackend" nix eval --impure --raw --expr "$mr defaultBackend = \"lxc\"; }).drvPath"
@@ -2394,10 +2404,14 @@ EOF
     # (with a context that keeps bubblewrap), and under each engine the test is given (sibling_container)
     packages.$sys.nomotor = pot.lib.mkRoot (common // { container = { engine = "podman"; program = "$work/no-such-podman"; };
       defaultBackend = "container"; contexts = common.contexts // { onbw = { extends = "work"; backend = "bubblewrap"; }; }; });
-    packages.$sys.cpodman = pot.lib.mkRoot (common // { container = { engine = "podman"; program = "${POT_TEST_PODMAN:-podman}"; };
+    packages.$sys.cpodman = pot.lib.mkRoot (common // { container = { engine = "podman"; program = "${POT_TEST_PODMAN:-/nonexistent/podman}"; };
       defaultBackend = "container"; });
-    packages.$sys.cdocker = pot.lib.mkRoot (common // { container = { engine = "docker"; program = "${POT_TEST_DOCKER:-docker}"; };
+    packages.$sys.cdocker = pot.lib.mkRoot (common // { container = { engine = "docker"; program = "${POT_TEST_DOCKER:-/nonexistent/docker}"; };
       defaultBackend = "container"; });
+    # QA B2: podman with no program named (the root's nixpkgs podman, never one on PATH)
+    packages.$sys.cpath = pot.lib.mkRoot (common // { container.engine = "podman"; defaultBackend = "container"; });
+    # QA I1: the container backend offered, broken, and selected by nothing (neither the default nor a context's)
+    packages.$sys.offered = pot.lib.mkRoot (common // { container = { engine = "podman"; program = "$work/no-such-podman"; }; });
   };
 }
 EOF
@@ -2712,6 +2726,22 @@ backend_choice() {
   expect "and which one pot CMD runs under, and why" has "           pot CMD runs under container: the root's default (context work)"
   out=$(nb_ doctor 2>&1 || true)
   expect "backend: pot doctor under the bubblewrap root says so" has "           pot CMD runs under bubblewrap: the root's default (context work)"
+
+  # QA B2: the engine is the root's, never one found on PATH (where a repository's bin, or a run, could plant one)
+  ran "backend: a root naming podman and no program builds" nix build -o "$work/cpath" "path:$work/nroot#packages.$sys.cpath"
+  mkdir -p "$work/fakebin"
+  printf '#!/bin/sh
+echo "$*" >> %s/fake-engine-ran
+exit 1
+' "$work" > "$work/fakebin/podman" && chmod +x "$work/fakebin/podman"
+  # shellcheck disable=SC2317
+  cp_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=x STAND=s PATH="$work/fakebin:$PATH" "$work/cpath/bin/pot" "$@"; }
+  out=$(cp_ explain agent 2>&1 || true)
+  out=$(cp_ agent -c true 2>&1 || true)
+  out=$(cp_ doctor 2>&1 || true)
+  expect "backend: a fake podman first on PATH is never run (explain, a run, doctor)" test ! -e "$work/fake-engine-ran"
+  expect "the root's own podman is the one doctor names" holds "container (podman)"
+
 }
 
 # sibling_container ENGINE PROGRAM: sec_sibling's siblings from a run under the container backend, its root's default (its workspace $c, its

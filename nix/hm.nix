@@ -52,7 +52,7 @@ in
     limits = opt (t.attrsOf (t.either t.str t.int)) { } "The resource scope of runs without a terminal (a systemd user scope): { memoryMax = \"50%\"; tasksMax = 2048; } (these are the defaults).";
     clones = opt (t.attrsOf (t.either t.str t.int)) { } "Dispatch clones kept: { keepDays = 14; maxSize = \"20G\"; } (the defaults). pot discards only clones that are fetched, discarded or have no commits.";
     caBundle = opt (t.nullOr t.path) null "A CA bundle, at /etc/ssl/certs/ca-certificates.crt in every run.";
-    container = opt (t.nullOr (t.attrsOf t.anything)) null "Linux: offer the container backend too: { engine = \"podman\"; } (or \"docker\"), with program (a path, or a package with bin/ENGINE; default: the engine on PATH) and image (docker's empty image).";
+    container = opt (t.nullOr (t.attrsOf t.anything)) null "Linux: offer the container backend too: { engine = \"podman\"; } (or \"docker\"), with program (an absolute path, or a package with bin/ENGINE: podman's default is pkgs.podman, docker's must be given; pot never runs an engine it finds on PATH) and image (docker's empty image).";
     defaultBackend = opt (t.nullOr t.str) null "The backend of a context whose backend is auto: bubblewrap (Seatbelt on macOS) unless \"container\" (with programs.pot.container).";
     package = lib.mkOption { type = t.package; readOnly = true; description = "The root's pot."; };
   };

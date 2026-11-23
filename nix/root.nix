@@ -23,7 +23,8 @@
 #     limits ? { };                 # the resource scope of runs without a terminal: { memoryMax = "50%"; tasksMax = 2048; }
 #     clones ? { };                 # dispatch clones kept: { keepDays = 14; maxSize = "20G"; } (never unfetched commits)
 #     container ? null;             # Linux: the container backend too (pot phase 2): { engine = "podman" | "docker";
-#                                   # program ? the engine on PATH (a path, or a package with bin/ENGINE);
+#                                   # program (an absolute path, or a package with bin/ENGINE; podman's default
+#                                   # pkgs.podman, docker's required: never the engine on PATH);
 #                                   # image ? docker's empty image (localhost/pot-empty:1) }
 #     defaultBackend ? null;        # the backend of a context whose backend is "auto": bubblewrap (Seatbelt on
 #                                   # Darwin) unless "container"
@@ -161,16 +162,24 @@ let
       "pot.lib.mkRoot: container.engine is \"podman\" or \"docker\" (not ${builtins.toJSON (container.engine or null)})"
     else if darwin then
       "pot.lib.mkRoot: container: the container backend binds the host's /nix/store, so it is Linux's (this root is ${pkgs.stdenv.hostPlatform.system}'s)"
+    # QA B2: the root pins the engine; pot never runs one it finds on PATH (where a repository's bin, or a run, can
+    # put a program of its own). podman's default is this nixpkgs' podman; docker's program is given
+    else if container.engine == "docker" && (container.program or null) == null then
+      "pot.lib.mkRoot: container.program: give docker's program (pkgs.docker-client, or an absolute path such as \"/run/current-system/sw/bin/docker\"): pot never runs an engine it finds on PATH"
+    else if (container.program or null) != null && !(lib.isDerivation container.program)
+      && !(lib.hasPrefix "/" (toString container.program)) then
+      "pot.lib.mkRoot: container.program = ${builtins.toJSON (toString container.program)}: give an absolute path or a package (pot never runs an engine it finds on PATH)"
     else null;
-  engineProgram = p: if p == null then null else if lib.isDerivation p then "${p}/bin/${container.engine}" else toString p;
+  engineProgram = p: if lib.isDerivation p then "${p}/bin/${container.engine}" else toString p;
+  enginePath = engineProgram (if (container.program or null) != null then container.program else pkgs.podman);
   containerConfig = pkgs.runCommand "pot-container.json" {
     nativeBuildInputs = [ python ];
     config = builtins.toJSON (linuxConfig // {
       inherit (container) engine;
       pins = "${potSrc}/pins.py";
       shimClosure = closureOf "pot-shim-closure" [ python potSrc ];
-    } // lib.optionalAttrs ((container.program or null) != null) { ${container.engine} = engineProgram container.program; }
-      // lib.optionalAttrs ((container.image or null) != null) { image = container.image; });
+      ${container.engine} = enginePath;
+    } // lib.optionalAttrs ((container.image or null) != null) { image = container.image; });
     passAsFile = [ "config" ];
   } ''
     python3 -I -c 'import json, os, sys
@@ -259,7 +268,7 @@ let
     backends = if darwin then { seatbelt = { kind = "seatbelt"; program = "${seatbelt}/bin/pot-backend-seatbelt"; }; }
       else { bubblewrap = { kind = "bwrap"; program = "${backend}/bin/pot-backend-bwrap"; }; }
         // lib.optionalAttrs (container != null) { container = { kind = "container"; program = "${containerBackend}/bin/pot-backend-container";
-          inherit (container) engine; enginePath = engineProgram (container.program or null); }; };
+          inherit (container) engine; inherit enginePath; }; };
     defaultBackend = if defaultBackend != null then defaultBackend else if darwin then "seatbelt" else "bubblewrap";
   } // lib.optionalAttrs darwin {
     # the startup line names what a Seatbelt run lacks that a Linux one has (design §12.2); explain lists every lack
