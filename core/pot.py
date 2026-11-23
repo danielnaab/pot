@@ -1694,11 +1694,18 @@ def claim_placeholders(host, rundir, launch):
                 if p in listed and holds_placeholder(p, ph.get("text") or ""):
                     continue
             keep.append(ph)
-        d["placeholders"] = keep
         for r in d.get("ro") or []:
             p = r["path"]
             if p in listed and holds_placeholder(p, listed[p]) and all(u[0] != p for u in used):
                 used.append([p, listed[p]])
+            elif r["kind"] == "file" and not os.path.lexists(p) and os.path.basename(p) in P.PLACEHOLDERS \
+                    and os.path.isfile(os.path.join(os.path.dirname(p), "HEAD")) and all(k["path"] != p for k in keep):
+                # another run's placeholder, there when the pins were resolved, that its last run out removed since:
+                # placed again, as it would have been planned
+                text = P.PLACEHOLDERS[os.path.basename(p)]
+                keep.append({"path": p, "kind": "file", "text": text})
+                used.append([p, text])
+        d["placeholders"] = keep
     fd = os.open(os.path.join(rundir, PINS_USED), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX)
     write_list(fd, used)

@@ -1801,22 +1801,22 @@ depth: the tree after a run is untrusted output.
   provider files (`**/tuteur.nix`, `**/graft.nix`) and its submodules folder, such as `.patterns` or
   `nix/agent-tools/.scions`.
 - Each kit's `protect`.
-- In every git directory (the top `.git`, each submodule's, each worktree's, a clone's and its modules'): `config`, `config.worktree`, `hooks/`,
-  `info/`, `commondir` and `gitdir`; and every `.git` file. When `commondir`, `config.worktree` or `gitdir` is
-  absent at start, pot puts a neutral read-only placeholder there for the run (`commondir` holding `.`, the others
-  empty), so a run cannot create one and point host git at a config it wrote; pot removes each placeholder after
-  the run, if it still holds what pot wrote. Runs in worktrees of one repository share its git directory, and so
-  its placeholders: a run that starts while another holds one takes it on instead of placing it again, and the last
-  run out removes it (each run lists the placeholders it relies on in its run folder, `pins-used.json`, held while
-  its pot lives; placing and removing take the git directory's lock, `<state>/locks/`). A pot that is killed mid-run (`kill -9`, `kill`, a reboot) leaves its
-  placeholders, and its sockets (the siblings' `children.sock` among them) and its tree's sibling slots
-  (`<state>/trees/<id>`), behind until the next run: every run (and `inspect`) first cleans up a lost run, removing
-  its sockets, its tree's slots and the placeholders that still hold what pot wrote. It waits for the lost run's
-  backend: a pot killed alone leaves its backend running until the command ends, and a lost run whose sockets
-  still answer is left as it is. A clone-mode run that still needs its after event gets that cleanup from its
-  recovery (`pot runs`, `pot review`). Until then they are harmless: host git works with them as with absent
-  names. The rest is writable, so a run can commit. It can also delete other
-  branches' refs.
+- In every git directory (the top `.git`, each submodule's, each worktree's, a clone's and its modules'): `config`,
+  `config.worktree`, `hooks/`, `info/`, `commondir` and `gitdir`; and every `.git` file. When `commondir`,
+  `config.worktree` or `gitdir` is absent at start, pot puts a neutral read-only placeholder there for the run
+  (`commondir` holding `.`, the others empty), so a run cannot create one and point host git at a config it wrote; pot
+  removes each placeholder after the run, if it still holds what pot wrote. Runs in worktrees of one repository share
+  its git directory, and so its placeholders: a run that starts while another holds one takes it on instead of placing
+  it again, and the last run out removes it, or a start that found it places it again if the last run out removed it
+  meanwhile (each run lists the placeholders it relies on in its run folder, `pins-used.json`, held while its pot
+  lives; placing and removing take the git directory's lock, `<state>/locks/`). A pot that is killed mid-run (`kill
+  -9`, `kill`, a reboot) leaves its placeholders, and its sockets (the siblings' `children.sock` among them) and its
+  tree's sibling slots (`<state>/trees/<id>`), behind until the next run: every run (and `inspect`) first cleans up a
+  lost run, removing its sockets, its tree's slots and the placeholders that still hold what pot wrote. It waits for
+  the lost run's backend: a pot killed alone leaves its backend running until the command ends, and a lost run whose
+  sockets still answer is left as it is. A clone-mode run that still needs its after event gets that cleanup from its
+  recovery (`pot runs`, `pot review`). Until then they are harmless: host git works with them as with absent names.
+  The rest is writable, so a run can commit. It can also delete other branches' refs.
 
 Protection covers the paths that exist when the run starts. A host-run file that the run creates (a new `justfile`
 or `.envrc` in a subfolder, say) is not stopped: the exit line, and `pot review` for a clone, flag it as a changed
