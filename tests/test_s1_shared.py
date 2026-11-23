@@ -134,5 +134,16 @@ class Shared(unittest.TestCase):
                 pot.unlock(fds)
         self.assertTrue(inodes(l1) & inodes(l2), "two runs that place the same placeholders take no lock in common")
 
+    def test_a_lost_cleanup_rechecks_under_the_lock(self):
+        # tidy_lost decides a run is lost before it takes the git directory's lock; a start that had created its list
+        # but not yet locked it looks lost. Under the lock the run is live again: its cleanup does nothing
+        a, la = self.resolve("aaaa", self.w1)
+        fa = self.start(a, la)
+        pot.cleanup_run(self.host, self.prog, a, lost=True)
+        self.assertTrue(os.path.isfile(self.ph))
+        self.assertTrue(os.path.exists(os.path.join(a, pot.PINS_USED)))
+        self.end(a, fa)
+        self.assertFalse(os.path.exists(self.ph))
+
 if __name__ == "__main__":
     unittest.main()

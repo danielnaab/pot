@@ -1554,7 +1554,7 @@ def tidy_lost(host):
             prog = backend_cmd(host, s.get("backend") if s else run_backend(rd))[1]
         except C.Refusal:
             continue
-        cleanup_run(host, prog, rd)
+        cleanup_run(host, prog, rd, lost=True)
 
 
 # ---------------------------------------------------------------- placeholders runs share (S1)
@@ -1732,10 +1732,12 @@ def note_placed(rundir, fd):
     write_list(fd, used)
 
 
-def cleanup_run(host, prog, rundir):
+def cleanup_run(host, prog, rundir, lost=False):
     """The backend's cleanup, under the placeholder locks: placeholders.json is first narrowed to what this run
     relied on that no live run still lists (the last one out removes it); then neither list stays, so a later
-    cleanup of this run removes nothing another run placed since."""
+    cleanup of this run removes nothing another run placed since. LOST (tidy_lost): the run was found lost before
+    the locks were taken; one whose list is held again under them (a start between creating its list and locking it)
+    is live, and left. Returns whether it cleaned up."""
     try:
         with open(os.path.join(rundir, "launch.json")) as f:
             launch = json.load(f)
@@ -1743,6 +1745,8 @@ def cleanup_run(host, prog, rundir):
         launch = {}
     locks = placeholder_locks(host, launch if isinstance(launch, dict) else {})
     try:
+        if lost and pins_live(rundir):
+            return False
         mine = []
         for e in read_list(os.path.join(rundir, PINS_USED)) + read_list(os.path.join(rundir, "placeholders.json")):
             if e not in mine:
@@ -1757,6 +1761,7 @@ def cleanup_run(host, prog, rundir):
                 os.unlink(os.path.join(rundir, n))
             except OSError:
                 pass
+        return True
     finally:
         unlock(locks)
 
@@ -3628,7 +3633,7 @@ def load_record(host, rid, rundir, recover=True):
                             time.sleep(0.2)
                     if got and R.needs_after(R.read_log(lf), R.process_alive):
                         after_event(prog, rundir, recovered=True)
-                        cleanup_run(host, prog, rundir)
+                        cleanup_run(host, prog, rundir, lost=True)
                 except OSError:
                     pass
                 finally:
