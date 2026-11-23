@@ -5123,3 +5123,166 @@ fn podman_a_sibling_is_started_by_the_host() {
 fn docker_a_sibling_is_started_by_the_host() {
     siblings_case("docker");
 }
+
+/// A clone world: `write_world`'s repository as the source, a clone of it in the world's state (as pot's core makes a
+/// dispatch clone), the policy in clone mode with same-path-clone proved, a proposal pattern (`**/.envrc`), launch.json's
+/// `clone` facts, and the config naming git's closure (`gitClosure`). Returns (top, run, source, clone).
+fn clone_world(name: &str, engine: &str, program: &str) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+    let gitb = find("git")?;
+    let (top, run, ws, _) = write_world(name, engine, program, false, |_| {})?;
+    let clones = top.join("state").join("clones");
+    fs::create_dir_all(&clones).unwrap();
+    git(&clones, &["clone", "-q", &ws.display().to_string(), "c1"]);
+    let clone = fs::canonicalize(clones.join("c1")).unwrap();
+    let base = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&clone)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let mut p: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("policy.json")).unwrap()).unwrap();
+    p["mode"] = "clone".into();
+    p["workspace"][0]["clone"] = clone.display().to_string().into();
+    p["workspace"][0]["sealed"] = serde_json::json!([]);
+    p["workspace"][0]["proposal"] = serde_json::json!(["**/.envrc"]);
+    p["backend"]["proved"]
+        .as_array_mut()
+        .unwrap()
+        .push("same-path-clone".into());
+    fs::write(run.join("policy.json"), p.to_string()).unwrap();
+    let mut l: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("launch.json")).unwrap()).unwrap();
+    l.as_object_mut().unwrap().remove("pins");
+    l["clone"] = serde_json::json!({ "base": base, "branch": "main", "path": clone, "scions": [],
+        "objects": ws.join(".git/objects") });
+    fs::write(run.join("launch.json"), l.to_string()).unwrap();
+    let path = top.join("config.json");
+    let mut cfg: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    fs::write(top.join("store").join("git.txt"), closure_of(&[&gitb])).unwrap();
+    cfg["gitClosure"] = top.join("store").join("git.txt").display().to_string().into();
+    fs::write(&path, cfg.to_string()).unwrap();
+    Some((top, run, ws, clone))
+}
+
+/// Clone mode under ENGINE, as bwrap's (same-path-clone): the run sees the clone at the source's own path, writes and
+/// commits there, and can't write the clone's config, hooks or protected files; the source is untouched; the
+/// placeholders are made in the clone and removed by cleanup. `after` stages the clone's commits through upload-pack
+/// run in a container of its own (the `git` verb), and reports bwrap's clone fields: the commit on `main`, the agent
+/// configuration the clone proposes (`.envrc`), what stays uncommitted. No git container, engine state or upload-pack
+/// script is left, and before.json and staging/ stay (pot review reads them).
+fn clone_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some((top, run, ws, clone)) = clone_world(&format!("{engine}-clone"), engine, &program) else {
+        return;
+    };
+    let g = gitbin();
+    set_script(
+        &run,
+        &format!(
+            r#"{TRY}w agents AGENTS.md
+w config .git/config
+t hooks mkdir .git/hooks/x
+echo here > .envrc; echo new > new.txt; echo left > left.txt
+{g} add .envrc new.txt && {g} -c user.name=t -c user.email=t@e commit -qm in-clone && echo committed
+echo "top=$({g} rev-parse --show-toplevel)"
+"#
+        ),
+        &[],
+    );
+    prepare(&top, &run);
+    let placeholder = clone.join(".git/commondir");
+    assert!(placeholder.exists(), "prepare made the clone's placeholders");
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}{err}");
+    for l in [
+        "agents: refused",
+        "config: refused",
+        "hooks: refused",
+        "committed",
+    ] {
+        assert!(said.lines().any(|x| x == l), "{l}: {said}{err}");
+    }
+    assert!(
+        said.lines().any(|x| x == format!("top={}", ws.display())),
+        "the clone at the source's path: {said}"
+    );
+    assert!(
+        !ws.join("new.txt").exists() && !ws.join(".envrc").exists(),
+        "the source is untouched"
+    );
+    assert!(clone.join("new.txt").exists(), "the run wrote the clone");
+    let ev = after_event(&top, &run);
+    assert_eq!(ev["commits"].as_array().map(Vec::len), Some(1), "{ev}");
+    assert_eq!(
+        ev["refs"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect::<Vec<_>>()),
+        Some(vec!["main".to_string()]),
+        "{ev}"
+    );
+    assert_eq!(ev["agent_config"], serde_json::json!([".envrc"]), "{ev}");
+    assert_eq!(ev["uncommitted"], 1, "{ev}");
+    assert!(ev.get("fetch_failed").is_none(), "{ev}");
+    assert!(run.join("staging/top.git").is_dir());
+    assert!(!run.join("gitlook").exists(), "the look's engine state is gone");
+    if engine == "docker" {
+        let ps = Command::new(&program)
+            .args(["ps", "-a", "--filter", "name=pot-", "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ps.stdout).trim(),
+            "",
+            "a git container is left"
+        );
+    }
+    assert_eq!(helpers_in(&run), Vec::<String>::new());
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    assert!(!placeholder.exists(), "cleanup removes the clone's placeholders");
+    assert!(
+        run.join("before.json").is_file() && run.join("staging").is_dir(),
+        "kept for pot review"
+    );
+    assert!(
+        !names(&run)
+            .iter()
+            .any(|n| n.starts_with("upload-pack-") || n == "gitlook"),
+        "{:?}",
+        names(&run)
+    );
+    // the git verb runs git only in this run's clone
+    let out = verb(&top, &run, "git")
+        .arg(&ws)
+        .arg("/clone")
+        .arg("--")
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is not this run's clone"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn podman_a_clone_runs_at_the_original_path_and_its_commits_are_staged_in_a_container() {
+    clone_case("podman");
+}
+
+#[test]
+fn docker_a_clone_runs_at_the_original_path_and_its_commits_are_staged_in_a_container() {
+    clone_case("docker");
+}

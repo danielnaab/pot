@@ -58,6 +58,16 @@ enum Verb {
     After { rundir: PathBuf },
     /// Remove the run's container and what prepare placed in the run directory; name what could not be removed
     Cleanup { rundir: PathBuf },
+    /// Clone mode's look (clonelook.py runs it): git ARGS in a container of its own, the run's clone CLONE read-only
+    /// at /clone, git's closure, no network, no home; CWD is /clone or below
+    #[command(hide = true)]
+    Git {
+        rundir: PathBuf,
+        clone: PathBuf,
+        cwd: String,
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Run-chosen text, safe for a terminal: controls as \xNN, the bidi and zero-width format characters as \uNNNN
@@ -147,6 +157,21 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
             return Err(refuse(r.message.clone()));
         }
     }
+    // clone mode: each clone's pins, by pot's own code (pins.py clone: bwrap's Pins over the clone); a pin bwrap could
+    // not make stops the run with its message
+    let clones: Option<Vec<launch::WsPins>> = match cfg.clone_tools() {
+        Some(_) if p.mode == "clone" => {
+            let v = look(cfg, "clone", rundir).map_err(&refuse)?;
+            let cps: Vec<launch::WsPins> = serde_json::from_value(v["clones"].clone())
+                .map_err(|e| refuse(format!("pins.py clone: {e}")))?;
+            if let Some(r) = cps.iter().find_map(|w| w.refused.as_ref()) {
+                return Err(refuse(r.message.clone()));
+            }
+            Some(cps)
+        }
+        Some(_) => Some(vec![]),
+        None => None,
+    };
     let paths = cfg.paths().map_err(refuse)?;
     let (engine, program) = engine(cfg).map_err(refuse)?;
     let base = match &cfg.base_closure {
@@ -178,6 +203,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
         look: look.as_ref(),
         broker: broker.as_ref(),
         nix_socat: cfg.socat.as_deref(),
+        clones: clones.as_deref(),
         host: &host::RealHost,
     };
     let plan = render::render(&inputs).map_err(|gaps| {
@@ -683,6 +709,16 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
         .filter(|r| r.kind == launch::Kind::File)
         .map(|r| r.path.clone())
         .collect();
+    // clone mode: each read-only file pin of the clone's (pins.py clone), as bwrap's Pins checks it
+    let mut single = single;
+    if p.mode == "clone" {
+        single.extend(
+            plan.pins
+                .iter()
+                .filter(|(_, k)| *k == launch::Kind::File)
+                .map(|(f, _)| f.clone()),
+        );
+    }
     let mut changed = vec![];
     for (path, kind) in &plan.pins {
         if plan.placeholders.iter().any(|ph| &ph.path == path) {
@@ -704,7 +740,7 @@ fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
     }
     place(rundir, &plan, &single)
         .map_err(|e| Refusal::new(&p.context, format!("can't place the run's files: {e}")))?;
-    if p.access == "write" && p.mode == "in-place" {
+    if (p.access == "write" && p.mode == "in-place") || p.mode == "clone" {
         write_look(cfg, rundir, &plan).map_err(|m| Refusal::new(&p.context, m))?;
     }
     Ok(())
@@ -1914,7 +1950,229 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
     Ok(code)
 }
 
-fn after(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> {
+/// Clone mode's sandbox for git (bwrap's `sandboxed_git`, Seatbelt's): `git -C CWD ARGS` in a container of its own,
+/// with the run's clone (one of policy.json's clones, its own real path) read-only at /clone, git's closure read-only,
+/// `--network none`, an empty read-only root with its own /tmp as HOME, no capability, and git told to read no system
+/// or global configuration, run no hook and start no fsmonitor; stdin and stdout are the caller's (upload-pack speaks
+/// over them). Its engine state is a folder of its own in the run folder's `gitlook/`, removed with the container
+/// before it returns. Returns git's status.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names, clippy::similar_names)] // the options in order; bwrap's names
+fn sandboxed_git(
+    cfg: &Config,
+    rundir: &Path,
+    clone: &Path,
+    cwd: &str,
+    args: &[String],
+) -> Result<u8, Refusal> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let (p, l) = load(rundir)?;
+    let refuse = |m: String| Refusal::new(&p.context, format!("the clone's git: {m}"));
+    let t = cfg
+        .clone_tools()
+        .ok_or_else(|| refuse("the backend's --config names no python, pins, git and gitClosure".into()))?;
+    let c = clone.to_string_lossy().into_owned();
+    if !p.workspace.iter().any(|w| w.clone.as_deref() == Some(c.as_str()))
+        || fs::canonicalize(clone).ok().as_deref() != Some(clone)
+        || !is_real_dir(clone)
+    {
+        return Err(refuse(format!("{c} is not this run's clone")));
+    }
+    if !(cwd == "/clone" || cwd.starts_with("/clone/")) || cwd.split('/').any(|x| x == "..") {
+        return Err(refuse(format!("{cwd} is not under /clone")));
+    }
+    let abs = fs::canonicalize(rundir).map_err(|e| refuse(format!("{}: {e}", rundir.display())))?;
+    let looks = abs.join("gitlook");
+    dir_new(&looks).map_err(|e| refuse(e.to_string()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let g = looks.join(format!("{}-{nanos}", std::process::id()));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&g)
+        .map_err(|e| refuse(format!("{}: {e}", g.display())))?;
+    let gs = g.to_string_lossy().into_owned();
+    let (e, program) = engine(cfg).map_err(&refuse)?;
+    let o = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    let mut argv = vec![program.clone()];
+    let set: Vec<(String, String)> = match e {
+        Engine::Podman => {
+            let made = write_new(&g.join("empty"), b"", 0o444)
+                .and_then(|()| {
+                    write_new(
+                        &g.join("containers.conf"),
+                        engine::containers_conf(&format!("{gs}/empty")).as_bytes(),
+                        0o444,
+                    )
+                })
+                .and_then(|()| {
+                    write_new(
+                        &g.join("storage.conf"),
+                        engine::storage_conf(&format!("{gs}/enginestore")).as_bytes(),
+                        0o444,
+                    )
+                })
+                .and_then(|()| {
+                    ["enginehome", "enginestore", "rootfs"]
+                        .iter()
+                        .try_for_each(|d| dir_new(&g.join(d)))
+                });
+            made.map_err(|err| refuse(err.to_string()))?;
+            argv.extend(render::podman_globals(&gs));
+            vec![
+                ("CONTAINERS_CONF".into(), format!("{gs}/containers.conf")),
+                ("CONTAINERS_STORAGE_CONF".into(), format!("{gs}/storage.conf")),
+                ("HOME".into(), format!("{gs}/enginehome")),
+            ]
+        }
+        Engine::Docker => {
+            dir_new(&g.join("dockercfg")).map_err(|err| refuse(err.to_string()))?;
+            vec![("DOCKER_CONFIG".into(), format!("{gs}/dockercfg"))]
+        }
+    };
+    let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
+    if e == Engine::Docker {
+        docker_image(&program, &set, &image).map_err(&refuse)?;
+    }
+    let ids = format!("{}:{}", l.uid, l.gid);
+    argv.extend(o(&[
+        "run",
+        "--interactive",
+        "--log-driver",
+        "none",
+        "--cidfile",
+        &format!("{gs}/container.id"),
+        "--hostname",
+        "pot",
+        "--network",
+        "none",
+        "--ipc",
+        "private",
+        "--cgroupns",
+        "private",
+        "--cap-drop",
+        "all",
+        "--security-opt",
+        "no-new-privileges",
+        "--read-only",
+        "--user",
+        &ids,
+    ]));
+    match e {
+        Engine::Podman => argv.extend(o(&[
+            "--userns",
+            "keep-id",
+            "--passwd=false",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,mode=1777,notmpcopyup",
+        ])),
+        Engine::Docker => argv.extend(o(&[
+            "--pull",
+            "never",
+            "--name",
+            &lifecycle::docker_name(&gs),
+            "--entrypoint",
+            "",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,mode=1777",
+        ])),
+    }
+    argv.extend(render::bind_opt(e, &c, "/clone", true).args);
+    for s in &t.closure {
+        argv.extend(render::bind_opt(e, s, s, true).args);
+    }
+    let bin = t.look.git.rsplit_once('/').map_or("/", |(d, _)| d).to_string();
+    for v in [
+        "HOME=/tmp".to_string(),
+        format!("PATH={bin}"),
+        "GIT_CONFIG_NOSYSTEM=1".into(),
+        "GIT_CONFIG_GLOBAL=/dev/null".into(),
+    ] {
+        argv.extend(["--env".to_string(), v]);
+    }
+    match e {
+        Engine::Podman => argv.extend(["--rootfs".to_string(), format!("{gs}/rootfs:O")]),
+        Engine::Docker => argv.push(image),
+    }
+    argv.extend(o(&[
+        &t.look.git,
+        "-C",
+        cwd,
+        "-c",
+        "safe.directory=*",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+    ]));
+    argv.extend(args.iter().cloned());
+    let status = engine::command(
+        &argv[0],
+        engine::KEEP
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect::<Vec<_>>()
+            .as_slice(),
+        &set,
+    )
+    .args(&argv[1..])
+    .status();
+    // the container, its engine processes and its state, before git's status goes back
+    let mut failed = vec![];
+    if let Err(m) = remove_container(e, &program, &gs, &set) {
+        failed.push(m);
+    }
+    failed.extend(cleanup_engine(Ok(cfg), &g));
+    if failed.is_empty() {
+        if let Err(err) = remove_tree(&g) {
+            failed.push(format!("{}: {err}", g.display()));
+        }
+    }
+    for f in &failed {
+        eprintln!("{}", visible(&format!("pot: the clone's git left {f}")));
+    }
+    let status = status.map_err(|err| refuse(format!("can't run {program}: {err}")))?;
+    Ok(lifecycle::exit_code(status))
+}
+
+/// Clone mode's look after the run (bwrap's `clone_after`, by core's `clonelook.py`, which imports bwrap.py): each clone
+/// staged through an upload-pack run by this binary's `git` verb (a container of its own), in pot's environment (X4)
+/// with the engine's variables. Returns its JSON, the after event's clone fields.
+fn clone_look(cfg: &Config, cfg_path: Option<&Path>, rundir: &Path) -> Result<serde_json::Value, String> {
+    let t = cfg
+        .clone_tools()
+        .ok_or("clone mode: the backend's --config names no python, pins, git and gitClosure")?;
+    let exe = std::env::current_exe().map_err(|e| format!("this program's path: {e}"))?;
+    let cfg_path = cfg_path
+        .and_then(|c| fs::canonicalize(c).ok())
+        .ok_or("clone mode: no --config")?;
+    let abs = fs::canonicalize(rundir).map_err(|e| format!("{}: {e}", rundir.display()))?;
+    let mut cmd = std::process::Command::new(&t.look.python);
+    cmd.env_clear();
+    for k in LOOK_KEEP.iter().chain(engine::KEEP) {
+        if let Some(v) = std::env::var_os(k) {
+            cmd.env(k, v);
+        }
+    }
+    let out = cmd
+        .args(["-I", "-S", &t.clonelook, &t.look.git])
+        .arg(&abs)
+        .arg(&exe)
+        .arg("--config")
+        .arg(&cfg_path)
+        .arg("git")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("can't run {}: {e}", t.look.python))?;
+    let _ = remove_tree(&abs.join("gitlook"));
+    if !out.status.success() {
+        return Err("the host's look at the clone failed".into());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("the host's look at the clone: {e}"))
+}
+
+fn after(cfg: Result<&Config, &String>, cfg_path: Option<&Path>, rundir: &Path) -> Result<(), Refusal> {
     let (p, l) = load(rundir)?;
     // the proxy's log, when the run had the network: a regular file only, never through a link
     let log = rundir.join("proxy.log");
@@ -1929,7 +2187,13 @@ fn after(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> {
         }
     };
     // write access: the host's look after the run (pins.py: bwrap's code), against before.json
-    let looked = if p.access == "write" && p.mode == "in-place" {
+    let looked = if p.mode == "clone" {
+        let c = cfg.map_err(|m| Refusal::new(&p.context, m.clone()))?;
+        Some(
+            clone_look(c, cfg_path, rundir)
+                .map_err(|m| Refusal::new(&p.context, format!("the container backend's after: {m}")))?,
+        )
+    } else if p.access == "write" && p.mode == "in-place" {
         let c = cfg.map_err(|m| Refusal::new(&p.context, m.clone()))?;
         Some(
             look(c, "after", rundir)
@@ -2188,6 +2452,34 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     if let Err(e) = remove_tree_writable(&rd("sealed")) {
         failed.push(format!("{}: {e}", rd("sealed").display()));
     }
+    // clone mode: what an interrupted look left (each git container's engine state, through the engine), and bwrap's
+    // upload-pack scripts; staging/ and before.json stay, as bwrap's (pot review reads the one, a recovered after the other)
+    let looks = rd("gitlook");
+    if is_real_dir(&looks) {
+        for e in fs::read_dir(&looks).into_iter().flatten().flatten() {
+            if is_real_dir(&e.path()) {
+                failed.extend(cleanup_engine(cfg, &e.path()));
+            }
+        }
+    }
+    let mut own = vec!["gitlook".to_string()];
+    own.extend(
+        fs::read_dir(&abs)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("upload-pack-")),
+    );
+    for n in own {
+        if let Err(e) = remove_tree(&rd(&n)) {
+            failed.push(format!("{}: {e}", rd(&n).display()));
+        }
+    }
+    let clone_mode = read_own(&rd("policy.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|v| v["mode"] == "clone");
     for n in ["enginehome", "dockercfg", "secrets", "bin"] {
         if let Err(e) = remove_tree(&rd(n)) {
             failed.push(format!("{}: {e}", rd(n).display()));
@@ -2234,6 +2526,9 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "before.json",
         "binds.txt",
     ] {
+        if clone_mode && n == "before.json" {
+            continue;
+        }
         match fs::remove_file(rd(n)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 failed.push(format!("{}: {e}", rd(n).display()));
@@ -2425,11 +2720,15 @@ fn main() -> ExitCode {
                     .is_some_and(|t| render::net_gaps(&t, &host::RealHost).is_empty());
                 // protected-as-mounts exactly where prepare carries write access out: the look's programs are named
                 let look = c.look_tools().is_some();
+                let clone = c.clone_tools().is_some();
                 engine(&c)
                     .and_then(|(e, program)| probe_now(e, &program, net))
                     .map(|mut g| {
                         if look {
                             g.push("protected-as-mounts");
+                        }
+                        if clone {
+                            g.push("same-path-clone");
                         }
                         g
                     })
@@ -2448,7 +2747,16 @@ fn main() -> ExitCode {
             Ok(c) => run(c, rundir).map(|code| exit = code),
             Err(m) => Err(Refusal::new(&context_of(rundir), m.clone())),
         },
-        Verb::After { rundir } => after(cfg.as_ref(), rundir),
+        Verb::After { rundir } => after(cfg.as_ref(), cli.config.as_deref(), rundir),
+        Verb::Git {
+            rundir,
+            clone,
+            cwd,
+            args,
+        } => match &cfg {
+            Ok(c) => sandboxed_git(c, rundir, clone, cwd, args).map(|code| exit = code),
+            Err(m) => Err(Refusal::new(&context_of(rundir), m.clone())),
+        },
         Verb::Cleanup { rundir } => cleanup(cfg.as_ref(), rundir),
     };
     match result {

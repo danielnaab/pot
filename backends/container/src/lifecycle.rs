@@ -156,16 +156,20 @@ pub fn after_event(
     proxy_log: &str,
     looked: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    if p.mode == "clone" {
-        return Err("clone mode is not in this slice".into());
-    }
     let (denials, loopback) = proxy_refusals(proxy_log);
     let mut ev = serde_json::json!({ "ev": "after", "by": "host", "commits": [], "unsigned": 0, "touches_host_run": [],
         "repo_kit_change": [], "root_repo_change": false, "new_git_metadata": [], "denials": denials,
         "loopback": loopback, "agent_config": [], "signs": l.host_signs, "sealed_left": [] });
     match looked {
+        None if p.mode == "clone" => return Err("clone mode needs the host's look at the clone".into()),
         None if p.access == "write" => return Err("write access needs the host's look".into()),
         None => {}
+        // clone mode: bwrap's clone_after's fields (clonelook.py), the staged commits, refs and scions among them
+        Some(serde_json::Value::Object(m)) if p.mode == "clone" => {
+            for (k, v) in m.into_iter().filter(|(k, _)| CLONE_LOOKED.contains(&k.as_str())) {
+                ev[k] = v;
+            }
+        }
         Some(serde_json::Value::Object(m)) => {
             for k in LOOKED {
                 if let Some(v) = m.get(*k) {
@@ -177,6 +181,26 @@ pub fn after_event(
     }
     Ok(ev)
 }
+
+/// What the host's look at a clone reports (bwrap's `clone_after`'s keys).
+const CLONE_LOOKED: &[&str] = &[
+    "commits",
+    "unsigned",
+    "base",
+    "refs",
+    "refCommits",
+    "scions",
+    "gitlinks",
+    "root_attention",
+    "touches_host_run",
+    "agent_config",
+    "repo_kit_change",
+    "root_repo_change",
+    "new_git_metadata",
+    "uncommitted",
+    "size",
+    "fetch_failed",
+];
 
 /// What the host's look reports of a write run (bwrap's after event's keys for an in-place run).
 const LOOKED: &[&str] = &[
@@ -561,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn after_is_bwraps_event_with_the_hosts_look_and_refuses_clone_mode() {
+    fn after_is_bwraps_event_with_the_hosts_look() {
         let (p, mut l) = fixture("read-only");
         let ev = after_event(&p, &l, "", None).unwrap();
         assert_eq!(
@@ -603,7 +627,20 @@ mod tests {
         p.mode = "clone".into();
         assert_eq!(
             after_event(&p, &l, "", None).unwrap_err(),
-            "clone mode is not in this slice"
+            "clone mode needs the host's look at the clone"
+        );
+        // clone mode: bwrap's clone fields, and only those
+        let looked = serde_json::json!({ "commits": ["0123456789ab"], "refs": { "main": "0123456789ab" }, "uncommitted": 2,
+            "signs": true, "ev": "x" });
+        let ev = after_event(&p, &l, "", Some(looked)).unwrap();
+        assert_eq!(
+            (&ev["refs"]["main"], &ev["uncommitted"], &ev["signs"], &ev["ev"]),
+            (
+                &serde_json::json!("0123456789ab"),
+                &serde_json::json!(2),
+                &serde_json::json!(false),
+                &serde_json::json!("after")
+            )
         );
     }
 }

@@ -167,6 +167,10 @@ pub struct Config {
     pub broker: Option<String>,
     pub shim: Option<String>,
     pub shim_closure: Option<String>,
+    /// Clone mode (bwrap's name): a file of store paths, git's closure, bound into the container the host's look runs
+    /// the clone's git in (`git` among them); with the look's programs and core's `clonelook.py` and `bwrap.py` beside
+    /// `pins`.
+    pub git_closure: Option<String>,
 }
 
 /// The config's programs for the status.relay and git.fetch bindings, all present.
@@ -185,6 +189,15 @@ pub struct LookTools {
     pub python: String,
     pub pins: String,
     pub git: String,
+}
+
+/// Clone mode's programs (see [`Config::clone_tools`]).
+#[derive(Debug, Clone)]
+pub struct CloneTools {
+    pub look: LookTools,
+    pub clonelook: String,
+    /// The lines of `gitClosure`.
+    pub closure: Vec<String>,
 }
 
 /// The config's programs for the network, all present.
@@ -248,6 +261,28 @@ impl Config {
             python: python.clone(),
             pins: pins.clone(),
             git: git.clone(),
+        })
+    }
+
+    /// Clone mode's programs: the look's, git's closure (its file's lines) and core's `clonelook.py`, which runs
+    /// bwrap.py's own clone look, both beside `pins`; `None` unless every one is there and `git` is under a path of
+    /// the closure (it runs in the container).
+    pub fn clone_tools(&self) -> Option<CloneTools> {
+        let look = self.look_tools()?;
+        let closure = closure_lines(self.git_closure.as_deref(), "git").ok()?;
+        let dir = std::path::Path::new(&look.pins).parent()?;
+        let file = |f: &std::path::Path| std::fs::metadata(f).is_ok_and(|m| m.is_file());
+        let clonelook = dir.join("clonelook.py");
+        let real_git = std::fs::canonicalize(&look.git).ok()?;
+        let under = |p: &std::path::Path| closure.iter().any(|c| p.starts_with(c));
+        (file(&clonelook)
+            && file(&dir.join("bwrap.py"))
+            && under(std::path::Path::new(&look.git))
+            && under(&real_git))
+        .then(|| CloneTools {
+            clonelook: clonelook.to_string_lossy().into_owned(),
+            closure,
+            look,
         })
     }
 

@@ -393,3 +393,109 @@ class Look(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
         self.assertIn("before.json", r.stderr)
+
+
+class CloneLook(unittest.TestCase):
+    """Clone mode for the container backend: `pins.py clone GIT RUNDIR` prints each clone's pins as bwrap's prepare
+    computes them (Pins over the clone, its hooks pinned, a proposal link refused), and `pins.py before` records each
+    clone the run's after stages (bwrap's before.json `clones`), but for a sibling in its caller's clone."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
+        self.top, _ = make(self.d)
+        self.clone = os.path.join(self.d, "clone")
+        git("clone", "-q", self.top, self.clone, cwd=self.d)
+        self.rd = os.path.join(self.d, "run")
+        os.makedirs(self.rd)
+        self.w = {"id": "repo:x", "path": self.top, "common": os.path.join(self.top, ".git"), "protected": PROTECT,
+                  "sealed": [], "proposal": ["**/.envrc"], "clone": self.clone}
+        self.write({})
+
+    def write(self, extra):
+        policy = {"version": 1, "run": "abcd", "context": "dispatch", "mode": "clone", "access": "write",
+                  "backend": {"name": "container", "requires": [], "proved": []}, "workspace": [self.w], "items": [],
+                  "mounts": {"state": [], "run": "/run/pot"}, "bindings": [], "children": {}, "grants": []}
+        launch = {"argv": ["true"], "cwd": self.top, "home": "/home/nobody-pot-test", **extra}
+        for n, v in (("policy.json", policy), ("launch.json", launch)):
+            with open(os.path.join(self.rd, n), "w") as f:
+                json.dump(v, f)
+
+    def pins(self, verb):
+        here = os.path.dirname(os.path.abspath(P.__file__))
+        return subprocess.run([sys.executable, "-I", "-S", os.path.join(here, "pins.py"), verb, "git", self.rd],
+                              capture_output=True, text=True, env={**os.environ, **GIT_ENV})
+
+    def test_clone_pins_are_bwraps(self):
+        r = self.pins("clone")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)["clones"]
+        p = B.Pins(self.clone, os.path.join(self.clone, ".git"), PROTECT, {"git": "git"})
+        p.compute(os.path.join(self.clone, ".git", "hooks"), place=False)
+        self.assertEqual(got, [dict(p.data(), sealed=[])])
+        self.assertFalse(os.path.exists(os.path.join(self.clone, ".git", "commondir")), "nothing is placed")
+
+    def test_a_proposal_link_in_the_clone_is_refused(self):
+        os.symlink("/etc/hostname", os.path.join(self.clone, "sub", ".envrc"))
+        got = json.loads(self.pins("clone").stdout)["clones"][0]
+        self.assertEqual(got["refused"]["why"], "link")
+        self.assertIn("sub/.envrc is a symbolic link", got["refused"]["message"])
+
+    def test_before_records_the_clone_but_a_siblings(self):
+        self.assertEqual(self.pins("before").returncode, 0)
+        with open(os.path.join(self.rd, "before.json")) as f:
+            before = json.load(f)
+        self.assertEqual(before["clones"], [{"top": self.top, "clone": self.clone,
+                                             "gits": [os.path.join(self.clone, ".git")]}])
+        os.unlink(os.path.join(self.rd, "before.json"))
+        self.write({"inClone": True})
+        self.assertEqual(self.pins("before").returncode, 0)
+        with open(os.path.join(self.rd, "before.json")) as f:
+            self.assertNotIn("clones", json.load(f))
+
+    def look(self, sandbox):
+        here = os.path.dirname(os.path.abspath(P.__file__))
+        r = subprocess.run([sys.executable, "-I", "-S", os.path.join(here, "clonelook.py"), "git", self.rd, *sandbox],
+                           capture_output=True, text=True, env={**os.environ, **GIT_ENV})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def fake_sandbox(self):
+        """A stand-in for `pot-container git`: RUNDIR CLONE CWD -- ARGS, git run with /clone as the clone, logged."""
+        f = os.path.join(self.d, "fake-sandbox")
+        with open(f, "w") as fh:
+            fh.write('#!/bin/sh\necho "$@" >> "$0.log"\nrd=$1 clone=$2 cwd=$3; shift 4\n'
+                     'for a; do shift; case $a in /clone*) set -- "$@" "$clone${a#/clone}" ;; *) set -- "$@" "$a" ;; esac; done\n'
+                     'exec git -C "$clone${cwd#/clone}" -c safe.directory=* -c core.hooksPath=/dev/null "$@"\n')
+        os.chmod(f, 0o755)
+        return f
+
+    def test_the_look_stages_the_clones_commits_through_the_sandbox(self):
+        base = subprocess.run(["git", "-C", self.clone, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        self.write({"clone": {"base": base, "branch": "main", "path": self.clone, "scions": [], "objects": None}})
+        self.assertEqual(self.pins("before").returncode, 0)
+        with open(os.path.join(self.clone, "AGENTS.md"), "w") as f:
+            f.write("changed")
+        with open(os.path.join(self.clone, ".envrc"), "w") as f:
+            f.write("changed")
+        git("commit", "-qam", "in the clone", cwd=self.clone)
+        sb = self.fake_sandbox()
+        ev = self.look([sb])
+        self.assertEqual(len(ev["commits"]), 1)
+        self.assertEqual(list(ev["refs"]), ["main"])
+        self.assertEqual(ev["base"], base[:12])
+        self.assertEqual(ev["touches_host_run"], [".envrc", "AGENTS.md"])
+        self.assertEqual(ev["agent_config"], [".envrc"])
+        self.assertEqual(ev["uncommitted"], 0)
+        self.assertNotIn("fetch_failed", ev)
+        with open(sb + ".log") as f:
+            said = f.read()
+        self.assertIn("upload-pack --strict /clone/.git", said, "git ran in the sandbox, never on the clone itself")
+        self.assertIn(f"{self.rd} {self.clone} /clone -- --no-optional-locks status", said)
+
+    def test_a_siblings_look_stages_nothing(self):
+        self.write({"inClone": True})
+        self.assertEqual(self.pins("before").returncode, 0)
+        ev = self.look([self.fake_sandbox()])
+        self.assertEqual(ev["commits"], [])
+        self.assertNotIn("refs", ev)

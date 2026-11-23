@@ -30,7 +30,7 @@ impl Engine {
 /// scope pot proves resource-limits by (pot.py `scope_for`). private-proxy only when the config names the network's
 /// programs (`NET`): the proxy's socket is in the run folder, served in the run's own network namespace.
 /// protected-as-mounts when it names the look's (`LOOK`: write access in place, its pins as read-only mounts).
-pub fn upholds(engine: Engine, net: bool, look: bool, g: &str) -> bool {
+pub fn upholds(engine: Engine, net: bool, look: bool, clone: bool, g: &str) -> bool {
     matches!(
         g,
         "closure-store"
@@ -43,6 +43,7 @@ pub fn upholds(engine: Engine, net: bool, look: bool, g: &str) -> bool {
     ) || (g == "resource-limits" && engine == Engine::Podman)
         || (g == "private-proxy" && net)
         || (g == "protected-as-mounts" && look)
+        || (g == "same-path-clone" && clone)
 }
 
 /// Entries a sealed folder takes (bwrap's `SEAL_MAX`): one bind each; a folder with more stays plainly read-only.
@@ -230,6 +231,9 @@ pub struct Inputs<'a> {
     pub broker: Option<&'a BrokerTools>,
     /// The config's socat, which the nix binding's relay runs on the host, when it names one.
     pub nix_socat: Option<&'a str>,
+    /// Clone mode: each clone's pins as `pins.py clone` resolved them (the clone's paths), when the config names the
+    /// clone's programs (the look's, and `gitClosure`); `None` otherwise (no same-path-clone, clone mode refused).
+    pub clones: Option<&'a [WsPins]>,
     pub host: &'a dyn Host,
 }
 
@@ -444,7 +448,7 @@ fn gaps(i: &Inputs) -> Vec<String> {
     let p = i.policy;
     let mut out = vec![];
     for g in &p.backend.proved {
-        if !upholds(i.engine, i.net.is_some(), i.look.is_some(), g) {
+        if !upholds(i.engine, i.net.is_some(), i.look.is_some(), i.clones.is_some(), g) {
             out.push(match g.as_str() {
                 "resource-limits" => {
                     "resource-limits under docker (a container is not in pot's scope)".to_string()
@@ -457,7 +461,20 @@ fn gaps(i: &Inputs) -> Vec<String> {
         }
     }
     if p.mode == "clone" {
-        out.push("clone mode (the clone at its original path, its pins, the staging fetch)".into());
+        match i.clones {
+            None => out.push("clone mode: the backend's --config names no python, pins, git and gitClosure (the clone's pins, and the host's look at its commits with git in a container)".into()),
+            Some(_) if !p.proves("same-path-clone") => {
+                out.push("clone mode at the clone's own path (the policy does not prove same-path-clone)".into());
+            }
+            Some(cps) => {
+                for w in &p.workspace {
+                    let c = w.clone.as_deref().unwrap_or_default();
+                    if !cps.iter().any(|cp| cp.top == c) {
+                        out.push(format!("clone mode without the pins of the clone {c}"));
+                    }
+                }
+            }
+        }
     } else if p.access == "write" {
         // 0.3.0: carried out from the pins pot's core resolved, with the host's look before and after (pins.py)
         if i.look.is_none() {
@@ -810,6 +827,36 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
             }
         }
     }
+    // clone mode (bwrap's prepare, same-path-clone): the clone writable at the workspace's original path, and its pins
+    // (`pins.py clone`: Pins over the clone, its hooks pinned) each onto the same place under that path: its git
+    // directories writable, its config, hooks and protected paths read-only; the placeholders created in the clone
+    // first. Hidden paths and sockets are not masked in a clone (it holds only what git holds), as under bubblewrap
+    if p.mode == "clone" && p.proves("same-path-clone") {
+        for w in &p.workspace {
+            let Some(src) = w.clone.as_deref() else { continue };
+            let Some(cp) = i.clones.and_then(|c| c.iter().find(|cp| cp.top == src)) else {
+                continue;
+            };
+            let at = |q: &str| format!("{}{}", w.path, q.strip_prefix(src).unwrap_or(q));
+            if real(src, &mut unreal) {
+                m.bind(src, &w.path, WRITE, false);
+                kinds.insert(src.to_string(), Kind::Folder);
+            }
+            for d in &cp.dirs {
+                if real(d, &mut unreal) {
+                    m.bind(d, &at(d), WRITE, false);
+                    kinds.insert(d.clone(), Kind::Folder);
+                }
+            }
+            for r in &cp.ro {
+                if real(&r.path, &mut unreal) {
+                    m.bind(&r.path, &at(&r.path), READ, true);
+                    kinds.insert(r.path.clone(), r.kind);
+                }
+            }
+            placeholders.extend(cp.placeholders.iter().cloned());
+        }
+    }
     // v2.19.1, as bwrap's `seal`: each sealed folder (launch.json's pins' `sealed`, sealed_dirs) a folder of the run's,
     // bound writable at its path, with each entry of the host's bound read-only into it (a link as the same link),
     // so no entry can be written, replaced, renamed or removed and a new one lands in the run folder (after's
@@ -1053,9 +1100,7 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         .by_dest
         .iter()
         .filter_map(|(d, (_, mt))| match mt {
-            Mount::Bind { src, .. }
-                if bound.iter().any(|b| under(d, b)) || (src == d && kinds.contains_key(src)) =>
-            {
+            Mount::Bind { src, .. } if bound.iter().any(|b| under(d, b)) || kinds.contains_key(src) => {
                 Some((d.clone(), src.clone()))
             }
             _ => None,
@@ -1091,9 +1136,9 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
     // every workspace path still bound onto itself, by kind, for prepare to record and run to check again
     let pins: Vec<(String, Kind)> = mounts
         .iter()
-        .filter_map(|(dest, mt)| match mt {
-            Mount::Bind { src, .. } if src == dest => kinds.get(src).map(|k| (src.clone(), *k)),
-            _ => None,
+        .filter_map(|(_, mt)| match mt {
+            Mount::Bind { src, .. } => kinds.get(src).map(|k| (src.clone(), *k)),
+            Mount::Tmpfs { .. } => None,
         })
         .collect();
     // podman and docker order mounts by destination themselves; this order is for people
@@ -1531,7 +1576,7 @@ fn proxy_argv(t: &NetTools, context: &str, l: &Launch, denials: &str, allow: &[S
 }
 
 /// A bind: podman's `--volume`; docker's `--mount`, since docker's `--volume` creates a missing source as root.
-fn bind_opt(engine: Engine, src: &str, dest: &str, ro: bool) -> Opt {
+pub fn bind_opt(engine: Engine, src: &str, dest: &str, ro: bool) -> Opt {
     let arg = match engine {
         Engine::Podman => (
             "--volume",
@@ -1853,6 +1898,7 @@ mod tests {
             look: Some(&look_tools()),
             broker: Some(&broker_tools()),
             nix_socat: Some("/nix/store/s-socat/bin/socat"),
+            clones: None,
             host,
         })
     }
@@ -2126,7 +2172,9 @@ mod tests {
         let expect: &[(&str, &[&str])] = &[
             (
                 "dispatch-clone",
-                &["clone mode (the clone at its original path, its pins, the staging fetch)"],
+                &[
+                    "clone mode: the backend's --config names no python, pins, git and gitClosure (the clone's pins, and the host's look at its commits with git in a container)",
+                ],
             ),
             (
                 "git-fetch",
@@ -2155,7 +2203,9 @@ mod tests {
             ),
             (
                 "seatbelt",
-                &["clone mode (the clone at its original path, its pins, the staging fetch)"],
+                &[
+                    "clone mode: the backend's --config names no python, pins, git and gitClosure (the clone's pins, and the host's look at its commits with git in a container)",
+                ],
             ),
             ("sibling", &[]),
             (
@@ -3296,6 +3346,7 @@ mod tests {
                 look,
                 broker: None,
                 nix_socat: None,
+                clones: None,
                 host: &notes_host(),
             })
         };
@@ -3345,9 +3396,15 @@ mod tests {
 
     #[test]
     fn protected_as_mounts_is_upheld_with_the_look() {
-        assert!(upholds(Engine::Podman, false, true, "protected-as-mounts"));
-        assert!(upholds(Engine::Docker, false, true, "protected-as-mounts"));
-        assert!(!upholds(Engine::Podman, false, false, "protected-as-mounts"));
+        assert!(upholds(Engine::Podman, false, true, false, "protected-as-mounts"));
+        assert!(upholds(Engine::Docker, false, true, false, "protected-as-mounts"));
+        assert!(!upholds(
+            Engine::Podman,
+            false,
+            false,
+            false,
+            "protected-as-mounts"
+        ));
     }
 
     /// X5: a path holding a control character (a newline) can't be said in docker's `--mount`, and a sealed entry
@@ -3437,6 +3494,7 @@ mod tests {
             look: Some(&look_tools()),
             broker: Some(&broker_tools()),
             nix_socat: Some("/nix/store/s-socat/bin/socat"),
+            clones: None,
             host: &nothing(),
         })
     }
@@ -3646,6 +3704,7 @@ mod tests {
             look: None,
             broker: None,
             nix_socat: None,
+            clones: None,
             host: &nothing(),
         })
         .unwrap_err();
@@ -3801,6 +3860,7 @@ mod tests {
             look: None,
             broker: None,
             nix_socat: None,
+            clones: None,
             host: &nothing(),
         })
         .unwrap_err();
@@ -3834,6 +3894,124 @@ mod tests {
         assert_eq!(
             go(&p, &l, Engine::Podman, &nothing()).unwrap_err(),
             ["launch.json's hookEnv names LD_PRELOAD (only GIT_INDEX_FILE and GIT_PREFIX)"]
+        );
+    }
+
+    /// A clone world: the read-only fixture in clone mode (write access, same-path-clone proved), its workspace's clone in
+    /// pot's state, and that clone's pins as `pins.py clone` gives them (the clone's paths).
+    fn cloned(same_path: bool) -> (Policy, Launch, Vec<WsPins>) {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&read(&format!("{PREPARE}/read-only/policy.json"))).unwrap();
+        v["mode"] = "clone".into();
+        v["access"] = "write".into();
+        v["workspace"][0]["sealed"] = serde_json::json!([]);
+        v["workspace"][0]["clone"] = "/s/clones/ab12".into();
+        let mut proved: Vec<serde_json::Value> = v["backend"]["proved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|g| *g != "resource-limits")
+            .cloned()
+            .collect();
+        if same_path {
+            proved.push("same-path-clone".into());
+        }
+        v["backend"]["proved"] = proved.into();
+        let l = serde_json::from_str(&read(&format!("{PREPARE}/read-only/launch.json"))).unwrap();
+        let c = "/s/clones/ab12";
+        let pins: WsPins = serde_json::from_value(serde_json::json!({ "top": c, "common": format!("{c}/.git"),
+            "dirs": [format!("{c}/.git")],
+            "ro": [{ "path": format!("{c}/.git/config"), "kind": "file" }, { "path": format!("{c}/.git/hooks"), "kind": "folder" },
+                   { "path": format!("{c}/flake.nix"), "kind": "file" }, { "path": format!("{c}/.git/commondir"), "kind": "file" }],
+            "placeholders": [{ "path": format!("{c}/.git/commondir"), "kind": "file", "text": ".\n" }],
+            "dotgits": [format!("{c}/.git")], "named": [format!("{c}/flake.nix")], "sealed": [] }))
+        .unwrap();
+        (policy::parse(&v.to_string()).unwrap(), l, vec![pins])
+    }
+
+    fn go_clone(
+        p: &Policy,
+        l: &Launch,
+        engine: Engine,
+        clones: Option<&[WsPins]>,
+    ) -> Result<Plan, Vec<String>> {
+        let paths = paths();
+        render(&Inputs {
+            policy: p,
+            launch: l,
+            paths: &paths,
+            engine,
+            program: engine.name(),
+            image: DOCKER_IMAGE,
+            rundir: "/r",
+            base_closure: &[],
+            net: None,
+            look: Some(&look_tools()),
+            broker: None,
+            nix_socat: None,
+            clones,
+            host: &nothing(),
+        })
+    }
+
+    /// Clone mode, as bwrap's prepare binds it (same-path-clone): the clone writable at the workspace's original path,
+    /// each of its pins (its git directory writable, its config, hooks and protected paths read-only, the placeholders
+    /// created in the clone first) onto the same place under that path; every pin recorded for run's check and the
+    /// entry's (X1); `POT_CLONE=1`.
+    #[test]
+    fn clone_mode_binds_the_clone_at_the_original_path_with_its_pins() {
+        let (p, l, cps) = cloned(true);
+        for engine in [Engine::Podman, Engine::Docker] {
+            let plan = go_clone(&p, &l, engine, Some(&cps)).unwrap_or_else(|g| panic!("{g:?}"));
+            let bind = |src: &str, dest: &str, ro: bool| match engine {
+                Engine::Podman => format!("--volume {src}:{dest}:{}", if ro { "ro" } else { "rw" }),
+                Engine::Docker => format!(
+                    "--mount type=bind,source={src},target={dest}{}",
+                    if ro { ",readonly" } else { "" }
+                ),
+            };
+            let (c, w) = ("/s/clones/ab12", "/home/u/src/notes");
+            for (src, dest, ro) in [
+                (c.to_string(), w.to_string(), false),
+                (format!("{c}/.git"), format!("{w}/.git"), false),
+                (format!("{c}/.git/config"), format!("{w}/.git/config"), true),
+                (format!("{c}/.git/hooks"), format!("{w}/.git/hooks"), true),
+                (format!("{c}/flake.nix"), format!("{w}/flake.nix"), true),
+            ] {
+                assert!(has(&plan, &bind(&src, &dest, ro)), "{src}: {:#?}", lines(&plan));
+            }
+            assert!(has(&plan, "--env POT_CLONE=1"));
+            assert_eq!(plan.placeholders.len(), 1);
+            assert!(
+                plan.pins.contains(&(format!("{c}/.git/config"), Kind::File)),
+                "{:?}",
+                plan.pins
+            );
+            assert!(
+                plan.checks
+                    .contains(&(format!("{w}/.git/config"), format!("{c}/.git/config"))),
+                "{:?}",
+                plan.checks
+            );
+        }
+    }
+
+    /// Clone mode is refused, named, without the config's clone programs, and at the clone's own path (a policy whose
+    /// backend did not prove same-path-clone).
+    #[test]
+    fn clone_mode_needs_the_configs_programs_and_the_original_path() {
+        let (p, l, cps) = cloned(true);
+        assert_eq!(
+            go_clone(&p, &l, Engine::Podman, None).unwrap_err(),
+            [
+                "the same-path-clone guarantee",
+                "clone mode: the backend's --config names no python, pins, git and gitClosure (the clone's pins, and the host's look at its commits with git in a container)"
+            ]
+        );
+        let (p, l, _) = cloned(false);
+        assert_eq!(
+            go_clone(&p, &l, Engine::Podman, Some(&cps)).unwrap_err(),
+            ["clone mode at the clone's own path (the policy does not prove same-path-clone)"]
         );
     }
 }

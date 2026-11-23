@@ -7,9 +7,9 @@ creates first, the sealed folders, and a refusal (a link on a protected path, a 
 link) that stops the run. bubblewrap (bwrap.py) and Seatbelt import this module; the container backend, built apart,
 binds what the data lists and runs this file for the host's look before and after a run:
 
-    python3 -I -S pins.py before|after GIT RUNDIR
+    python3 -I -S pins.py before|after|clone GIT RUNDIR
 
-`before` writes RUNDIR/before.json (what the after event compares: bwrap's) and prints {"notes": [...]}; `after`
+`clone` prints {"clones": [...]}, each clone's pins (bwrap's clone mode, as data). `before` writes RUNDIR/before.json (what the after event compares: bwrap's) and prints {"notes": [...]}; `after`
 prints the in-place part of the after event (bwrap's). Both read RUNDIR/policy.json and launch.json, never through
 a link. The standard library only.
 """
@@ -515,6 +515,26 @@ def look_after(cfg, policy, before, ev, hidden_tracked, repo_kit_paths):
         ev["repo_kit_change"] += [p for p in ev["touches_host_run"] if any(p == f or p.startswith(f + "/") for f in flake)]
 
 
+def clone_pins(cfg, w):
+    """Clone mode (bwrap's prepare, for the container backend): the clone's pins as data, Pins over the clone with its
+    hooks pinned, nothing placed; a proposal path (agent configuration, writable in the clone) that is a link, or under
+    one, refused (v2.19.1). The paths are the clone's; the backend binds each at the original path."""
+    src = w["clone"]
+    d = resolve(src, os.path.join(src, ".git"), w["protected"], os.path.join(src, ".git", "hooks"))
+    d["sealed"] = []
+    if d.get("refused"):
+        return d
+    pp = Pins(src, os.path.join(src, ".git"), w.get("proposal") or [], cfg)
+    pp.scan()
+    try:
+        for e in pp.named:
+            pp.nolink(e, src)
+    except Refused as e:
+        return {"top": src, "common": os.path.join(src, ".git"), "dirs": [], "ro": [], "placeholders": [], "dotgits": [],
+                "named": [], "sealed": [], "refused": {"why": e.why, "path": e.path, "message": str(e)}}
+    return d
+
+
 def read_own(rundir, name):
     """A file of the run's, never through a link (O_NOFOLLOW), as JSON; None when it is not there."""
     try:
@@ -531,8 +551,8 @@ def main(argv):
     """`pins.py before|after GIT RUNDIR`: the container backend's look, bwrap's code. before writes before.json and
     prints {"notes": [...]}; after prints the in-place part of the after event, with sealed_left from sealed.json (the
     backend's seals: dest, base, entries, rel)."""
-    if len(argv) != 3 or argv[0] not in ("before", "after"):
-        print("usage: pins.py before|after GIT RUNDIR", file=sys.stderr)
+    if len(argv) != 3 or argv[0] not in ("before", "after", "clone"):
+        print("usage: pins.py before|after|clone GIT RUNDIR", file=sys.stderr)
         return 2
     verb, cfg, rundir = argv[0], {"git": argv[1]}, argv[2]
     try:
@@ -540,10 +560,19 @@ def main(argv):
         if policy is None or launch is None:
             raise OSError("policy.json or launch.json is missing")
         protect = {w["path"]: w["protected"] for w in policy["workspace"]}
+        clones = [w for w in policy["workspace"] if w.get("clone")]
+        if verb == "clone":
+            print(json.dumps({"clones": [clone_pins(cfg, w) for w in clones]}))
+            return 0
         if verb == "before":
             before = before_look(cfg, [Pins.from_data(d, protect[d["top"]]) for d in launch.get("pins") or []])
             hidden = [p for i in policy["items"] if i["kind"] == "hidden" and i["effective"] for p in i.get("paths", [])]
             _, notes, before["hiddenTracked"] = workspace_hidden(cfg, policy, hidden, launch["home"])
+            # clone mode: each clone the after step stages (bwrap's), but for a sibling in its caller's clone
+            for w in clones if not launch.get("inClone") else []:
+                p = Pins(w["clone"], os.path.join(w["clone"], ".git"), w["protected"], cfg)
+                p.scan()
+                before.setdefault("clones", []).append({"top": w["path"], "clone": w["clone"], "gits": sorted(p.dotgits)})
             path = os.path.join(rundir, "before.json")
             if os.path.lexists(path):
                 os.unlink(path)

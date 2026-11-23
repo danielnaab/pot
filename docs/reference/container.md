@@ -6,8 +6,8 @@ status: draft
 pot's third backend, beside bubblewrap and Seatbelt: it carries out a run's [policy.json/1](../../contracts/policy-1.md)
 as one `podman run` or `docker run`, a fresh container per run, on any host or CI that has either. It is pot's
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
-`packages.pot-container`). This page is its sixth slice (pot phase 2, plan step 3): it probes, renders the
-command and runs it, for runs in place with read access, write access or none, with the network through pot's proxy
+`packages.pot-container`). This page is its seventh slice (pot phase 2, plan step 3): it probes, renders the
+command and runs it, for runs in place with read access, write access or none and for dispatch clones, with siblings, with the network through pot's proxy
 and the `credential`, `mcp`, `status.relay`, `git.fetch` and `nix` bindings; no root offers the backend yet. The transcripts
 that test it are the pages under [container/](container/probe.md).
 
@@ -44,7 +44,8 @@ not prove `protected-as-mounts` and `prepare` refuses write access. The `status.
 and the shim's closure, bound into a run with either binding under `closure-store`); `prepare` refuses either binding
 without `python`, `broker` and `shim`, and refuses unless `python` and `broker` are files and `python` and `shim`, and
 each one's real path, are files under a path the run binds (`render::broker_gaps`). The `nix` binding needs `socat`
-(the relay, on the host), a file. These are bwrap's config names; no contract field is added.
+(the relay, on the host), a file. These are bwrap's config names; no contract field is added. Clone mode needs `gitClosure` (bwrap's name: git's closure, bound into the
+container the host's look runs the clone's git in) beside the look's programs ([Clone mode](#clone-mode)).
 
 **`launch.json`** ([launch.json/1](../../contracts/launch-1.md)) is read leniently, and only these fields:
 
@@ -92,10 +93,11 @@ Guarantees, in bubblewrap's vocabulary (no new names):
 | `in-place` | The workspace at its own path |
 | `root-files` | A `file` item at `/…`, bound into the container's own root |
 | `resource-limits` | podman only: `--cgroups=split` keeps the container in the cgroup of the pot that starts it, so the scope's `MemoryMax` and `TasksMax` apply (seen in a smoke run: the container's cgroup is a child of its caller's) |
+| `same-path-clone` | When the config names clone mode's programs ([Clone mode](#clone-mode)): the clone bound at the workspace's original path |
 | `protected-as-mounts` | When the config names the look's programs (`python`, `pins`, `git`, each a file): write access binds each pin pot's core resolved onto itself, read-only over the writable workspace, a mount point the run can't write, rename, remove or replace ([Write access](#write-access)) |
 | `private-proxy` | When the config's network programs pass the one test `prepare` applies too (`render::net_gaps`, V2): `python` and `proxy` files, `socat` a real file (not a link) under a path of `netClosure`, which is required. The proxy listens on a socket in the run folder, which only the caller can reach, and the run serves it on 127.0.0.1:3128 in its own network namespace ([The network](#the-network)) |
 
-Not proved yet: `same-path-clone` (see [What's next](#whats-next)); never: `nest`,
+Never proved: `nest`,
 `separate-kernel`.
 
 **pot must not cache this probe.** pot caches a backend's probe per build; this one's answer depends on the caller
@@ -548,6 +550,42 @@ The `status.relay`, `git.fetch` and `nix` bindings are carried out as bwrap.py c
   SIGTERM of `run` does the same once the container has stopped. After a SIGKILL of `run`, `cleanup` stops what is
   left and removes them ([Run and cleanup](#run-and-cleanup)).
 
+## Clone mode
+
+A dispatch clone (`pot dispatch`, design §9) as bubblewrap carries it out (`prepare`'s clone branch, `clone_after`,
+`sandboxed_git`), with the same code where the code is pot's own:
+
+- **Same path.** The clone (in pot's state) is bound writable at the workspace's original path, so the backend proves
+  `same-path-clone` (`probe`, when the config names the look's programs, `python`, `pins` and `git`, and `gitClosure`, a
+  file of store paths holding `git`'s real file, and core's `clonelook.py` and `bwrap.py` are beside `pins`). Without
+  them `probe` does not prove it and `prepare` refuses clone mode, named; a policy whose backend did not prove it (a
+  clone at its own path, Seatbelt's way) is refused too: this backend never runs a clone where the run's paths would
+  not be the repository's.
+- **Its pins.** `prepare` runs `PYTHON -I -S PINS clone GIT RUNDIR` (core's `pins.py`): bwrap's `Pins` over the clone,
+  with its hooks pinned, nothing placed, and a proposal path (agent configuration) that is a link, or under one, refused
+  with bwrap's message. Each of the clone's git directories is bound writable and its config, hooks, `.git` files and
+  protected paths read-only, each onto the same place under the original path; the placeholders are created in the
+  clone first (and removed by `cleanup` while they hold what `prepare` wrote). Every pin is recorded and checked again by
+  `run` and by the entry inside the container (X1), as with write access in place. Hidden paths and sockets are not
+  masked in a clone, which holds only what git holds, as under bubblewrap.
+- **before.json** records each clone the run's `after` stages (`pins.py before`), but for a sibling in its caller's
+  clone (`inClone`), whose caller stages it. `cleanup` keeps `before.json`, as bubblewrap does: a recovered `after`
+  (`pot review`) reads it again.
+- **The host's look** (`after`) is bwrap's `clone_after` itself: `PYTHON -I -S CLONELOOK GIT RUNDIR SELF --config
+  CONFIG git` (core's `clonelook.py`, which imports `bwrap.py`), in the look's environment plus the engine's variables.
+  The clone's branches are staged into `RUNDIR/staging` with fsck through an upload-pack, and its status read, never
+  by host git in the clone: each of those git commands runs in a container of its own, by this binary's hidden `git`
+  verb (`pot-container --config CONFIG git RUNDIR CLONE CWD -- ARGS`), where bubblewrap runs bwrap and Seatbelt
+  sandbox-exec. That container has the clone read-only at `/clone` (one of the policy's clones, its own real path),
+  `gitClosure` read-only, `--network none`, no capability, an empty read-only root with its own `/tmp` as `HOME`, and
+  runs `GIT -C CWD -c safe.directory=* -c core.hooksPath=/dev/null -c core.fsmonitor=false ARGS` with
+  `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. Its engine state is a folder of its own under
+  `RUNDIR/gitlook/`, removed with the container (and waited for) before git's status goes back; `cleanup` removes one an
+  interrupted look left, through the engine. The event's clone fields (`base`, `refs`, `refCommits`, `commits`,
+  `unsigned`, `scions`, `gitlinks`, `touches_host_run`, `agent_config`, `repo_kit_change`, `root_repo_change`,
+  `root_attention`, `uncommitted`, `new_git_metadata`, `size`, `fetch_failed`) are bwrap's.
+- **Removal** of the clone is pot's core (`pot review --discard`, `prune`), never following a link, whatever the backend.
+
 ## Siblings
 
 v2.20.0's siblings, not nesting ([pot-siblings](pot-siblings.md)), as bubblewrap carries them out (`has_siblings`,
@@ -600,7 +638,8 @@ refused, since a field this backend does not know could narrow the run):
 
 - write access when launch.json has no `pins` for a workspace (a pot before 0.3.0), or the config names no `python`,
   `pins` and `git`;
-- clone mode: the clone at its original path, its pins, proposal links, and the `after` staging fetch;
+- clone mode, when the config names no `python`, `pins`, `git` and `gitClosure` (or `clonelook.py` and `bwrap.py` are
+  not beside `pins`), and a clone at its own path (`same-path-clone` not proved) ([Clone mode](#clone-mode));
 - the network, and `private-proxy`, when the config's `python`, `proxy`, `socat` and `netClosure` do not pass
   `probe`'s test (above);
 - `status.relay` or `git.fetch` when the config names no `python`, `broker` and `shim`, or they fail
@@ -636,8 +675,7 @@ write runs only.
 
 ## What's next
 
-1. Clone mode: the clone at its original path, its pins (the same `core/pins.py`), `after` and `cleanup` for clones;
-   the conformance review with executed evidence per guarantee, write access included (plan step 4).
+1. The conformance review with executed evidence per guarantee, siblings and clones included (plan step 4).
 2. Closure delivery as an image built from a root's closure (plan step 5), for hosts without `/nix/store`.
 3. pot choosing the backend from a root, probing it for every run.
 
