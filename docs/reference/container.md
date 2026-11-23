@@ -105,6 +105,27 @@ Never proved: `nest`,
 **pot must not cache this probe.** pot caches a backend's probe per build; this one's answer depends on the caller
 (its `NoNewPrivs`, the engine's state and configuration), so pot must probe it for every run.
 
+### User namespaces
+
+No run creates a user namespace (decided 2026-11-23, L1), as under bubblewrap (`--disable-userns`): one trust rule for
+every backend, since pot v2.20 runs a narrower command as a sibling, never in a namespace of the run's. docker's
+default seccomp profile refuses one to a container without `CAP_SYS_ADMIN`; podman's allows `unshare` and `clone`
+with any flag, so a run under podman could `unshare -U` (QA, 2026-11-23). So every container a run starts, the
+look's git containers and siblings' included, gets docker's default profile from the run folder,
+`--security-opt seccomp=RUNDIR/seccomp.json`, under both engines: moby v27.5.1's `profiles/seccomp/default.json`
+(Apache-2.0), unchanged, built into `pot-container` (`render::SECCOMP_PROFILE`) and written by `prepare` (mode 0444;
+`run` refuses it as a link, `cleanup` removes it). Under `--cap-drop all` its `CAP_SYS_ADMIN` rules never apply:
+
+- `unshare` and `setns` are refused (EPERM);
+- `clone` is allowed only with no `CLONE_NEW*` flag (`CLONE_NEWUSER` among them): a fork or a thread is a `clone`;
+- `clone3`, whose flags are in a struct seccomp can't read, is ENOSYS, so libc falls back to `clone`.
+
+The profile is on the engine's command line, so no containers.conf or daemon default replaces it: podman reads only
+the run's containers.conf, and docker's daemon applies a container's own profile over its `seccomp-profile`.
+Tested in `run.rs` under both engines (`*_no_run_creates_a_user_namespace`: `unshare -U` refused, `clone` with
+`CLONE_NEWUSER` EPERM, `clone3` ENOSYS, a fork and a thread work; without the profile, podman's run creates one) and
+end to end by `tests/run.sh sibling` (the caller and its sibling, under each engine).
+
 ## The engine's configuration
 
 podman and docker read configuration that changes every container: `CONTAINERS_CONF_OVERRIDE` and the user's
@@ -116,7 +137,7 @@ guarantee. So the engine starts with:
 - **an environment of pot's**: the caller's cleared, but for `PATH HOME USER LOGNAME XDG_RUNTIME_DIR
   DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM` (`engine::KEEP`) and the run's variables passed by name;
 - **podman:** `CONTAINERS_CONF` the run's `containers.conf` (it replaces every other containers.conf; no default
-  mounts file, volumes, variables or devices; the default seccomp profile); `CONTAINERS_STORAGE_CONF` the run's
+  mounts file, volumes, variables or devices); `CONTAINERS_STORAGE_CONF` the run's
   `storage.conf` (native overlay, no `mount_program`: a user's storage.conf named a program the engine ran at the
   run's start); and `HOME` the run's `enginehome`, emptied at each `prepare`, since podman reads
   `~/.config/containers/mounts.conf` from `$HOME` whatever containers.conf says;
@@ -204,7 +225,7 @@ run's that the plan binds, but for the pipe and the sockets, which `run`'s helpe
 | (always) | `--init`: the engine's init is PID 1 (catatonit, or docker's `docker-init`), a read-only bind of the engine's own file; the command is never PID 1, which ignores a signal it has no handler for | the same |
 | stdin a terminal | `--tty`, added by `run` | the same |
 | a secret `env` item, a `credential` or `mcp` binding, or the network | `--volume RUNDIR/secrets.fifo:/run/pot/secrets.fifo:ro`; no `--env NAME`; the entry is `/usr/bin/env -i -- SHELL --noprofile --norc -c SCRIPT pot-entry /run/pot/secrets.fifo SOCAT N NAMES… /usr/bin/env -u _ -u SHLVL -u PWD -u OLDPWD -C CWD -- POT'S VALUES… ARGV` (`SOCAT` empty without the network) | the same, with `--mount` |
-| (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, the engine's default seccomp profile | the same |
+| (always) | `--cap-drop all --security-opt no-new-privileges --read-only`, and `--security-opt seccomp=RUNDIR/seccomp.json`: docker's default profile ([User namespaces](#user-namespaces)) | the same |
 | the run's user (`launch.json` `uid`, `gid`) | `--userns keep-id --user UID:GID --passwd=false` | `--user UID:GID` |
 | the root | `--rootfs RUNDIR/rootfs:O` (an empty folder, an overlay so nothing is written to it); options before it | an empty imported image, `--pull never --entrypoint ""` |
 | the working directory | `/usr/bin/env -C CWD -u HOSTNAME -- ARGV` (podman takes no `-w` with `--rootfs`); with a secret, a binding or the network, as above | the same |

@@ -1061,6 +1061,7 @@ fn engine_paths(
             &[
                 "containers.conf",
                 "storage.conf",
+                "seccomp.json",
                 "passwd",
                 "group",
                 "hosts",
@@ -1071,7 +1072,7 @@ fn engine_paths(
         Engine::Docker => (
             &["dockercfg"],
             &["emptydir", "potcfg"],
-            &["passwd", "group", "hosts", "empty", "hidden.txt"],
+            &["seccomp.json", "passwd", "group", "hosts", "empty", "hidden.txt"],
         ),
     };
     let mut bad = vec![];
@@ -2009,6 +2010,9 @@ fn sandboxed_git(
     let (e, program) = engine(cfg).map_err(refuse)?;
     let o = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let mut argv = vec![program.clone()];
+    // L1: the run's seccomp profile, for the look's containers too
+    write_new(&g.join("seccomp.json"), render::SECCOMP_PROFILE.as_bytes(), 0o444)
+        .map_err(|err| refuse(err.to_string()))?;
     let set: Vec<(String, String)> = match e {
         Engine::Podman => {
             let made = write_new(&g.join("empty"), b"", 0o444)
@@ -2068,6 +2072,8 @@ fn sandboxed_git(
         "all",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        &format!("seccomp={gs}/seccomp.json"),
         "--read-only",
         "--user",
         &ids,
@@ -2542,6 +2548,7 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
         "container.env",
         "containers.conf",
         "storage.conf",
+        "seccomp.json",
         "container.id",
         "passwd",
         "group",

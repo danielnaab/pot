@@ -1750,6 +1750,78 @@ echo "proxy=$HTTPS_PROXY"
     assert_eq!(names(&run), left);
 }
 
+/// L1 (decided 2026-11-23): no run creates a user namespace, under either engine (podman's own default profile allows
+/// one): `unshare -U` is refused, and so is `clone` with `CLONE_NEWUSER`; `clone3` is ENOSYS. A fork and a thread (libc
+/// tries `clone3` first, then `clone`) still work.
+fn userns_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let (Some(unshare), Some(python)) = (find("unshare"), find("python3")) else {
+        eprintln!("no unshare or python3 on PATH: no container started");
+        return;
+    };
+    let script = format!(
+        "{u} -U {t} 2>/dev/null && echo unshare-userns || echo unshare-refused; \
+         {t} & wait $! && echo forked; \
+         {py} -I -S -c '{code}'",
+        u = unshare.display(),
+        t = coreutils("true"),
+        py = python.display(),
+        code = "import ctypes, errno, os, platform, threading\n\
+                libc = ctypes.CDLL(None, use_errno=True)\n\
+                nr = {\"x86_64\": (56, 435), \"aarch64\": (220, 435)}[platform.machine()]\n\
+                def call(n, *a):\n\
+                \x20   r = libc.syscall(n, *a)\n\
+                \x20   if r == 0: os._exit(0)\n\
+                \x20   if r > 0: os.waitpid(r, 0); return \"ok\"\n\
+                \x20   return errno.errorcode[ctypes.get_errno()]\n\
+                print(\"clone-newuser\", call(nr[0], 0x10000000 | 17, 0, 0, 0, 0))\n\
+                print(\"clone3\", call(nr[1], 0, 0))\n\
+                t = threading.Thread(target=lambda: print(\"thread\")); t.start(); t.join()"
+    );
+    let (top, run) = world(
+        &format!("{engine}-userns"),
+        engine,
+        &program,
+        &["/bin/sh", "-c", &script],
+    );
+    // unshare's and python's store paths in the run's closure
+    let base = top.join("store/base.txt");
+    let mut closure = fs::read(&base).unwrap();
+    closure.extend(closure_of(&[&unshare, &python]));
+    fs::write(&base, closure).unwrap();
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    ok(&out);
+    let got = String::from_utf8_lossy(&out.stdout);
+    for want in [
+        "unshare-refused",
+        "forked",
+        "clone-newuser EPERM",
+        "clone3 ENOSYS",
+        "thread",
+    ] {
+        assert!(got.lines().any(|l| l == want), "{engine}: no {want:?} in\n{got}");
+    }
+    assert!(
+        argv_words(&run).iter().any(|w| w.starts_with("seccomp=")),
+        "{:?}",
+        argv_words(&run)
+    );
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_no_run_creates_a_user_namespace() {
+    userns_case("podman");
+}
+
+#[test]
+fn docker_no_run_creates_a_user_namespace() {
+    userns_case("docker");
+}
+
 #[test]
 fn podman_network_reaches_only_the_allowlist_through_pots_proxy() {
     network_case("podman");
@@ -5181,6 +5253,25 @@ fn clone_world(name: &str, engine: &str, program: &str) -> Option<(PathBuf, Path
 /// configuration the clone proposes (`.envrc`), what stays uncommitted. No git container, engine state or upload-pack
 /// script is left, and before.json and staging/ stay (pot review reads them).
 #[allow(clippy::too_many_lines)] // the run, the host's look, cleanup and a recovered look
+/// The docker containers of pot's (`pot-…`) that bind a path under TOP: this test's alone, since the other docker tests'
+/// containers, running meanwhile, are named `pot-…` too.
+fn docker_left(program: &str, top: &Path) -> Vec<String> {
+    let ps = Command::new(program)
+        .args(["ps", "-aq", "--filter", "name=pot-"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&ps.stdout)
+        .split_whitespace()
+        .filter(|id| {
+            Command::new(program)
+                .args(["inspect", "--format", "{{range .Mounts}}{{.Source}} {{end}}", id])
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&*top.to_string_lossy()))
+        })
+        .map(String::from)
+        .collect()
+}
+
 fn clone_case(engine: &str) {
     let Some(program) = engine_program(engine) else {
         return;
@@ -5241,13 +5332,9 @@ echo "top=$({g} rev-parse --show-toplevel)"
     assert!(run.join("staging/top.git").is_dir());
     assert!(!run.join("gitlook").exists(), "the look's engine state is gone");
     if engine == "docker" {
-        let ps = Command::new(&program)
-            .args(["ps", "-a", "--filter", "name=pot-", "--format", "{{.Names}}"])
-            .output()
-            .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ps.stdout).trim(),
-            "",
+            docker_left(&program, &top),
+            Vec::<String>::new(),
             "a git container is left"
         );
     }
@@ -5360,13 +5447,9 @@ until case "$(cat /tmp/o 2>/dev/null)" in *stubborn-up*) true ;; *) false ;; esa
             "the sibling's container is left"
         );
     } else {
-        let ps = Command::new(&program)
-            .args(["ps", "-a", "--filter", "name=pot-", "--format", "{{.Names}}"])
-            .output()
-            .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&ps.stdout).trim(),
-            "",
+            docker_left(&program, &stop),
+            Vec::<String>::new(),
             "the sibling's container is left"
         );
     }

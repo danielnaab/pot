@@ -710,7 +710,10 @@ mod tests {
         parse(&v.to_string()).unwrap();
         v["backend"]["resources"] = serde_json::json!({ "limits": null, "other": 1 });
         let e = parse(&v.to_string()).unwrap_err().to_string();
-        assert!(e.ends_with("backend.resources.other: unknown field `other`"), "{e}");
+        assert!(
+            e.ends_with("backend.resources.other: unknown field `other`"),
+            "{e}"
+        );
     }
 
     /// policy-1's schema names this backend in `backend.name` (a new value within version 1).

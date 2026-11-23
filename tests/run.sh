@@ -2660,6 +2660,7 @@ sibling_container() {
   expect "runs, in its own run" holds "nk-chk POT=work parent=- args=a b"
   expect "read-only, as its access says" has "nk-chk: read-only"
   expect "without the caller's network, variable or token, or the standing reach" has "nk-chk proxy=none tok=none stand=none"
+  expect "L1: and with no user namespace (docker's seccomp profile, under either engine)" has "nk-chk: no userns"
   n=$(grep -l '"via":"sibling"' "$work"/nstate/runs/*/log.jsonl | xargs ls -t | head -1)
   expect "its record names the run that asked, and the container backend (its caller's)" \
     jq -e 'select(.ev == "start") | select(.by == "host" and .backend == "container" and .invoker == "run" and .depth == 1 and (.caller | test("^[0-9a-f]{4}$")))' "$n"
@@ -2704,6 +2705,10 @@ sibling_container() {
         has "resources  none: the container backend can't keep its run in pot's scope here, so no run has limits (user systemd works)"
     fi
   fi
+  # L1 (decided 2026-11-23): no run creates a user namespace, as under bubblewrap (--disable-userns); a fork still works
+  ran "sibling ($e), L1: the caller itself" cb_ agent -c "$ul -U true 2>/dev/null && echo userns || echo no-userns; true & wait \$! && echo forked"
+  expect "has no user namespace either" has "no-userns"
+  expect "and starts a process" has "forked"
   cb_ agent -c 'nk-chk fail' >/dev/null 2>&1 && st=0 || st=$?
   expect "sibling ($e): its exit code, 7, comes back" test "$st" = 7
   ran "sibling ($e): its stdin and stdout" cb_ agent -c 'echo piped | nk-chk cat; nk-chk cat < notes.md'

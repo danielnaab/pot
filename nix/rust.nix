@@ -6,13 +6,15 @@ let
   inherit (pkgs) lib;
   craneLib = crane.mkLib pkgs;
   root = ./..;
-  # The Cargo workspace, and what its tests read: the transcripts and their run folders, policy-1's fixtures and schema
+  # The Cargo workspace, and what its tests read: the transcripts and their run folders, policy-1's fixtures and schema;
+  # and the seccomp profile the backend embeds
   src = lib.fileset.toSource {
     inherit root;
     fileset = lib.fileset.unions [
       (craneLib.fileset.commonCargoSources root)
       ../deny.toml
       ../docs/reference/container
+      ../backends/container/seccomp
       ../contracts/fixtures/policy-1
       ../contracts/policy-1.schema.json
     ];

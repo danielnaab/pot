@@ -33,6 +33,7 @@ podman
   --cgroupns private
   --cap-drop all
   --security-opt no-new-privileges
+  --security-opt seccomp=[CWD]/read-only/seccomp.json
   --read-only
   --userns keep-id
   --user 1000:100
@@ -110,6 +111,7 @@ docker
   --cgroupns private
   --cap-drop all
   --security-opt no-new-privileges
+  --security-opt seccomp=[CWD]/access-none/seccomp.json
   --read-only
   --user 1000:100
   --pull never
@@ -180,6 +182,7 @@ podman
   --cgroupns private
   --cap-drop all
   --security-opt no-new-privileges
+  --security-opt seccomp=[CWD]/network/seccomp.json
   --read-only
   --userns keep-id
   --user 1000:100
@@ -259,6 +262,7 @@ podman
   --cgroupns private
   --cap-drop all
   --security-opt no-new-privileges
+  --security-opt seccomp=[CWD]/bindings/seccomp.json
   --read-only
   --userns keep-id
   --user 1000:100
@@ -331,6 +335,7 @@ podman
   --cgroupns private
   --cap-drop all
   --security-opt no-new-privileges
+  --security-opt seccomp=[CWD]/relays/seccomp.json
   --read-only
   --userns keep-id
   --user 1000:100

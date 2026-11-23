@@ -25,6 +25,12 @@ impl Engine {
     }
 }
 
+/// L1 (decided 2026-11-23): the seccomp profile of every container a run starts, under both engines: docker's default
+/// (moby v27.5.1, `profiles/seccomp/default.json`, Apache-2.0), unchanged. Under `--cap-drop all` its `CAP_SYS_ADMIN`
+/// rules never apply, so no container creates a user namespace (`unshare` refused, `clone` only without `CLONE_NEW*`
+/// flags, `clone3` ENOSYS so libc falls back to `clone`), as bubblewrap's `--disable-userns` and docker's own default.
+pub const SECCOMP_PROFILE: &str = include_str!("../seccomp/docker-default.json");
+
 /// The guarantees this slice upholds when a policy's `backend.proved` names them (rule 2). resource-limits only
 /// under podman: `--cgroups=split` keeps the container in the cgroup of the pot that started it, the user systemd
 /// scope pot proves resource-limits by (pot.py `scope_for`). private-proxy only when the config names the network's
@@ -1174,8 +1180,16 @@ pub fn render(i: &Inputs) -> Result<Plan, Vec<String>> {
         o(&["--cgroupns", "private"]),
         o(&["--cap-drop", "all"]),
         o(&["--security-opt", "no-new-privileges"]),
+        // L1: docker's default profile, from the run folder, under both engines: no user namespace (podman's own
+        // default allows one), and the engine's configuration can't swap it
+        o(&["--security-opt", &format!("seccomp={}", rd("seccomp.json"))]),
         o(&["--read-only"]),
     ];
+    files.push(RunFile::File {
+        name: "seccomp.json".into(),
+        text: SECCOMP_PROFILE.into(),
+        mode: 0o444,
+    });
     if i.engine == Engine::Podman {
         opts.insert(
             0,
@@ -2133,6 +2147,74 @@ mod tests {
         ));
         assert!(!has(&plan, "--env NOTES_TOKEN") && !plan.engine_keep.iter().any(|k| k == "NOTES_TOKEN"));
         assert_eq!(plan.entry[..2], ["/usr/bin/env", "-i"]);
+    }
+
+    /// L1 (decided 2026-11-23): no run creates a user namespace, under either engine. Both get docker's default seccomp
+    /// profile from the run folder (podman's own default allows `unshare` and `clone` with any flag), whatever the
+    /// engine's configuration names: under `--cap-drop all`, its `CAP_SYS_ADMIN` rules never apply, so `unshare` is
+    /// refused, `clone` only allowed with no namespace flag, and `clone3` is ENOSYS (libc falls back to `clone`).
+    #[test]
+    fn every_run_gets_the_profile_that_refuses_user_namespaces() {
+        for e in [Engine::Podman, Engine::Docker] {
+            let (mut p, l) = run_dir("access-none");
+            p.backend.proved.retain(|g| g != "resource-limits");
+            let plan = go(&p, &l, e, &nothing()).unwrap();
+            assert!(
+                has(&plan, "--security-opt seccomp=/r/seccomp.json"),
+                "{e:?}\n{:#?}",
+                lines(&plan)
+            );
+            assert!(has(&plan, "--cap-drop all"));
+            let text = plan
+                .files
+                .iter()
+                .find_map(|f| match f {
+                    RunFile::File { name, text, mode } if name == "seccomp.json" => {
+                        assert_eq!(*mode, 0o444);
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .expect("seccomp.json");
+            assert_eq!(text, SECCOMP_PROFILE);
+        }
+        let prof: serde_json::Value = serde_json::from_str(SECCOMP_PROFILE).unwrap();
+        assert_eq!(prof["defaultAction"], "SCMP_ACT_ERRNO");
+        let sysadmin = serde_json::json!(["CAP_SYS_ADMIN"]);
+        let mut clone_masked = false;
+        for r in prof["syscalls"].as_array().unwrap() {
+            let names: Vec<&str> = r["names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|n| n.as_str())
+                .collect();
+            for n in ["unshare", "clone", "clone3", "setns"] {
+                if !names.contains(&n) || r["action"] != "SCMP_ACT_ALLOW" {
+                    continue;
+                }
+                let only_sysadmin = r["includes"]["caps"] == sysadmin;
+                // clone without CAP_SYS_ADMIN: only with no CLONE_NEW* flag (0x7E020000, CLONE_NEWUSER among them)
+                let masked = n == "clone"
+                    && r["args"].as_array().is_some_and(|a| {
+                        a.len() == 1
+                            && a[0]["op"] == "SCMP_CMP_MASKED_EQ"
+                            && a[0]["value"] == 2_114_060_288_u64
+                            && a[0].get("valueTwo").is_none_or(|v| v == 0)
+                    });
+                assert!(only_sysadmin || masked, "{n} allowed by {r}");
+                clone_masked |= masked;
+            }
+            if names.contains(&"clone3") && r["action"] == "SCMP_ACT_ERRNO" {
+                assert_eq!(r["errnoRet"], 38, "clone3 is ENOSYS, so libc falls back to clone");
+            }
+        }
+        assert!(clone_masked, "clone is allowed without namespace flags");
+        assert_eq!(
+            0x7E02_0000 & 0x1000_0000,
+            0x1000_0000,
+            "the mask holds CLONE_NEWUSER"
+        );
     }
 
     #[test]

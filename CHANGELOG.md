@@ -151,6 +151,14 @@ v2.14.0's `sandbox` on).
   row, `pot doctor` (unmarked: a fact of the engine), and a `requires` refusal's hint. `tests/run.sh sibling` runs its
   docker leg through pot (its killed dispatch now waits for the run's own commits, not the base's nine, which docker's
   slower start exposed).
+- **No container run creates a user namespace, under podman too** (L1, decided 2026-11-23): every container a run
+  starts (a sibling's and the look's git containers too) gets docker's default seccomp profile (moby v27.5.1,
+  unchanged, built into `pot-container`) from the run folder, `--security-opt seccomp=RUNDIR/seccomp.json`, under both
+  engines. podman's own default allowed `unshare -U`; under `--cap-drop all` docker's refuses `unshare` and `setns`,
+  allows `clone` only with no `CLONE_NEW*` flag, and makes `clone3` ENOSYS, so libc falls back to `clone`. The
+  profile is on the engine's command line, so no containers.conf or daemon default replaces it. bubblewrap's
+  `--disable-userns` was already the rule ([container.md](docs/reference/container.md#user-namespaces)). The engine
+  tests' docker leftover checks look at their own containers only (others run meanwhile).
 
 ### Fixed
 
