@@ -638,7 +638,8 @@ entry is a session leader on the host; its output is the run's and its stdin the
 the client killed stops it (SIGTERM); the run's end stops it before `run` returns; no broker, socket or tree is left.
 End to end through pot, `tests/run.sh sibling` with `POT_TEST_PODMAN`. With `POT_TEST_DOCKER` it says it skips: a run
 without a terminal is in pot's scope, so its policy proves `resource-limits`, which `prepare` refuses under docker
-(tried by hand under a terminal: the siblings and a dispatch clone's look behave as under podman).
+(tried by hand under a terminal: the siblings and a dispatch clone's look behave as under podman). It still runs, under
+a terminal, a dispatch whose look is interrupted (`look_left`), with either engine.
 
 ## Refusals
 
