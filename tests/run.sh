@@ -2743,6 +2743,7 @@ sibling_container() {
   ran "sibling ($e): a dispatch whose pot was killed, recovered (pot runs)" "$work/nc-$e-pot" runs --all
   expect "its look comes after the run's end: the clone's main is the staged main" \
     test "$(git_ -C "$work/nstate/runs/$k/clone" rev-parse main)" = "$(git_ --git-dir "$work/nstate/runs/$k/staging/top.git" rev-parse main)"
+  # shellcheck disable=SC2016 # jq's own $n
   expect "and the event says so" jq -e --arg n "$(git_ -C "$work/nstate/runs/$k/clone" rev-list --count main --not "$(jq -r .clone.base "$work/nstate/runs/$k/launch.json")")" \
     'select(.ev == "after") | select(.recovered and .refCommits.main == ($n | tonumber))' "$work/nstate/runs/$k/log.jsonl"
   ran "sibling ($e): its discard" nb_ review "$k" --discard
