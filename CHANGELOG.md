@@ -9,6 +9,16 @@ v2.14.0's `sandbox` on).
 
 ### Added
 
+- **A root offers the container backend, and pot chooses the backend from the root** ([Which
+  backend](docs/reference/pot.md#which-backend)). `pot.lib.mkRoot` (and `programs.pot`) take `container = { engine;
+  program; image; }`, Linux only, and build the backend's config themselves (bubblewrap's programs and closures,
+  `pins`, the shims' closure, socat's real file), and `defaultBackend` (`"container"`). A run's backend is
+  `--backend`, else the context's `backend`, else the root's `defaultBackend`; a sibling's is its caller's. A name pot
+  has no backend for, or one the root does not offer, is refused (exit 2) naming what the root offers; mkRoot refuses
+  a `defaultBackend` or context `backend` it does not offer, an unknown engine or field, and the container backend on
+  Darwin. A container backend whose probe proves nothing (its engine missing) stops the run naming the engine's error
+  and the way out. `pot explain` says why (`chosen by …`); `pot doctor` probes every offered backend and names the
+  one `pot CMD` runs under. The root manifest's `backends.container` carries `engine` and `enginePath`.
 - **The container backend runs dispatch clones** ([container.md](docs/reference/container.md#clone-mode)) and proves
   `same-path-clone` when its config names `python`, `pins`, `git` and `gitClosure`: the clone bound at the original
   path with bwrap's pins over it (`pins.py clone`), and `after` runs bwrap's own `clone_after` (new `core/clonelook.py`)

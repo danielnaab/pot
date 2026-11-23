@@ -104,6 +104,7 @@ pot.lib.mkRoot {
   inspect ? { }; caBundle ? null;
   limits ? { memoryMax = "50%"; tasksMax = 2048; };
   clones ? { keepDays = 14; maxSize = "20G"; };
+  container ? null; defaultBackend ? null;
 }
 ```
 
@@ -142,6 +143,8 @@ and no default root baked into a wrapper.
 | `bindings.<capability>."<selector>"` | How each capability is carried out ([Bindings](#bindings)). |
 | `limits.memoryMax`, `limits.tasksMax` | The [resource scope](#resource-limits)'s limits, in systemd's units (`"8G"`, `"50%"`, `"infinity"`). Default `"50%"` and `2048`. Another key: `pot.lib.mkRoot: limits is { memoryMax; tasksMax; } and clones { keepDays; maxSize; } (not X)`. |
 | `clones.keepDays`, `clones.maxSize` | How long a [dispatch](#dispatch) clone that needs no review is kept, and the clones' total size. Default `14` and `"20G"`. Neither removes unfetched commits. |
+| `container` | Linux (unreleased): the root offers the [container backend](container.md) too, beside bubblewrap: `{ engine = "podman"; }` or `"docker"`, with `program` (a path, or a package with `bin/ENGINE`; default: the engine on `PATH`) and `image` (docker's empty image, default `localhost/pot-empty:1`). The root builds the backend's config itself: bubblewrap's programs and closures, `pins`, the shims' closure and socat's real file. Checked when the root evaluates: `pot.lib.mkRoot: container.engine is "podman" or "docker" (not "lxc")`, `pot.lib.mkRoot: container is { engine; program; image; } (not X)`, and on Darwin `pot.lib.mkRoot: container: the container backend binds the host's /nix/store, so it is Linux's (this root is aarch64-darwin's)`. |
+| `defaultBackend` | The backend of a context whose `backend` is `auto` (unreleased): `bubblewrap` (on Darwin `seatbelt`) unless `"container"`, with `container`. A backend the root does not offer, here or as a context's `backend`, is an evaluation error: `pot.lib.mkRoot: defaultBackend = "container": the root offers bubblewrap (container = { engine = "podman"; } offers the container backend)`, `pot.lib.mkRoot: contexts.ci: backend = "container": the root offers bubblewrap`. See [Which backend](#which-backend). |
 
 The other options are mkRoot's arguments. While `programs.pot.enable` is on, the module asserts that workmux's
 Docker sandbox is off, because `pot` replaces it for agent panes and never stacks with it:
@@ -169,7 +172,7 @@ programs.pot.contexts.readonly = { extends = "work"; access = "read"; };
 | `extends` | a context name | Start from that context's fields. |
 | `mode` | `in-place`, `clone`, `none` | `none` is `host`. `clone` is [dispatch](#dispatch)'s. |
 | `access` | `write`, `read`, `none` | What the run may do to its workspace. `none`: no workspace in the run, even under a folder a read request names; the command starts in the run's home, and `pot explain` says `limits     no workspace (access none): the run does not see it, and starts in its home`. A clone context with `access = "none"` is refused: `pot (NAME): access none: the run sees no workspace, so it has no clone to work in; a context with access none runs in place`. |
-| `backend` | a backend name, default `auto` | The backend that enforces the run. |
+| `backend` | a backend name, default `auto` | The backend that enforces the run: `auto` is the root's `defaultBackend` ([Which backend](#which-backend)). |
 | `requires` | guarantee names | A run for which the backend cannot prove these is refused ([Guarantees](#guarantees)). |
 | `trust` | `workspace`, `root` | Whether workspace kits are evaluated. `root` is not in 0.1.0. |
 | `include` | root kit names | Root kits in every run of the context: their reach is standing reach. |
@@ -977,6 +980,33 @@ To ask whether a run reaches a host or URL, use `pot why TARGET --json` rather t
 
 The shape is frozen: a release adds values, not fields; a new field is policy.json/2.
 
+## Which backend
+
+A run has one backend (unreleased: pot phase 2). pot takes the first of:
+
+1. `--backend NAME` (`auto` is the next step's choice). A [sibling](#siblings-and-the-children-table) runs under its
+   caller's backend.
+2. The context's `backend`, unless `auto`.
+3. The root's `defaultBackend`: bubblewrap on Linux, Seatbelt on macOS, unless the root makes it `container`.
+
+A name pot has no backend for, or a backend the root does not offer, is usage (exit 2):
+`pot (work): --backend lxc: pot has no backend lxc (its backends: bubblewrap, container, seatbelt)`, and
+`pot (work): --backend container: this root does not offer the container backend (it offers bubblewrap); a root
+offers it with pot.lib.mkRoot's container = { engine = "podman"; } (programs.pot.container)`. A context's or the
+root's backend that the root does not offer fails the root's evaluation (mkRoot's `defaultBackend`). A container
+backend whose probe proves nothing (its engine is missing, or can't run a run) stops the run, naming the engine's
+own error and the way out, and never runs it under another backend:
+
+```
+pot (work): the container backend (podman, the root's default) proves nothing here: podman: can't run /x/podman:
+not found. No run starts under it, and pot never runs one unsandboxed: --backend bubblewrap chooses another of this
+root's backends, pot host CMD runs unsandboxed; pot doctor shows each backend.
+```
+
+`pot explain` says why under its `backend` row (`chosen by the root's default · engine podman`, `chosen by
+--backend bubblewrap`, `chosen by context ci (backend = "container")`, `chosen by its caller's backend (a sibling
+runs under it)`); `pot doctor` probes every backend the root offers, and says which one `pot CMD` runs under.
+
 ## Guarantees
 
 A backend probes the guarantees it can prove. A context's `requires` names guarantees. A probe that fails, or an
@@ -1102,7 +1132,7 @@ and the exit line names each one's permanent form. `--flag=value` works too.
 | `--from REF` | | Clone mode: the base commit, default `HEAD`. Without clone mode: `pot (work): --from is clone mode: pot dispatch --from REF CMD, or pot --clone --from REF CMD` (exit 2). |
 | `--detach` | | Clone mode: run in the background, and print the run's id ([dispatch](#dispatch)). Refused inside a run. Without clone mode, refused as `--from` is. |
 | `--instance NAME` | | Chooses an agent kit instance, as `CMD@NAME` does. Its old name, `--account`, is refused: `pot: --account is gone (v2.17.0): --instance NAME, or CMD@NAME` (exit 2). |
-| `--backend NAME` | | Chooses a backend that the root defines. |
+| `--backend NAME` | | Chooses a backend that the root offers ([Which backend](#which-backend)). |
 | `--resume RUN`, `--resume last` | | Only with `host`: passes the transcript of run `RUN` (`last`: the newest run that left one) into a new host conversation as quoted data, never as history ([Resume on the host](#resume-on-the-host)). Elsewhere: `pot: --resume RUN goes with pot host (pot host --resume RUN CMD)`. |
 
 A flag or `--repo` that names a hidden path, or that would write a root repository, is refused at start.
@@ -1115,7 +1145,7 @@ pot explain [CONTEXT] [FLAGS] [CMD] [--json] [--backend-command]
 
 Prints the run's policy without running it: every item with the kit, file or grant that it came from, and the
 [children table](#siblings-and-the-children-table). `--json` prints [policy.json](#policyjson).
-`--backend-command` prints bubblewrap's command line, with each secret variable shown as `(the run holds it)` (a
+`--backend-command` prints the backend's command line (bubblewrap's; the container backend's `prepare --print`), with each secret variable shown as `(the run holds it)` (a
 `via = "file"` binding's variable as its file's path, `/run/pot/secrets/NAME`);
 with `host`, it prints `argv       CMD` (and `(+ the transcript of run ID, as data)` with `--resume`).
 Inside a run, `pot explain` prints the same text as on the host; `--json` prints the run's policy.json.
@@ -1135,7 +1165,7 @@ rows grouped by kit, with `how`, and each refused row on its own line
 (`children   check-kb check-obsidian check-tasks … (notebook-kit): sibling · claude: exec`,
 then `  meeting-kit: refused (needs WM_TOKEN, git.push)`), or `children   none`. `not
 in run` lists, for each kit whose grant does not apply, its requests, filled under the row. `backend` gives the
-proved and lacking guarantees; `resources`, whether this run gets the [resource scope](#resource-limits); and
+proved and lacking guarantees, and why this backend (`chosen by …`, [Which backend](#which-backend)); `resources`, whether this run gets the [resource scope](#resource-limits); and
 `note`. Rows wrap to the terminal's width, or 100 columns when the output is
 not a terminal (and in the run's `explain.txt`). `pot explain --backend-command claude` prints the whole bubblewrap
 command and Claude's assembled arguments.
@@ -1600,6 +1630,7 @@ never their contents. It exits 1 when a line starts `!`, else 0. There is no `--
 ```
 pot doctor · root home-manager · platform-vm · pot 0.1.0
 backend    bubblewrap: user namespaces work; proves closure-store own-netns own-pidns no-tiocsti protected-as-mounts local-listen in-place same-path-clone private-proxy root-files; resource-limits: for runs without a terminal; lacks separate-kernel nest
+           pot CMD runs under bubblewrap: the root's default (context work)
 resources  user systemd: runs without a terminal get MemoryMax=50% TasksMax=2048
 grants     ~/.workstation/pot/grants.json: parses, 4 kits, no entry for platform-vm in the grants file's machines
 bindings   credential api.anthropic.com kit=claude-code@flexion: file ~/.config/pot/claude-token-flexion (present, 0600)
@@ -1619,7 +1650,11 @@ launcher   ~/.config/pot/launcher -> this pot
 
 notebook-kit is `unverified` here because the bump branch pins it before its release tag.
 
-- `backend` is the probe (`… cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)`
+- `backend` probes every backend the root offers, a row each, the one `pot CMD` runs under first, then a row
+  `pot CMD runs under NAME: WHY (context CONTEXT)` ([Which backend](#which-backend)). A container backend's row is
+  `container (podman): the engine works; proves …; lacks …`, or, marked, `! backend  container (podman): podman:
+  can't run …: not found; no run starts under it` (a marked row for any offered backend makes doctor exit 1).
+  bubblewrap's row is the probe (`… cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)`
   when it fails; when `PATH` has no `true` for it to run, `! backend  bubblewrap: its probe runs true, and PATH has
   none (PATH=…); user namespaces were not tested`). A run that meets the same probe failure stops (exit 1):
   `pot: bubblewrap: its probe runs true, and PATH has none (PATH=…); user namespaces were not tested, so no run

@@ -919,6 +919,8 @@ def log(rundir, ev):
 
 
 def backend_cmd(host, name):
+    """A backend's name and program by its name (a run's record: its start event, its policy.json); None or auto is the
+    root's default. A run's choice is select_backend's."""
     backends = host.root.get("backends") or {}
     if name in (None, "auto"):
         name = host.root.get("defaultBackend") or next(iter(sorted(backends)), None)
@@ -927,8 +929,44 @@ def backend_cmd(host, name):
     return name, backends[name]["program"]
 
 
-def probe(prog, rundir, host=None):
-    """The backend's guarantees, probed once per backend build (cached in pot's state by its path)."""
+# pot phase 2: every backend pot has (policy.json/1's backend.name)
+BACKENDS = ("bubblewrap", "container", "seatbelt")
+
+
+def select_backend(host, flags, ctx):
+    """The run's backend, and why: --backend NAME, else the context's backend (unless auto), else the root's
+    defaultBackend; a sibling runs under its caller's (pot run --sibling passes it as --backend). A name pot has no
+    backend for, or a backend this root does not offer, is refused (exit 2). Returns {name, kind, program, engine,
+    why}: what a guarantee judged per backend (its kind) plugs into, in gather."""
+    root = host.root
+    backends = root.get("backends") or {}
+    cn = ctx["name"]
+    if flags.get("backend") not in (None, "auto"):
+        name = flags["backend"]
+        src = why = f"--backend {name}"
+        if flags.get("siblingOf") is not None:
+            src, why = f"the caller's backend ({name})", "its caller's backend (a sibling runs under it)"
+    elif ctx.get("backend") not in (None, "auto"):
+        name = ctx["backend"]
+        src, why = f"context {cn}'s backend = \"{name}\"", f"context {cn} (backend = \"{name}\")"
+    else:
+        name = root.get("defaultBackend") or next(iter(sorted(backends)), None)
+        src, why = f"the root's defaultBackend = \"{name}\"", "the root's default"
+    if name not in backends:
+        if name not in BACKENDS:
+            raise C.Refusal(f"pot ({cn}): {src}: pot has no backend {name} (its backends: {', '.join(BACKENDS)})", 2)
+        hint = ("; a root offers it with pot.lib.mkRoot's container = { engine = \"podman\"; } (programs.pot.container)"
+                if name == "container" else "")
+        raise C.Refusal(f"pot ({cn}): {src}: this root does not offer the {name} backend "
+                        f"(it offers {', '.join(sorted(backends)) or 'none'}){hint}", 2)
+    b = backends[name]
+    return {"name": name, "kind": b.get("kind"), "program": b["program"], "engine": b.get("engine"), "why": why,
+            "context": cn}
+
+
+def probe(prog, rundir, host=None, backend=None):
+    """The backend's guarantees, probed once per backend build (cached in pot's state by its path). BACKEND (a
+    select_backend result) names it in a refusal."""
     cf = os.path.join(host.state, "cache", "probe-" + hashlib.sha256(os.path.realpath(prog).encode()).hexdigest()[:16]) if host else None
     if cf:
         try:
@@ -936,7 +974,7 @@ def probe(prog, rundir, host=None):
                 return json.load(f)
         except (OSError, ValueError):
             pass
-    g = probe_now(prog, rundir)
+    g = probe_now(prog, rundir, backend, host)
     if cf:
         os.makedirs(os.path.dirname(cf), exist_ok=True)
         with open(cf, "w") as f:
@@ -944,13 +982,21 @@ def probe(prog, rundir, host=None):
     return g
 
 
-def probe_now(prog, rundir):
+def probe_now(prog, rundir, backend=None, host=None):
     import shutil
     r = subprocess.run([prog, "probe", rundir], capture_output=True, text=True)
     try:
         p = json.loads(r.stdout)
     except ValueError:
         p = {"guarantees": [], "error": r.stderr}
+    if not p["guarantees"] and backend and backend.get("kind") == "container":
+        # pot phase 2: the engine is missing, or it can't run what a run needs (its probe's error says which)
+        others = sorted(n for n in ((host.root.get("backends") or {}) if host else {}) if n != backend["name"])
+        out = (f"--backend {others[0]} chooses another of this root's backends, pot host CMD runs unsandboxed"
+               if others else "pot host CMD is the explicit way out")
+        raise C.Refusal(f"pot ({backend['context']}): the {backend['name']} backend ({backend.get('engine') or 'its engine'}, "
+                        f"{backend['why']}) proves nothing here: {(p.get('error') or r.stderr).strip()}. No run starts under it, "
+                        f"and pot never runs one unsandboxed: {out}; pot doctor shows each backend.")
     if not p["guarantees"] and sys.platform == "darwin":
         raise C.Refusal("pot: Seatbelt (/usr/bin/sandbox-exec) does not start a sandbox here ("
                         + p.get("error", "").strip() + "). pot never runs it unsandboxed: pot host CMD is the explicit way out.")
@@ -970,6 +1016,7 @@ def probe_now(prog, rundir):
 def gather(host, root, context, flags, cmd, rundir=None, run_id="0000", clones=None, scope=None):
     """Host facts, then compose. Returns (inputs, policy, report)."""
     ctx = C.resolve_context(root, context)
+    chosen = select_backend(host, flags, ctx)     # before any host fact: a backend refused is usage
     cwd = os.path.realpath(os.getcwd())
     paths = [cwd] + [os.path.realpath(os.path.expanduser(p) if not p.startswith("~") else C.expand(p, host.home))
                      for p in flags.get("repo") or []]
@@ -1055,15 +1102,17 @@ def gather(host, root, context, flags, cmd, rundir=None, run_id="0000", clones=N
         for rq in [m.get("requests") or {}] + [c.get("requests") or {} for c in (m.get("commands") or {}).values()]:
             for e in rq.get("env") or []:
                 env_names.add(e if isinstance(e, str) else e.get("name", ""))
-    bname, bprog = backend_cmd(host, flags.get("backend") or ctx.get("backend"))
+    bname, bprog = chosen["name"], chosen["program"]
     # §11, C1: resource-limits for a run in a user systemd scope whose backend upholds it, missing otherwise
-    probed, resources = C.run_resources(probe(bprog, rundir or host.state, host), scope, bname)
+    probed, resources = C.run_resources(probe(bprog, rundir or host.state, host, chosen), scope, bname)
     inp = {"root": root, "context": ctx["name"], "argv": cmd, "flags": fl, "workspace": ws, "grants": grants,
            "machine": host.machine, "run": run_id, "probe": probed, "resources": resources, "backendName": bname,
            "stateDir": host.state, "grantsName": os.path.basename(host.grants_path),
            "host": {"home": host.home, "user": host.user, "env": {n: n in os.environ for n in env_names},
                     "resolve": resolve, "hidden": resolve_hidden(host, root), "tz": host.tz()}}
     policy, report = C.compose(inp)
+    # pot explain's backend rows: why this backend (a host fact, so not in policy.json)
+    report["backendWhy"] = chosen["why"] + (f" · engine {chosen['engine']}" if chosen.get("engine") else "")
     if flags.get("wrapped") and policy["access"] == "write" and policy["mode"] != "clone":
         # F2: the access of the kit that runs, from this workspace's own bundle, never from the wrapper's manifest
         for w in ws:
@@ -4113,30 +4162,53 @@ def doctor(host, root, rootjson):
         lines.extend(" " * 11 + r for r in rest)
     sp = lambda p: C.canon_path(C.expand(p, host.home), host.home) if p else p   # noqa: E731
     lines.append(f"pot doctor · root {root.get('name', '?')} · {host.machine} · pot {VERSION}")
-    # the backend
+    # the backends (pot phase 2: each the root offers): the one pot CMD runs under first, then the others; a row per
+    # backend, its probe's result, and last which one pot CMD runs under, and why
+    backends = root.get("backends") or {}
     try:
-        bname, bprog = backend_cmd(host, None)
-        r = subprocess.run([bprog, "probe", host.state], capture_output=True, text=True)
-        g = (json.loads(r.stdout) if r.stdout.strip() else {}).get("guarantees") or []
-    except (C.Refusal, ValueError, OSError) as e:
-        bname, g = "none", []
+        chosen = select_backend(host, {}, C.resolve_context(root, root.get("defaultContext") or "work"))
+    except C.Refusal:
+        chosen = None
+    first = chosen["name"] if chosen else (root.get("defaultBackend") or "none")
     # the resource scope: resource-limits is proved per run (a run in the scope), so where the scope works it is
     # no lack; it is one only when the probe fails (L1), or the backend can't uphold it (C1: its probe lacks it)
     sc = scope_for(host, root, {"requires": ["resource-limits"]}, {}, True)
-    held = "resource-limits" in g and bool(sc.get("argv"))
-    if g:
-        g = [x for x in g if x != "resource-limits"]
-        lacks = [x for x in C.GUARANTEES if x not in g and not (x == "resource-limits" and held)]
-        works = "sandbox-exec works" if sys.platform == "darwin" else "user namespaces work"
-        row("backend", f"{bname}: {works}; proves {' '.join(g)}"
-            + ("; resource-limits: for runs without a terminal" if held else "") + f"; lacks {' '.join(lacks)}")
-    elif not shutil.which("true"):
-        # F9: the probe runs true from PATH; without one it says nothing about user namespaces
-        row("backend", f"{bname}: its probe runs true, and PATH has none (PATH={os.environ.get('PATH', '')}); user namespaces were not tested", True)
-    elif sys.platform == "darwin":
-        row("backend", f"{bname}: /usr/bin/sandbox-exec does not start a sandbox here, so no run starts (pot host CMD runs unsandboxed)", True)
-    else:
-        row("backend", f"{bname}: cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)", True)
+    held0 = g0 = None
+    for i, bname in enumerate([first] + sorted(n for n in backends if n != first)):
+        label = "backend" if i == 0 else ""
+        b = backends.get(bname) or {}
+        try:
+            r = subprocess.run([b["program"], "probe", host.state], capture_output=True, text=True)
+            p = json.loads(r.stdout) if r.stdout.strip() else {"error": r.stderr}
+        except (KeyError, ValueError, OSError) as e:
+            p = {"error": str(e)}
+        g = p.get("guarantees") or []
+        # C1: resource-limits holds where the backend upholds it (its probe lists it) and the scope works
+        held = "resource-limits" in g and bool(sc.get("argv"))
+        if i == 0:
+            held0, g0 = held, g
+        container = b.get("kind") == "container"
+        name = f"{bname} ({b.get('engine') or 'its engine'})" if container else bname
+        if g:
+            g = [x for x in g if x != "resource-limits"]
+            lacks = [x for x in C.GUARANTEES if x not in g and not (x == "resource-limits" and held)]
+            works = "the engine works" if container else "sandbox-exec works" if sys.platform == "darwin" else "user namespaces work"
+            row(label, f"{name}: {works}; proves {' '.join(g)}"
+                + ("; resource-limits: for runs without a terminal" if held else "") + f"; lacks {' '.join(lacks)}")
+        elif container:
+            # its error when the engine is missing or can't run a run
+            row(label, f"{name}: {(p.get('error') or 'its probe proves nothing').strip()}; no run starts under it", True)
+        elif not shutil.which("true"):
+            # F9: the probe runs true from PATH; without one it says nothing about user namespaces
+            row(label, f"{bname}: its probe runs true, and PATH has none (PATH={os.environ.get('PATH', '')}); user namespaces were not tested", True)
+        elif sys.platform == "darwin":
+            row(label, f"{bname}: /usr/bin/sandbox-exec does not start a sandbox here, so no run starts (pot host CMD runs unsandboxed)", True)
+        else:
+            row(label, f"{bname}: cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)", True)
+    if chosen:
+        row("", f"pot CMD runs under {chosen['name']}: {chosen['why']} (context {chosen['context']})")
+    # the resources row is the first backend's (the one pot CMD runs under)
+    held, g, bname = held0, g0, first
     if sc.get("argv") and (held or not g):
         row("resources", f"user systemd: runs without a terminal get {sc['limits']}")
     elif sc.get("argv"):

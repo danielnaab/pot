@@ -117,28 +117,24 @@ engines() {
   [ -z "${POT_TEST_PODMAN:-}" ] || echo "podman $POT_TEST_PODMAN"
   [ -z "${POT_TEST_DOCKER:-}" ] || echo "docker $POT_TEST_DOCKER"
 }
-# container_root NAME ROOT ENGINE PROGRAM: the built root ROOT (a link to its package) offering the container backend
-# too, as `--backend container` (no root offers it yet: choosing it from a root is a later step). pot-container is
-# built from this checkout; its --config is ROOT's own bubblewrap config less bwrap's own keys, plus the engine, core's
-# pins.py and the shims' closure (python's and pot's); gitClosure (clone mode's look) is bwrap's own. Writes $work/NAME.json (ROOT's manifest plus backends.container)
-# and $work/NAME-pot (ROOT's pot with that manifest, so a sibling's host entry is it too).
+# container_root NAME ENGINE: sec_sibling's root offering the container backend under ENGINE, as its default, built by
+# pot.lib.mkRoot (its packages.cENGINE: the engine program is POT_TEST_PODMAN's or POT_TEST_DOCKER's). Links $work/NAME
+# (the root), $work/NAME-pot (its pot, a sibling's host entry too) and $work/NAME-backend (its pot-backend-container).
 container_root() {
-  local name=$1 root=$2 engine=$3 program=$4 pc m bprog bcfg src python
-  pc=$(nix build --no-link --print-out-paths "path:$pot#pot-container")/bin/pot-container
-  m=$(grep -o '/nix/store/[^ ]*-pot-root-[^ ]*\.json' "$(readlink -f "$root/bin/pot")" | head -1)
-  bprog=$(jq -r '.backends.bubblewrap.program' "$m")
-  bcfg=$(grep -o -- '--config [^ ]*' "$bprog" | cut -d' ' -f2)
-  src=$(dirname "$(jq -r .broker "$bcfg")") && python=$(jq -r .python "$bcfg")
-  nix-store -qR "$(dirname "$(dirname "$python")")" "$src" > "$work/$name-shim.txt"
+  local name=$1 e=$2 m b cfg
+  ran "sibling ($e): a root offering the container backend builds" nix build -o "$work/$name" "path:$work/nroot#packages.$sys.c$e"
+  m=$(grep -o '/nix/store/[^ ]*-pot-root-[^ ]*\.json' "$(readlink -f "$work/$name/bin/pot")" | head -1)
+  expect "its default is the container backend" test "$(jq -r '.defaultBackend + " " + .backends.container.engine' "$m")" = "container $e"
+  b=$(jq -r .backends.container.program "$m")
+  cfg=$(grep -o -- '--config [^ ]*' "$b" | cut -d' ' -f2)
   # socat as its real file (the entry runs it; bin/socat is a link to socat1)
-  jq --arg e "$engine" --arg p "$program" --arg sc "$work/$name-shim.txt" --arg pins "$src/pins.py" \
-    --arg socat "$(readlink -f "$(jq -r .socat "$bcfg")")" \
-    'del(.bwrap, .bpf, .netwrap, .fd, .find) + {engine: $e, ($e): $p, shimClosure: $sc, pins: $pins, socat: $socat}' \
-    "$bcfg" > "$work/$name-cfg.json"
-  printf '#!/bin/sh\nexec %s --config %s "$@"\n' "$pc" "$work/$name-cfg.json" > "$work/$name-backend"
-  chmod +x "$work/$name-backend"
-  jq --arg p "$work/$name-backend" '.backends.container = {kind: "container", program: $p}' "$m" > "$work/$name.json"
-  sed "s|$m|$work/$name.json|" "$(readlink -f "$root/bin/pot")" > "$work/$name-pot" && chmod +x "$work/$name-pot"
+  # shellcheck disable=SC2016 # jq's own $e
+  expect "its config names the engine" jq -e --arg e "$e" '.engine == $e' "$cfg"
+  expect "and socat's real file" test -f "$(jq -r .socat "$cfg")" -a ! -L "$(jq -r .socat "$cfg")"
+  expect "and every program a run in it needs" jq -e '[.python, .proxy, .netClosure, .pins, .git, .gitClosure, .broker, .shim, .shimClosure,
+    .sh, .shell, .env, .cacert, .terminfo, .tzdir, .baseClosure] | all(type == "string")' "$cfg"
+  ln -sfn "$work/$name/bin/pot" "$work/$name-pot"
+  ln -sfn "$b" "$work/$name-backend"
 }
 
 # The contracts' schemas are JSON Schema 2020-12, and their golden fixtures (what readers test against) validate.
@@ -321,6 +317,28 @@ sec_kits() {
   expect "names the form" holds 'pot.apis.gateway: url = "http://llm.example.test": give https://HOST[/PATH] (pot reaches HOST on port 443)'
   refused "kits: a gateway url on another port" nix eval --impure --json --expr "$ex (p.apis.gateway { url = \"https://llm.example.test:8443\"; }).url"
   expect "is refused the same way" holds 'pot.apis.gateway: url = "https://llm.example.test:8443": give https://HOST[/PATH] (pot reaches HOST on port 443)'
+  # pot phase 2: a root offers the container backend (container = { engine; program; image; }), and may make it the
+  # default (defaultBackend); what it names is checked as the root evaluates
+  local mr="$ex (p.lib.mkRoot { inherit pkgs;"
+  ran "kits: a root that offers the container backend" stdout_of nix eval --impure --json --expr "$mr container = { engine = \"podman\"; program = \"/x/podman\"; }; }).passthru.root"
+  expect "names it, its kind and its engine" test "$(jq -c '.backends.container | {kind, engine}' <<<"$out")" = '{"kind":"container","engine":"podman"}'
+  expect "beside bubblewrap, still the default" test "$(jq -r '[(.backends | keys | join(" ")), .defaultBackend] | join(";")' <<<"$out")" = "bubblewrap container;bubblewrap"
+  ran "kits: a root whose default is the container backend" stdout_of nix eval --impure --raw --expr "$mr container.engine = \"docker\"; defaultBackend = \"container\"; }).passthru.root.defaultBackend"
+  expect "says so" test "$out" = container
+  refused "kits: a defaultBackend the root does not offer" nix eval --impure --raw --expr "$mr defaultBackend = \"container\"; }).drvPath"
+  expect "names what it offers, and how to offer the container backend" holds 'pot.lib.mkRoot: defaultBackend = "container": the root offers bubblewrap (container = { engine = "podman"; } offers the container backend)'
+  refused "kits: an unknown defaultBackend" nix eval --impure --raw --expr "$mr defaultBackend = \"lxc\"; }).drvPath"
+  expect "is refused the same way" holds 'pot.lib.mkRoot: defaultBackend = "lxc": the root offers bubblewrap'
+  refused "kits: a context's backend the root does not offer" nix eval --impure --raw --expr "$mr contexts.ci = { extends = \"work\"; backend = \"container\"; }; }).drvPath"
+  expect "names the context" holds 'pot.lib.mkRoot: contexts.ci: backend = "container": the root offers bubblewrap'
+  refused "kits: a container engine pot does not know" nix eval --impure --raw --expr "$mr container.engine = \"lxc\"; }).drvPath"
+  expect "names the engines" holds 'pot.lib.mkRoot: container.engine is "podman" or "docker" (not "lxc")'
+  refused "kits: a container with no engine" nix eval --impure --raw --expr "$mr container = { program = \"/x/podman\"; }; }).drvPath"
+  expect "is refused the same way" holds 'pot.lib.mkRoot: container.engine is "podman" or "docker" (not null)'
+  refused "kits: a container field mkRoot does not know" nix eval --impure --raw --expr "$mr container = { engine = \"podman\"; socat = \"/x\"; }; }).drvPath"
+  expect "names it" holds 'pot.lib.mkRoot: container is { engine; program; image; } (not socat)'
+  refused "kits: the container backend on Darwin" nix eval --impure --raw --expr "$ex (p.lib.mkRoot { pkgs = p.inputs.nixpkgs.legacyPackages.aarch64-darwin; container.engine = \"podman\"; }).drvPath"
+  expect "is Linux's" holds "pot.lib.mkRoot: container: the container backend binds the host's /nix/store, so it is Linux's (this root is aarch64-darwin's)"
   refused "kits: a root kit's packages" nix eval --impure --raw --expr "$ex (p.lib.mkRoot { inherit pkgs; kits.x.packages = [ pkgs.hello ]; }).drvPath"
   expect "names tools" holds "pot: the root (programs.pot.kits.x): packages is tools' old name, gone in v2.17.0: give tools"
   ran "kits: programs.pot.defaultAccount (home-manager fails on the assertion)" nix eval --impure --raw --expr "$ex builtins.concatStringsSep \"\\n\" (map (a: a.message) (builtins.filter (a: !a.assertion) (p.inputs.nixpkgs.lib.evalModules { modules = [ p.homeManagerModules.default ({ lib, ... }: {
@@ -2372,6 +2390,14 @@ EOF
     packages.$sys.pot = pot.lib.mkRoot common;
     # the same state, clones kept 0 days (H5: a child in review is never pruned)
     packages.$sys.prune = pot.lib.mkRoot (common // { clones = { keepDays = 0; maxSize = "20G"; }; });
+    # pot phase 2: the same root offering the container backend, as its default: under an engine that is not there
+    # (with a context that keeps bubblewrap), and under each engine the test is given (sibling_container)
+    packages.$sys.nomotor = pot.lib.mkRoot (common // { container = { engine = "podman"; program = "$work/no-such-podman"; };
+      defaultBackend = "container"; contexts = common.contexts // { onbw = { extends = "work"; backend = "bubblewrap"; }; }; });
+    packages.$sys.cpodman = pot.lib.mkRoot (common // { container = { engine = "podman"; program = "${POT_TEST_PODMAN:-podman}"; };
+      defaultBackend = "container"; });
+    packages.$sys.cdocker = pot.lib.mkRoot (common // { container = { engine = "docker"; program = "${POT_TEST_DOCKER:-docker}"; };
+      defaultBackend = "container"; });
   };
 }
 EOF
@@ -2638,6 +2664,7 @@ EOF
   refused "sibling: F2, a read wrapper whose kit here writes, in a root repository" bash -c "cd '$work/nrr' && '$bw' --dev-bind / / --bind '$work/nlaunch' \"\$HOME/.config/pot\" -- '$work/nct/bin/nk-chk' rr"
   expect "is refused, as work refuses a root" holds "is a root"
   refuse "nothing ran" holds "args=rr"
+  backend_choice
   # the container backend (pot phase 2): the same siblings from a run in a container, under each engine given
   local eng prog
   # the engines on fd 3: a run in the loop reads its stdin, which would take the next engine's line
@@ -2648,14 +2675,60 @@ EOF
   expect "sibling: launch.json/1, every launch.json validates (siblings, hooks)" launches_valid "$work/nstate"
 }
 
-# sibling_container ENGINE PROGRAM: sec_sibling's siblings from a run under the container backend (its workspace $c, its
-# root $work/nr): each sibling is started by the host under its own grant, and runs under the container backend too
+# backend_choice (pot phase 2): which backend a run gets, and why, from a root that offers the container backend as its
+# default under an engine that is not there (sec_sibling's root nomotor, workspace and grants): --backend, then the
+# context's backend, then the root's default; each refusal names what to do. No engine is needed.
+backend_choice() {
+  ran "backend: a root offering the container backend as its default builds" nix build -o "$work/nm" "path:$work/nroot#packages.$sys.nomotor"
+  # shellcheck disable=SC2317
+  nm_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok STAND=standing "$work/nm/bin/pot" "$@"; }
+  refused "backend: the root's default, its engine missing" nm_ explain agent
+  expect "names the backend, why, and the engine's own error" holds "pot (work): the container backend (podman, the root's default) proves nothing here: podman: can't run $work/no-such-podman: not found"
+  expect "and the way out" holds "--backend bubblewrap chooses another of this root's backends"
+  refused "backend: a run there" nm_ agent -c 'echo ran'
+  refuse "never runs" has ran
+  expect "for the same reason" holds "pot (work): the container backend (podman, the root's default) proves nothing here"
+  ran "backend: --backend bubblewrap over the root's default" nm_ explain --backend bubblewrap agent
+  expect "chooses it" holds "backend    bubblewrap proves"
+  expect "and says why" has "           chosen by --backend bubblewrap"
+  ran "backend: a context's backend over the root's default" nm_ explain onbw agent
+  expect "chooses it" holds "backend    bubblewrap proves"
+  expect "and says why" has '           chosen by context onbw (backend = "bubblewrap")'
+  ran "backend: and runs under it" nm_ onbw agent -c 'echo ran-onbw'
+  expect "it ran" has ran-onbw
+  refused "backend: --backend over the context's" nm_ explain onbw --backend container agent
+  expect "chooses the container backend, saying why" holds "pot (onbw): the container backend (podman, --backend container) proves nothing here"
+  refused "backend: an unknown --backend" nm_ explain --backend lxc agent
+  expect "names pot's backends" holds "pot (work): --backend lxc: pot has no backend lxc (its backends: bubblewrap, container, seatbelt)"
+  expect "as usage (exit 2)" test "$(exit_of nm_ explain --backend lxc agent)" = 2
+  refused "backend: a backend the root does not offer" nb_ explain --backend container agent
+  expect "names what it offers, and how to offer it" holds 'pot (work): --backend container: this root does not offer the container backend (it offers bubblewrap); a root offers it with pot.lib.mkRoot'"'"'s container = { engine = "podman"; } (programs.pot.container)'
+  ran "backend: explain under the root's own default" nb_ explain agent
+  expect "says why" has "           chosen by the root's default"
+  expect "backend: pot doctor, the default's engine missing, exits 1" test "$(exit_of nm_ doctor)" = 1
+  out=$(cat "$work/exit.out")
+  expect "marks the default's row first" holds "! backend  container (podman): podman: can't run $work/no-such-podman: not found; no run starts under it"
+  expect "the root's other backend" holds "           bubblewrap: user namespaces work; proves"
+  expect "and which one pot CMD runs under, and why" has "           pot CMD runs under container: the root's default (context work)"
+  out=$(nb_ doctor 2>&1 || true)
+  expect "backend: pot doctor under the bubblewrap root says so" has "           pot CMD runs under bubblewrap: the root's default (context work)"
+}
+
+# sibling_container ENGINE PROGRAM: sec_sibling's siblings from a run under the container backend, its root's default (its workspace $c, its
+# root $work/nc-ENGINE, container_root's): each sibling is started by the host under its own grant, and runs under the container backend too
 # (its caller's), never in the caller's container.
 sibling_container() {
   local e=$1 st n cp
-  container_root "nc-$e" "$work/nr" "$e" "$2"
+  container_root "nc-$e" "$e"
+  ran "backend ($e): explain under the root's default" env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=x "$work/nc-$e-pot" explain agent
+  expect "is the container backend" holds "backend    container proves"
+  expect "says why, and the engine" has "           chosen by the root's default · engine $e"
+  out=$("$work/nc-$e-pot" doctor 2>&1 || true)
+  expect "backend ($e): pot doctor probes it first" holds "backend    container ($e): the engine works; proves"
+  expect "then bubblewrap" holds "           bubblewrap: user namespaces work; proves"
+  expect "and says pot CMD runs under it" has "           pot CMD runs under container: the root's default (context work)"
   # shellcheck disable=SC2317
-  cb_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok STAND=standing WIDE_TOK=w "$work/nc-$e-pot" --backend container "$@"; }
+  cb_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok STAND=standing WIDE_TOK=w "$work/nc-$e-pot" "$@"; }
   ran "sibling ($e): a wrapped command inside a container run" cb_ agent -c 'nk-chk a b'
   expect "runs, in its own run" holds "nk-chk POT=work parent=- args=a b"
   expect "read-only, as its access says" has "nk-chk: read-only"
@@ -2676,13 +2749,11 @@ sibling_container() {
     expect "and the sibling's too" jq -e '.backend.proved | index("resource-limits")' "$(dirname "$n")/policy.json"
     expect "its start record names the limits" jq -e 'select(.ev == "start") | .resources.limits | test("^MemoryMax=")' "$cp/log.jsonl"
     refuse "and no startup note says it has none" holds "no resource limits"
-    jq '.defaultBackend = "container"' "$work/nc-$e.json" > "$work/nc-$e-d.json"
-    sed "s|$work/nc-$e.json|$work/nc-$e-d.json|" "$work/nc-$e-pot" > "$work/nc-$e-dpot" && chmod +x "$work/nc-$e-dpot"
-    out=$(env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-dpot" doctor 2>&1 || true)
+    out=$(env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-pot" doctor 2>&1 || true)
     pass "sibling ($e), C1: pot doctor, the container backend the root's default"
     if systemd-run --user --scope --quiet true 2>/dev/null; then
-      expect "says resource-limits holds for runs without a terminal" grep -qE '^backend +container: .*; resource-limits: for runs without a terminal; lacks' <<<"$out"
-      refuse "and not among the lacks" grep -qE '^backend +container: .*; lacks .*resource-limits' <<<"$out"
+      expect "says resource-limits holds for runs without a terminal" grep -qE "^backend +container \\($e\\): .*; resource-limits: for runs without a terminal; lacks" <<<"$out"
+      refuse "and not among the lacks" grep -qE "^backend +container \\($e\\): .*; lacks .*resource-limits" <<<"$out"
     fi
   else
     expect "sibling ($e), C1: the caller's policy never claims resource-limits" \
@@ -2695,11 +2766,9 @@ sibling_container() {
     expect "names no limits, and why" holds "resources  none (the container backend can't keep its run in pot's scope here)"
     expect "and lists resource-limits among the lacks" holds "lacks resource-limits"
     # pot doctor, with the container backend the root's default: plain, and not marked (a fact of the engine)
-    jq '.defaultBackend = "container"' "$work/nc-$e.json" > "$work/nc-$e-d.json"
-    sed "s|$work/nc-$e.json|$work/nc-$e-d.json|" "$work/nc-$e-pot" > "$work/nc-$e-dpot" && chmod +x "$work/nc-$e-dpot"
-    out=$(env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-dpot" doctor 2>&1 || true)
+    out=$(env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-pot" doctor 2>&1 || true)
     pass "sibling ($e), C1: pot doctor"
-    expect "lists resource-limits among the container backend's lacks" grep -qE '^backend +container: .*; lacks .*resource-limits' <<<"$out"
+    expect "lists resource-limits among the container backend's lacks" grep -qE "^backend +container \\($e\\): .*; lacks .*resource-limits" <<<"$out"
     if systemd-run --user --scope --quiet true 2>/dev/null; then
       expect "and its resources row says no run has limits" \
         has "resources  none: the container backend can't keep its run in pot's scope here, so no run has limits (user systemd works)"
@@ -2725,7 +2794,7 @@ sibling_container() {
   refused "sibling ($e): a command that needs reach the caller lacks" cb_ agent -c 'nk-wide'
   expect "is refused at start" holds "pot (work): nk-wide needs WIDE_TOK, which this run (agent) lacks: run it on the host (just wide)"
   # shellcheck disable=SC2016 # the run's own $?
-  out=$( (sleep 8; printf '\003'; sleep 5) | script -qec "env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=x $work/nc-$e-pot --backend container agent -c 'nk-chk sleep 3121; echo client-exit=\$?'" /dev/null 2>&1 | tr -d '\r')
+  out=$( (sleep 8; printf '\003'; sleep 5) | script -qec "env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=x $work/nc-$e-pot agent -c 'nk-chk sleep 3121; echo client-exit=\$?'" /dev/null 2>&1 | tr -d '\r')
   pass "sibling ($e): ^C at the terminal"
   expect "reaches the sibling" holds "nk-chk: INT"
   expect "whose status comes back" holds "client-exit=130"
@@ -2746,7 +2815,7 @@ sibling_container() {
   # the clone is never followed by the discard
   mkdir -p "$work/nkeep-$e" && echo keep > "$work/nkeep-$e/f"
   ran "sibling ($e): a container dispatch whose commit runs the hook" env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok \
-    "$work/nc-$e-pot" dispatch --backend container agent -c "echo x > n-$e.md; git add n-$e.md; git -c user.name=t -c user.email=t@e commit -q -m in-container-clone; echo top=\$(git rev-parse --show-toplevel); ln -s '$work/nkeep-$e' outside; echo committed"
+    "$work/nc-$e-pot" dispatch agent -c "echo x > n-$e.md; git add n-$e.md; git -c user.name=t -c user.email=t@e commit -q -m in-container-clone; echo top=\$(git rev-parse --show-toplevel); ln -s '$work/nkeep-$e' outside; echo committed"
   expect "the clone is at the original path (same-path-clone)" has "top=$c"
   expect "the hook command ran, in the clone (as a sibling)" holds "nk-hook POT=dispatch index=$c/.git/index staged=n-$e.md"
   expect "and the commit is there" has "committed"
@@ -2764,7 +2833,7 @@ sibling_container() {
   local runs0 lead k i
   runs0=$(find "$work/nstate/runs" -mindepth 1 -maxdepth 1 -name '????' -printf '%f\n' | sort)
   # shellcheck disable=SC2016 # the run's own variables
-  setsid env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-pot" dispatch --backend container agent -c \
+  setsid env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-pot" dispatch agent -c \
     'i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo $i > k.md; git add k.md; git -c user.name=t -c user.email=t@e commit -q --no-verify -m k$i; sleep 0.2; done' \
     </dev/null >/dev/null 2>&1 &
   lead=$!
@@ -2796,7 +2865,7 @@ sibling_container() {
 # never lost with its record. The dispatch runs under a terminal (no scope, so docker takes it too).
 look_left() {
   local e=$1 n r lead i
-  out=$(script -qec "env -u CLAUDECODE -u CODEX_SANDBOX -u POT $work/nc-$e-pot dispatch --backend container agent -c 'echo l > l-$e.md; git add l-$e.md; git -c user.name=t -c user.email=t@e commit -q --no-verify -m l'" /dev/null </dev/null 2>&1 | tr -d '\r\000')
+  out=$(script -qec "env -u CLAUDECODE -u CODEX_SANDBOX -u POT $work/nc-$e-pot dispatch agent -c 'echo l > l-$e.md; git add l-$e.md; git -c user.name=t -c user.email=t@e commit -q --no-verify -m l'" /dev/null </dev/null 2>&1 | tr -d '\r\000')
   n=$(sed -n 's/.*pot: run \([0-9a-f]*\) · 1 commit on main.*/\1/p' <<<"$out")
   expect "look ($e): a container dispatch under a terminal comes back with its commit" test -n "$n"
   r=$work/nstate/runs/$n

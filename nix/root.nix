@@ -22,12 +22,17 @@
 #     caBundle ? null;              # a CA bundle (a path), at /etc/ssl/certs/ca-certificates.crt in runs
 #     limits ? { };                 # the resource scope of runs without a terminal: { memoryMax = "50%"; tasksMax = 2048; }
 #     clones ? { };                 # dispatch clones kept: { keepDays = 14; maxSize = "20G"; } (never unfetched commits)
+#     container ? null;             # Linux: the container backend too (pot phase 2): { engine = "podman" | "docker";
+#                                   # program ? the engine on PATH (a path, or a package with bin/ENGINE);
+#                                   # image ? docker's empty image (localhost/pot-empty:1) }
+#     defaultBackend ? null;        # the backend of a context whose backend is "auto": bubblewrap (Seatbelt on
+#                                   # Darwin) unless "container"
 #   }
 #
 # The result is the root's `pot` (passthru.root: the manifest; passthru.backend: the bubblewrap
-# backend: bubblewrap on Linux, Seatbelt on Darwin). Kit manifests are checked when it builds (compose.py
-# validate).
-{ potSrc }:
+# backend: bubblewrap on Linux, Seatbelt on Darwin; passthru.containerBackend: the container backend, or null).
+# Kit manifests are checked when it builds (compose.py validate).
+{ potSrc, containerFor }:
 let potSrc0 = potSrc; in
 
 { pkgs
@@ -50,6 +55,8 @@ let potSrc0 = potSrc; in
 , caBundle ? null
 , limits ? { }
 , clones ? { }
+, container ? null
+, defaultBackend ? null
 }:
 
 let
@@ -113,29 +120,72 @@ let
     python3 ${potSrc}/tiocsti.py $out
   '';
   closureOf = n: roots: pkgs.runCommand n { } "cp ${pkgs.closureInfo { rootPaths = roots; }}/store-paths $out";
-  backendConfig = pkgs.writeText "pot-bwrap.json" (builtins.toJSON {
-    bwrap = "${pkgs.bubblewrap}/bin/bwrap";
+  # what the Linux backends share, by bwrap's config names (the container backend's config takes the same names)
+  linuxConfig = {
     python = "${python}/bin/python3";
     proxy = "${potSrc}/proxy.py";
     broker = "${potSrc}/broker.py";
     shim = "${potSrc}/shim.py";
     socat = "${pkgs.socat}/bin/socat";
-    inherit bpf netwrap;
     sh = "${pkgs.bashInteractive}/bin/sh";
     shell = "${pkgs.bashInteractive}/bin/bash";
     env = "${pkgs.coreutils}/bin/env";
     cacert = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     terminfo = "${pkgs.ncurses}/share/terminfo";
     tzdir = "${pkgs.tzdata}/share/zoneinfo";
-    fd = "${pkgs.fd}/bin/fd";
-    find = "${pkgs.findutils}/bin/find";
     git = "${pkgs.gitMinimal}/bin/git";
     baseClosure = closureOf "pot-base-closure" [ pkgs.bashInteractive pkgs.coreutils pkgs.cacert pkgs.ncurses pkgs.tzdata ];
     netClosure = closureOf "pot-net-closure" [ netwrap ];
     # fetch-back's upload-pack, sandboxed: git's closure only
     gitClosure = closureOf "pot-git-closure" [ pkgs.gitMinimal ];
-  });
+  };
+  backendConfig = pkgs.writeText "pot-bwrap.json" (builtins.toJSON (linuxConfig // {
+    bwrap = "${pkgs.bubblewrap}/bin/bwrap";
+    inherit bpf netwrap;
+    fd = "${pkgs.fd}/bin/fd";
+    find = "${pkgs.findutils}/bin/find";
+  }));
   backend = pkgs.writeShellScriptBin "pot-backend-bwrap" ''exec ${python}/bin/python3 -I -c 'import sys; sys.path.insert(0, "${potSrc}"); import bwrap; sys.exit(bwrap.main(sys.argv[1:]))' --config ${backendConfig} "$@"'';
+
+  # pot phase 2: the container backend (backends/container, pot-container), when the root offers it. Its config is
+  # bwrap's shared names (above) plus the engine, core's pins.py (the host's look at a write run) and the shims'
+  # closure (python's and pot's, for the status.relay and git.fetch bindings); see docs/reference/container.md#inputs.
+  # socat is named by its real file (bin/socat is a link to socat1, and the entry runs the file under netClosure)
+  engines = [ "podman" "docker" ];
+  containerKeys = [ "engine" "program" "image" ];
+  badContainer = if container == null then null
+    else if !(builtins.isAttrs container) then "pot.lib.mkRoot: container is { engine; program; image; }"
+    else if removeAttrs container containerKeys != { } then
+      "pot.lib.mkRoot: container is { engine; program; image; } (not ${lib.concatStringsSep ", " (lib.attrNames (removeAttrs container containerKeys))})"
+    else if !(lib.elem (container.engine or null) engines) then
+      "pot.lib.mkRoot: container.engine is \"podman\" or \"docker\" (not ${builtins.toJSON (container.engine or null)})"
+    else if darwin then
+      "pot.lib.mkRoot: container: the container backend binds the host's /nix/store, so it is Linux's (this root is ${pkgs.stdenv.hostPlatform.system}'s)"
+    else null;
+  engineProgram = p: if p == null then null else if lib.isDerivation p then "${p}/bin/${container.engine}" else toString p;
+  containerConfig = pkgs.runCommand "pot-container.json" {
+    nativeBuildInputs = [ python ];
+    config = builtins.toJSON (linuxConfig // {
+      inherit (container) engine;
+      pins = "${potSrc}/pins.py";
+      shimClosure = closureOf "pot-shim-closure" [ python potSrc ];
+    } // lib.optionalAttrs ((container.program or null) != null) { ${container.engine} = engineProgram container.program; }
+      // lib.optionalAttrs ((container.image or null) != null) { image = container.image; });
+    passAsFile = [ "config" ];
+  } ''
+    python3 -I -c 'import json, os, sys
+    c = json.load(open(sys.argv[1])); c["socat"] = os.path.realpath(c["socat"])
+    json.dump(c, open(sys.argv[2], "w"), indent=1, sort_keys=True)' "$configPath" $out
+  '';
+  containerBackend = pkgs.writeShellScriptBin "pot-backend-container"
+    ''exec ${containerFor pkgs}/bin/pot-container --config ${containerConfig} "$@"'';
+  offered = if darwin then [ "seatbelt" ] else [ "bubblewrap" ] ++ lib.optional (container != null) "container";
+  hint = lib.optionalString (container == null && !darwin) " (container = { engine = \"podman\"; } offers the container backend)";
+  badBackend = lib.optional (defaultBackend != null && !(lib.elem defaultBackend offered))
+      "pot.lib.mkRoot: defaultBackend = ${builtins.toJSON defaultBackend}: the root offers ${lib.concatStringsSep ", " offered}${hint}"
+    ++ lib.concatLists (lib.mapAttrsToList (n: c: let b = c.backend or "auto"; in
+      lib.optional (builtins.isAttrs c && b != "auto" && !(lib.elem b offered))
+        "pot.lib.mkRoot: contexts.${n}: backend = ${builtins.toJSON b}: the root offers ${lib.concatStringsSep ", " offered}${hint}") contexts);
 
   # pot inside a run: explain and why from /run/pot/policy.json, and (v2.18.0) the wrappers' entry, which (v2.20.0)
   # asks the run's broker for a sibling; the backend stays named, as before
@@ -207,8 +257,10 @@ let
     potBin = "${potInner}/bin";
     shell = "bash";
     backends = if darwin then { seatbelt = { kind = "seatbelt"; program = "${seatbelt}/bin/pot-backend-seatbelt"; }; }
-      else { bubblewrap = { kind = "bwrap"; program = "${backend}/bin/pot-backend-bwrap"; }; };
-    defaultBackend = if darwin then "seatbelt" else "bubblewrap";
+      else { bubblewrap = { kind = "bwrap"; program = "${backend}/bin/pot-backend-bwrap"; }; }
+        // lib.optionalAttrs (container != null) { container = { kind = "container"; program = "${containerBackend}/bin/pot-backend-container";
+          inherit (container) engine; enginePath = engineProgram (container.program or null); }; };
+    defaultBackend = if defaultBackend != null then defaultBackend else if darwin then "seatbelt" else "bubblewrap";
   } // lib.optionalAttrs darwin {
     # the startup line names what a Seatbelt run lacks that a Linux one has (design §12.2); explain lists every lack
     usualGuarantees = [ "own-netns" "own-pidns" ];
@@ -225,10 +277,13 @@ in
 if badContexts != [ ] then throw "pot: mkRoot: a context may not be named like a pot verb: ${lib.concatStringsSep ", " badContexts}"
 else if badLimits != [ ] then throw "pot.lib.mkRoot: limits is { memoryMax; tasksMax; } and clones { keepDays; maxSize; } (not ${lib.concatStringsSep ", " badLimits})"
 else if badDefaults != [ ] then throw "pot.lib.mkRoot: ${lib.concatStringsSep "; " badDefaults}"
+else if badContainer != null then throw badContainer
+else if badBackend != [ ] then throw (lib.concatStringsSep "; " badBackend)
 # share/pot/run-1 (v2.18.0): this pot takes `pot run`, the wrappers' entry; a wrapper looks for it beside the
 # launcher's bin/pot, and runs its command unwrapped (with one line) under an older root's pot
 else pkgs.runCommand "pot" {
-  passthru = { root = manifest; inherit rootJson; backend = if darwin then seatbelt else backend; };
+  passthru = { root = manifest; inherit rootJson; backend = if darwin then seatbelt else backend;
+    containerBackend = if container != null then containerBackend else null; };
   meta = { description = "pot: run a command under the root's policy (${name})"; mainProgram = "pot"; };
 } ''
   mkdir -p $out/bin $out/share/pot

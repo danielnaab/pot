@@ -8,7 +8,9 @@ as one `podman run` or `docker run`, a fresh container per run, on any host or C
 first Rust code, a binary of its own behind the policy-1 contract (`backends/container/`, the flake's
 `packages.pot-container`). This page is its seventh slice (pot phase 2, plan step 3): it probes, renders the
 command and runs it, for runs in place with read access, write access or none and for dispatch clones, with siblings, with the network through pot's proxy
-and the `credential`, `mcp`, `status.relay`, `git.fetch` and `nix` bindings; no root offers the backend yet. The transcripts
+and the `credential`, `mcp`, `status.relay`, `git.fetch` and `nix` bindings. A root offers it with `pot.lib.mkRoot`'s
+`container = { engine = "podman"; }` (or `"docker"`), and makes it the default with `defaultBackend = "container"`
+([Which backend](pot.md#which-backend)); the root builds its config ([Inputs](#inputs)). The transcripts
 that test it are the pages under [container/](container/probe.md).
 
 ```
@@ -26,6 +28,11 @@ pot-container [--config CONFIG] probe|prepare|run|after|cleanup RUNDIR [--print]
 A refusal is one line on stderr, `pot (<context>): …`, exit 1.
 
 ## Inputs
+
+A root that offers the backend (mkRoot's `container`) writes this config itself: bubblewrap's programs and closures
+by the same names, `engine` and its program, `image`, `pins` (core's `pins.py`), `shimClosure` (python's and pot's
+closure) and `socat` as its real file (`bin/socat` is a link to `socat1`); its `pot-backend-container` runs
+`pot-container --config` with it.
 
 **`--config`** (JSON; unknown keys refused): `engine` (`podman` or `docker`; by default podman when it is on `PATH`,
 else docker), `podman` and `docker` (the programs), `image` (docker's empty image, default `localhost/pot-empty:1`),

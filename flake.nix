@@ -17,7 +17,7 @@
       potSrc = builtins.path { path = ./core; name = "pot"; filter = p: _: lib.hasSuffix ".py" p; };
       # kitsFor (lib/kits-for.nix, contract pot-lib/1): a producer's kits as the bundle pot reads (pot-kits/1)
       kitsFor = import ./lib/kits-for.nix { inherit potSrc; };
-      mkRoot = import ./nix/root.nix { inherit potSrc; };
+      mkRoot = import ./nix/root.nix { inherit potSrc; containerFor = pkgs: (rust pkgs).package; };
       # pot's Rust code (grove's dev kit): the container backend, pot-container, and its checks. The source is the
       # Cargo workspace plus what the tests read: the transcripts (docs/reference/container/) and policy-1 fixtures
       rust = import ./nix/rust.nix { inherit crane; };
@@ -94,6 +94,9 @@
           python3 -I ${./tests/golden.py} ${potSrc} "$kitsJsonPath" ${./tests/golden.json}
           touch $out
         '';
+        # pot phase 2: a root offering the container backend, as its default, builds (its config: tests/run.sh sibling)
+        pot-root-container = if pkgs.stdenv.isLinux then mkRoot { inherit pkgs; name = "check-container";
+          container.engine = "podman"; defaultBackend = "container"; } else pkgs.runCommand "pot-root-container" { } "touch $out";
         # the default root builds (on Darwin: a pot that refuses, D21)
         pot-root = defaultRoot pkgs;
         # a root with the claude-code kit (three instances, MCP, Bedrock, a gateway) builds: its manifests validate

@@ -2126,6 +2126,9 @@ def explain_text(policy, report, root, width=100):
     lacks = [g for g in GUARANTEES if g not in b["proved"]]
     out += wrap_words("backend    ", f"{b['name']} proves {' '.join(b['proved']) or 'nothing'}; lacks {' '.join(lacks)}".split(" "),
                       width, 11)
+    if report.get("backendWhy"):
+        # pot phase 2: why this backend (--backend, the context's, the root's default, a sibling's caller)
+        out.append(f"{'':<11}chosen by {report['backendWhy']}")
     # §11: resource-limits is proved per run, for a run in a user systemd scope; C1: and a backend that upholds it
     sc = report.get("scope") or {}
     res = b.get("resources") or {}
@@ -2182,7 +2185,10 @@ def validate_root(root):
     for n in (root.get("contexts") or {}):
         if n in VERBS:
             raise KitError(f"the root's contexts: {n} is a pot verb")
-        resolve_context(root, n)
+        b = resolve_context(root, n).get("backend")
+        # pot phase 2: a context's backend is one the root offers (mkRoot says so first, as it evaluates)
+        if b not in (None, "auto") and b not in (root.get("backends") or {}):
+            raise KitError(f"the root's contexts: {n}: backend = \"{b}\": the root offers {', '.join(sorted(root.get('backends') or {})) or 'none'}")
     for h in root.get("hidden") or []:
         norm_path(h, "the root's hidden")
     for h in (root.get("inspect") or {}).get("home") or []:
