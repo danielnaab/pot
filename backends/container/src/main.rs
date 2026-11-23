@@ -161,7 +161,7 @@ fn plan(cfg: &Config, rundir: &Path) -> Result<(Policy, Launch, Plan), Refusal> 
     // not make stops the run with its message
     let clones: Option<Vec<launch::WsPins>> = match cfg.clone_tools() {
         Some(_) if p.mode == "clone" => {
-            let v = look(cfg, "clone", rundir).map_err(&refuse)?;
+            let v = look(cfg, "clone", rundir).map_err(refuse)?;
             let cps: Vec<launch::WsPins> = serde_json::from_value(v["clones"].clone())
                 .map_err(|e| refuse(format!("pins.py clone: {e}")))?;
             if let Some(r) = cps.iter().find_map(|w| w.refused.as_ref()) {
@@ -627,6 +627,7 @@ fn place(rundir: &Path, p: &Plan, single: &std::collections::BTreeSet<String>) -
     )
 }
 
+#[allow(clippy::too_many_lines)] // what prepare checks, in order, each naming its finding
 fn prepare(cfg: &Config, rundir: &Path, print: bool) -> Result<(), Refusal> {
     // what a run killed with SIGKILL left of the via-file bindings' values goes first, whatever prepare decides (a link
     // there is removed, never followed)
@@ -1992,7 +1993,7 @@ fn sandboxed_git(
         .create(&g)
         .map_err(|e| refuse(format!("{}: {e}", g.display())))?;
     let gs = g.to_string_lossy().into_owned();
-    let (e, program) = engine(cfg).map_err(&refuse)?;
+    let (e, program) = engine(cfg).map_err(refuse)?;
     let o = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     let mut argv = vec![program.clone()];
     let set: Vec<(String, String)> = match e {
@@ -2032,7 +2033,7 @@ fn sandboxed_git(
     };
     let image = cfg.image.clone().unwrap_or_else(|| render::DOCKER_IMAGE.into());
     if e == Engine::Docker {
-        docker_image(&program, &set, &image).map_err(&refuse)?;
+        docker_image(&program, &set, &image).map_err(refuse)?;
     }
     let ids = format!("{}:{}", l.uid, l.gid);
     argv.extend(o(&[
@@ -2432,6 +2433,7 @@ fn cleanup_engine(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
 /// Rule 7 (and N6): remove the run's container through the engine, then its store and what prepare placed, whatever
 /// state the run stopped in; never following a link planted in the run folder. Every removal it could not make is
 /// named in one refusal; what it removed stays removed, so it can run again.
+#[allow(clippy::too_many_lines)] // what cleanup removes, in order
 fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> {
     let ctx = context_of(rundir);
     let abs = match fs::canonicalize(rundir) {
