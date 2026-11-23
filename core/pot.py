@@ -1650,7 +1650,8 @@ def pins_live(rd):
 
 
 def other_lists(host, rundir):
-    """Every other run's placeholders list in pot's state: (its run folder, the list)."""
+    """Every other run's placeholders lists in pot's state: (its run folder, pins-used.json and placeholders.json
+    joined). placeholders.json counts too: a run pot v0.2.0 started lists its placeholders there alone."""
     runs = os.path.join(host.state, "runs")
     try:
         names = sorted(os.listdir(runs))
@@ -1660,8 +1661,12 @@ def other_lists(host, rundir):
     out = []
     for n in names:
         rd = os.path.join(runs, n)
-        if os.path.realpath(rd) != me and os.path.lexists(os.path.join(rd, PINS_USED)):
-            out.append((rd, read_list(os.path.join(rd, PINS_USED))))
+        if os.path.realpath(rd) == me:
+            continue
+        entries = read_list(os.path.join(rd, PINS_USED))
+        entries += [e for e in read_list(os.path.join(rd, "placeholders.json")) if e not in entries]
+        if entries:
+            out.append((rd, entries))
     return out
 
 

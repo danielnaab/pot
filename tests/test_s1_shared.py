@@ -94,6 +94,20 @@ class Shared(unittest.TestCase):
         self.end(b, fb)
         self.assertFalse(os.path.exists(self.ph))
 
+    def test_a_placeholder_listed_only_in_placeholders_json(self):
+        # a run started by pot v0.2.0 (placeholders.json, no pins-used.json), lost: a start takes its placeholder on,
+        # so the lost run's cleanup (tidy_lost) leaves it while the start still runs with it bound
+        a, la = self.resolve("aaaa", self.w1)
+        P.place(la["pins"][0])
+        with open(os.path.join(a, "placeholders.json"), "w") as f:
+            json.dump([[ph["path"], ph["text"]] for ph in la["pins"][0]["placeholders"] if ph["kind"] == "file"], f)
+        b, lb = self.resolve("bbbb", self.w2)
+        fb = self.start(b, lb)
+        pot.cleanup_run(self.host, self.prog, a)
+        self.assertTrue(os.path.isfile(self.ph), "a lost run's cleanup removed a placeholder a live run has bound")
+        self.end(b, fb)
+        self.assertFalse(os.path.exists(self.ph))
+
 
 if __name__ == "__main__":
     unittest.main()

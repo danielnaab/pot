@@ -137,7 +137,9 @@ v2.14.0's `sandbox` on).
   removes them under the git directory's lock (in pot's state); a run takes on a placeholder another placed, and the
   last run out removes it (a start that found one the last run out removed meanwhile places it again). Each run lists
   what it relies on in `pins-used.json`, held while its pot lives, so a run killed outright counts for nothing: the
-  next start takes its placeholders on, or removes them. On every backend (Seatbelt untested here).
+  next start takes its placeholders on, or removes them. A placeholder a run pot v0.2.0 started placed (listed in its
+  `placeholders.json` alone) is taken on too, so its cleanup leaves it while a run relies on it. On every backend
+  (Seatbelt untested here).
 - **`pot --backend NAME`'s cleanup is that backend's** (and a context's `backend`), not the root's default.
 
 ## v0.2.0 - 2026-11-21
