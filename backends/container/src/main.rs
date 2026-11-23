@@ -2179,7 +2179,11 @@ fn clone_look(cfg: &Config, cfg_path: Option<&Path>, rundir: &Path) -> Result<se
         .stderr(std::process::Stdio::inherit())
         .output()
         .map_err(|e| format!("can't run {}: {e}", t.look.python))?;
-    let _ = remove_tree(&abs.join("gitlook"));
+    // each git container removed its own folder; what an interrupted look left goes through the engine, or stays named
+    // for cleanup (never removed whole under a live container)
+    for f in clean_looks(Ok(cfg), &abs) {
+        eprintln!("{}", visible(&format!("pot: the clone's git left {f}")));
+    }
     if !out.status.success() {
         return Err("the host's look at the clone failed".into());
     }
@@ -2492,15 +2496,8 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
     }
     // clone mode: what an interrupted look left (each git container's engine state, through the engine), and bwrap's
     // upload-pack scripts; staging/ and before.json stay, as bwrap's (pot review reads the one, a recovered after the other)
-    let looks = rd("gitlook");
-    if is_real_dir(&looks) {
-        for e in fs::read_dir(&looks).into_iter().flatten().flatten() {
-            if is_real_dir(&e.path()) {
-                failed.extend(cleanup_engine(cfg, &e.path()));
-            }
-        }
-    }
-    let mut own = vec!["gitlook".to_string()];
+    failed.extend(clean_looks(cfg, &abs));
+    let mut own = vec![];
     own.extend(
         fs::read_dir(&abs)
             .into_iter()
@@ -2595,6 +2592,42 @@ fn cleanup(cfg: Result<&Config, &String>, rundir: &Path) -> Result<(), Refusal> 
             format!("cleanup could not remove: {}", failed.join("; ")),
         ))
     }
+}
+
+/// Clone mode (QA of the siblings slice): what interrupted looks left in RUNDIR/gitlook, each git container's engine state
+/// in a folder of its own. Each container is removed through the engine, then its folder; a folder whose container
+/// could not be removed is kept and named, never deleted under a live container (a lost record would leave the
+/// container to no one: docker's outlived a whole-folder removal). `gitlook` goes once it is empty; a link or a file
+/// in its place is removed, never followed. Returns what it could not remove.
+fn clean_looks(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
+    let looks = abs.join("gitlook");
+    let mut failed = vec![];
+    if looks.symlink_metadata().is_err() {
+        return failed;
+    }
+    if is_real_dir(&looks) {
+        for e in fs::read_dir(&looks).into_iter().flatten().flatten() {
+            let p = e.path();
+            if is_real_dir(&p) {
+                let left = cleanup_engine(cfg, &p);
+                if !left.is_empty() {
+                    failed.extend(left);
+                    continue;
+                }
+            }
+            if let Err(err) = remove_tree(&p) {
+                failed.push(format!("{}: {err}", p.display()));
+            }
+        }
+        if failed.is_empty() {
+            if let Err(err) = fs::remove_dir(&looks) {
+                failed.push(format!("{}: {err}", looks.display()));
+            }
+        }
+    } else if let Err(err) = remove_tree(&looks) {
+        failed.push(format!("{}: {err}", looks.display()));
+    }
+    failed
 }
 
 /// The tree's sibling slots a top run's cleanup removes (bwrap's): pot's state (the run folder's grandparent), `trees/`,

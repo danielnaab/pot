@@ -2656,7 +2656,9 @@ sibling_container() {
   # (QA: a run without a terminal is in pot's scope, so its policy proves resource-limits, which no docker container
   # upholds: the backend refuses every such run under docker, these included)
   if [ "$e" = docker ]; then
-    echo "skip sibling (docker): pot proves resource-limits for a run without a terminal, which docker can't uphold"
+    echo "skip sibling (docker): pot proves resource-limits for a run without a terminal, which docker can't uphold (but for a clone's look, under a terminal)"
+    container_root "nc-$e" "$work/nr" "$e" "$2"
+    look_left "$e" "$2"
     return
   fi
   container_root "nc-$e" "$work/nr" "$e" "$2"
@@ -2748,6 +2750,38 @@ sibling_container() {
     ran "sibling ($e): docker's containers" "$2" ps -a --filter name=pot- --format '{{.Names}}'
     expect "none of pot's is left" test -z "$out"
   fi
+  look_left "$e" "$2"
+}
+
+# look_left ENGINE PROGRAM (QA): a clone's look interrupted (the git verb and its engine client killed while upload-pack
+# waits), then the after a recovery runs, then cleanup: the interrupted look's container is removed through the engine,
+# never lost with its record. The dispatch runs under a terminal (no scope, so docker takes it too).
+look_left() {
+  local e=$1 n r lead i
+  out=$(script -qec "env -u CLAUDECODE -u CODEX_SANDBOX -u POT $work/nc-$e-pot dispatch --backend container agent -c 'echo l > l-$e.md; git add l-$e.md; git -c user.name=t -c user.email=t@e commit -q --no-verify -m l'" /dev/null </dev/null 2>&1 | tr -d '\r\000')
+  n=$(sed -n 's/.*pot: run \([0-9a-f]*\) · 1 commit on main.*/\1/p' <<<"$out")
+  expect "look ($e): a container dispatch under a terminal comes back with its commit" test -n "$n"
+  r=$work/nstate/runs/$n
+  setsid bash -c "sleep 60 | exec '$work/nc-$e-backend' git '$r' '$r/clone' /clone -- upload-pack --strict /clone/.git >/dev/null 2>&1" </dev/null &
+  lead=$!
+  for i in $(seq 1 60); do
+    [ -s "$(find "$r/gitlook" -mindepth 2 -maxdepth 2 -name container.id 2>/dev/null | head -1)" ] && break
+    sleep 0.5
+  done
+  sleep 2
+  kill -9 -- "-$lead"
+  wait "$lead" 2>/dev/null || true
+  expect "look ($e): an interrupted look left its folder" test -n "$(find "$r/gitlook" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)"
+  ran "look ($e): a look after it" "$work/nc-$e-backend" after "$r"
+  ran "look ($e): cleanup" "$work/nc-$e-backend" cleanup "$r"
+  expect "removes the interrupted look's folder" test ! -e "$r/gitlook"
+  if [ "$e" = docker ]; then
+    ran "look ($e): docker's containers" "$2" ps -a --filter name=pot- --format '{{.Names}}'
+    expect "and its container, through the engine" test -z "$out"
+  else
+    expect "and its container, through the engine" test -z "$(pgrep -f "conmon.*$r/gitlook" || true)"
+  fi
+  ran "look ($e): its discard" nb_ review "$n" --discard
 }
 
 # pi (kits/pi.nix): a root with the pi kit, its program a stub that reports what it sees. The run's pi

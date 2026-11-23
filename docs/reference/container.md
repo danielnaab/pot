@@ -586,8 +586,10 @@ A dispatch clone (`pot dispatch`, design §9) as bubblewrap carries it out (`pre
   `gitClosure` read-only, `--network none`, no capability, an empty read-only root with its own `/tmp` as `HOME`, and
   runs `GIT -C CWD -c safe.directory=* -c core.hooksPath=/dev/null -c core.fsmonitor=false ARGS` with
   `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`. Its engine state is a folder of its own under
-  `RUNDIR/gitlook/`, removed with the container (and waited for) before git's status goes back; `cleanup` removes one an
-  interrupted look left, through the engine. The event's clone fields (`base`, `refs`, `refCommits`, `commits`,
+  `RUNDIR/gitlook/`, removed with the container (and waited for) before git's status goes back; the next look and
+  `cleanup` remove one an interrupted look left, through the engine, and keep and name a folder whose container they
+  could not remove (QA: a recovered look had removed `gitlook/` whole, and docker's container of the interrupted look,
+  its record gone, was left to no one). The event's clone fields (`base`, `refs`, `refCommits`, `commits`,
   `unsigned`, `scions`, `gitlinks`, `touches_host_run`, `agent_config`, `repo_kit_change`, `root_repo_change`,
   `root_attention`, `uncommitted`, `new_git_metadata`, `size`, `fetch_failed`) are bwrap's.
 - **Removal** of the clone is pot's core (`pot review --discard`, `prune`), never following a link, whatever the backend.
