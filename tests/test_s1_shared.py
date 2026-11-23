@@ -109,5 +109,30 @@ class Shared(unittest.TestCase):
         self.assertFalse(os.path.exists(self.ph))
 
 
+    def test_a_submodule_and_its_worktree_share_a_lock(self):
+        # a run in a super repository pins (and places placeholders in) its submodule's git directory under
+        # .git/modules; a run in a worktree of the submodule has that directory as its common one. They place the same
+        # placeholders, so they take the same lock
+        sup = os.path.join(self.base, "sup")
+        git("init", "-q", sup)
+        git("-C", sup, "-c", "protocol.file.allow=always", "submodule", "add", "-q", os.path.join(self.base, "repo"),
+            "sub")
+        git("-C", sup, "commit", "-q", "-m", "s")
+        mod = os.path.join(sup, ".git", "modules", "sub")
+        wt = os.path.join(self.base, "subwt")
+        git("-C", os.path.join(sup, "sub"), "worktree", "add", "-q", wt, "-b", "x")
+        l1 = {"pins": [P.resolve(sup, os.path.join(sup, ".git"), [], "/dev/null")]}
+        l2 = {"pins": [P.resolve(wt, mod, [], "/dev/null")]}
+        both = {ph["path"] for ph in l1["pins"][0]["placeholders"]} & {ph["path"] for ph in l2["pins"][0]["placeholders"]}
+        self.assertTrue(both)
+
+        def inodes(launch):
+            fds = pot.placeholder_locks(self.host, launch)
+            try:
+                return {os.fstat(fd).st_ino for fd in fds}
+            finally:
+                pot.unlock(fds)
+        self.assertTrue(inodes(l1) & inodes(l2), "two runs that place the same placeholders take no lock in common")
+
 if __name__ == "__main__":
     unittest.main()

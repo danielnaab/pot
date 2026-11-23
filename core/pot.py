@@ -1578,13 +1578,16 @@ def run_backend(rd):
 
 
 def placeholder_locks(host, launch):
-    """The locks of the git directories a run's pins place placeholders in (each workspace's common one, and every
-    repository's below it), taken in order; in pot's state, never in a git directory (a run writes there)."""
+    """The locks of the git directories a run's pins place placeholders in (every git directory it pins: a placeholder's
+    folder, or a protected git file's), taken in order; in pot's state, never in a git directory (a run writes there).
+    One per git directory, not per workspace: a submodule's git directory (.git/modules/NAME) is pinned by a run in
+    its super repository and by a run in a worktree of the submodule (its common one), which share no other."""
     import fcntl
     keys = set()
     for d in launch.get("pins") or []:
-        for g in [d.get("common")] + list(d.get("dotgits") or []):
-            if g and os.path.isdir(g) and not os.path.islink(g):
+        for e in list(d.get("placeholders") or []) + list(d.get("ro") or []):
+            g = os.path.dirname(e["path"])
+            if os.path.basename(e["path"]) in P.GITFILES and os.path.isdir(g) and not os.path.islink(g):
                 keys.add(hashlib.sha256(os.path.realpath(g).encode()).hexdigest()[:16])
     if not keys:
         return []
