@@ -47,5 +47,5 @@ so a line with one is cut there).
 ## Sources
 
 - [backends/container/src/probe.rs](../../../backends/container/src/probe.rs): `assess`, `facts`
-- The phase 2 spike (flexion-assistant session record `2026-11-21-pot-phase-2/spike.md`, executed on platform-vm,
+- The phase 2 spike (potting-shed session record `2026-11-21-pot-phase-2/spike.md`, executed on platform-vm,
   2026-11-21): NoNewPrivileges breaks rootless podman's `newuidmap`; the controllers resource limits need
