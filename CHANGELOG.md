@@ -129,6 +129,16 @@ v2.14.0's `sandbox` on).
   write access and ignores the field). `pins.py before|after` is the host's look (bwrap's before.json and the
   in-place part of its after event) for a backend built apart.
 
+### Fixed
+
+- **Two runs starting at once in worktrees of one repository no longer collide** on its git directory's S1
+  placeholders (`commondir`, `config.worktree`, `gitdir`). One stopped with "… appeared after pot resolved the
+  workspace's pins: run again", or the first to end removed a placeholder the other still ran with. pot now places
+  and removes them under the git directory's lock (in pot's state); a run takes on a placeholder another placed, and
+  the last run out removes it. Each run lists what it relies on in `pins-used.json`, held while its pot lives, so a
+  run killed outright counts for nothing: the next start takes its placeholders on, or removes them. On every
+  backend (Seatbelt untested here).
+
 ## v0.2.0 - 2026-11-21
 
 ### Added

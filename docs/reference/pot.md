@@ -1805,7 +1805,10 @@ depth: the tree after a run is untrusted output.
   `info/`, `commondir` and `gitdir`; and every `.git` file. When `commondir`, `config.worktree` or `gitdir` is
   absent at start, pot puts a neutral read-only placeholder there for the run (`commondir` holding `.`, the others
   empty), so a run cannot create one and point host git at a config it wrote; pot removes each placeholder after
-  the run, if it still holds what pot wrote. A pot that is killed mid-run (`kill -9`, `kill`, a reboot) leaves its
+  the run, if it still holds what pot wrote. Runs in worktrees of one repository share its git directory, and so
+  its placeholders: a run that starts while another holds one takes it on instead of placing it again, and the last
+  run out removes it (each run lists the placeholders it relies on in its run folder, `pins-used.json`, held while
+  its pot lives; placing and removing take the git directory's lock, `<state>/locks/`). A pot that is killed mid-run (`kill -9`, `kill`, a reboot) leaves its
   placeholders, and its sockets (the siblings' `children.sock` among them) and its tree's sibling slots
   (`<state>/trees/<id>`), behind until the next run: every run (and `inspect`) first cleans up a lost run, removing
   its sockets, its tree's slots and the placeholders that still hold what pot wrote. It waits for the lost run's

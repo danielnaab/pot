@@ -1540,17 +1540,210 @@ def tidy_lost(host):
         return
     for n in names:
         rd = os.path.join(runs, n)
-        if not re.fullmatch(r"[0-9a-f]{4}", n) or not any(os.path.lexists(os.path.join(rd, s)) for s in RUN_SOCKETS):
+        if not re.fullmatch(r"[0-9a-f]{4}", n):
+            continue
+        used = os.path.lexists(os.path.join(rd, PINS_USED))
+        if not used and not any(os.path.lexists(os.path.join(rd, s)) for s in RUN_SOCKETS):
             continue
         ev = R.read_log(os.path.join(rd, "log.jsonl"))
         s = R.first(ev, "start")
-        if not s or R.process_alive(s) or R.needs_after(ev, R.process_alive) or helpers_alive(rd):
+        if (not s and not used) or (s and (R.process_alive(s) or R.needs_after(ev, R.process_alive))) \
+                or helpers_alive(rd) or pins_live(rd):
             continue
         try:
-            prog = backend_cmd(host, s.get("backend"))[1]
+            prog = backend_cmd(host, s.get("backend") if s else run_backend(rd))[1]
         except C.Refusal:
             continue
-        subprocess.run([prog, "cleanup", rd])
+        cleanup_run(host, prog, rd)
+
+
+# ---------------------------------------------------------------- placeholders runs share (S1)
+# Runs in worktrees of one repository share its git directory, and so the placeholders pot puts there. Each run lists
+# the placeholders it relies on in <run dir>/pins-used.json and holds a lock on that file while it lives (the kernel
+# drops it when the run's pot ends, however it ends). Placing and removing take the git directory's lock, in pot's
+# state: a start leaves to the backend only what is still absent, and takes on a placeholder another run placed; an
+# end removes only what no live run lists, so the last one out removes it. A run killed outright lists what it left,
+# no longer live: the next start takes it on, or tidy_lost removes it.
+
+PINS_USED = "pins-used.json"
+
+
+def run_backend(rd):
+    """The backend a run's policy.json names (a run with no start event yet)."""
+    try:
+        with open(os.path.join(rd, "policy.json")) as f:
+            return (json.load(f).get("backend") or {}).get("name")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def placeholder_locks(host, launch):
+    """The locks of the git directories a run's pins place placeholders in (each workspace's common one, and every
+    repository's below it), taken in order; in pot's state, never in a git directory (a run writes there)."""
+    import fcntl
+    keys = set()
+    for d in launch.get("pins") or []:
+        for g in [d.get("common")] + list(d.get("dotgits") or []):
+            if g and os.path.isdir(g) and not os.path.islink(g):
+                keys.add(hashlib.sha256(os.path.realpath(g).encode()).hexdigest()[:16])
+    if not keys:
+        return []
+    ld = os.path.join(host.state, "locks")
+    os.makedirs(ld, exist_ok=True)
+    fds = []
+    try:
+        for k in sorted(keys):
+            fd = os.open(os.path.join(ld, f"git-{k}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            fds.append(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except BaseException:
+        unlock(fds)
+        raise
+    return fds
+
+
+def unlock(fds):
+    for fd in reversed(fds or []):
+        os.close(fd)
+
+
+def holds_placeholder(path, text):
+    """Whether PATH is a placeholder holding TEXT: a regular file with one link, never read through a link."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > 64:
+            return False
+        return os.read(fd, 65).decode("utf-8", "replace") == text
+    finally:
+        os.close(fd)
+
+
+def read_list(path):
+    """A placeholders list ([[path, text], ...]): placeholders.json, pins-used.json; [] when absent or unreadable."""
+    try:
+        with open(path) as f:
+            v = json.load(f)
+        return [[e[0], e[1]] for e in v if isinstance(e, list) and len(e) == 2
+                and isinstance(e[0], str) and isinstance(e[1], str)]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def pins_live(rd):
+    """Whether a run's pot still holds its placeholders' list (pins-used.json)."""
+    import fcntl
+    try:
+        fd = os.open(os.path.join(rd, PINS_USED), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def other_lists(host, rundir):
+    """Every other run's placeholders list in pot's state: (its run folder, the list)."""
+    runs = os.path.join(host.state, "runs")
+    try:
+        names = sorted(os.listdir(runs))
+    except OSError:
+        return []
+    me = os.path.realpath(rundir)
+    out = []
+    for n in names:
+        rd = os.path.join(runs, n)
+        if os.path.realpath(rd) != me and os.path.lexists(os.path.join(rd, PINS_USED)):
+            out.append((rd, read_list(os.path.join(rd, PINS_USED))))
+    return out
+
+
+def write_list(fd, entries):
+    data = json.dumps(entries).encode()
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, data)
+
+
+def claim_placeholders(host, rundir, launch):
+    """Under placeholder_locks: the run's placeholders list, written and held (its fd returned, kept open while the
+    run lives). A planned placeholder another run placed since is taken on, not placed again (a folder, made by
+    another run, too); a protected path that is another run's placeholder is taken on too. launch.json is
+    rewritten with what the backend still places."""
+    import fcntl
+    listed = {}
+    for _, entries in other_lists(host, rundir):
+        for p, t in entries:
+            listed.setdefault(p, t)
+    used = []
+    for d in launch.get("pins") or []:
+        keep = []
+        for ph in d.get("placeholders") or []:
+            p = ph["path"]
+            if ph["kind"] == "folder" and os.path.isdir(p) and not os.path.islink(p):
+                continue
+            if ph["kind"] == "file":
+                used.append([p, ph.get("text") or ""])
+                if p in listed and holds_placeholder(p, ph.get("text") or ""):
+                    continue
+            keep.append(ph)
+        d["placeholders"] = keep
+        for r in d.get("ro") or []:
+            p = r["path"]
+            if p in listed and holds_placeholder(p, listed[p]) and all(u[0] != p for u in used):
+                used.append([p, listed[p]])
+    fd = os.open(os.path.join(rundir, PINS_USED), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    write_list(fd, used)
+    with open(os.path.join(rundir, "launch.json"), "w") as f:
+        json.dump(launch, f)
+    return fd
+
+
+def note_placed(rundir, fd):
+    """After prepare, still under the locks: what the backend placed (placeholders.json; Seatbelt resolves its own)
+    joins the run's list."""
+    used = read_list(os.path.join(rundir, PINS_USED))
+    for e in read_list(os.path.join(rundir, "placeholders.json")):
+        if e not in used:
+            used.append(e)
+    write_list(fd, used)
+
+
+def cleanup_run(host, prog, rundir):
+    """The backend's cleanup, under the placeholder locks: placeholders.json is first narrowed to what this run
+    relied on that no live run still lists (the last one out removes it); then neither list stays, so a later
+    cleanup of this run removes nothing another run placed since."""
+    try:
+        with open(os.path.join(rundir, "launch.json")) as f:
+            launch = json.load(f)
+    except (OSError, ValueError):
+        launch = {}
+    locks = placeholder_locks(host, launch if isinstance(launch, dict) else {})
+    try:
+        mine = []
+        for e in read_list(os.path.join(rundir, PINS_USED)) + read_list(os.path.join(rundir, "placeholders.json")):
+            if e not in mine:
+                mine.append(e)
+        if mine or os.path.lexists(os.path.join(rundir, "placeholders.json")):
+            busy = {p for rd, entries in other_lists(host, rundir) if pins_live(rd) for p, _ in entries}
+            with open(os.path.join(rundir, "placeholders.json"), "w") as f:
+                json.dump([e for e in mine if e[0] not in busy], f)
+        subprocess.run([prog, "cleanup", rundir])
+        for n in ("placeholders.json", PINS_USED):
+            try:
+                os.unlink(os.path.join(rundir, n))
+            except OSError:
+                pass
+    finally:
+        unlock(locks)
 
 
 def clone_mode_checks(host, root, ctx, flags, clone):
@@ -1623,6 +1816,20 @@ def clone_notes(report, cinfo):
     report["notes"][:0] = [f"from {visible(cinfo['branch'])} ({cinfo['short']})"]
 
 
+def test_barrier():
+    """The tests' fault point (POT_TEST_FAULT=start-barrier, POT_TEST_BARRIER=DIR): a start waits here, its pins
+    resolved and its prepare not begun, until a second start has come as far (30 seconds at most), so two starts
+    meet at the same step every time."""
+    if os.environ.get("POT_TEST_FAULT") != "start-barrier" or not os.environ.get("POT_TEST_BARRIER"):
+        return
+    d = os.environ["POT_TEST_BARRIER"]
+    with open(os.path.join(d, str(os.getpid())), "w"):
+        pass
+    deadline = time.monotonic() + 30
+    while len(os.listdir(d)) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def run(host, root, context, flags, cmd):
     if inside_run():
         ctxn = os.environ.get("POT", "run")
@@ -1647,6 +1854,7 @@ def run(host, root, context, flags, cmd):
     argv0 = cmd or [root.get("shell", "bash")]
     background = False
     cinfo = None
+    bprog = used_fd = None
     try:
         scope = scope_for(host, root, ctx, flags, detach)
         if clone:
@@ -1756,7 +1964,14 @@ def run(host, root, context, flags, cmd):
         with open(os.path.join(rundir, "launch.json"), "w") as f:
             json.dump(launch, f)
         check_command(policy, launch, ctx, given=bool(cmd))
-        r = subprocess.run([bprog, "prepare", rundir])
+        test_barrier()
+        locks = placeholder_locks(host, launch)
+        try:
+            used_fd = claim_placeholders(host, rundir, launch)
+            r = subprocess.run([bprog, "prepare", rundir])
+            note_placed(rundir, used_fd)
+        finally:
+            unlock(locks)
         if r.returncode != 0:
             return 1
         if not flags.get("wrapped"):
@@ -1853,20 +2068,23 @@ def run(host, root, context, flags, cmd):
         for line in lines:
             err(line)
         if detach:
-            subprocess.run([bprog, "cleanup", rundir])
+            cleanup_run(host, bprog, rundir)
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(status & 0xff)
         return status
     finally:
         if not background:
+            # the run's own backend (--backend, the context's), never the root's default
             prog = None
             try:
                 prog = backend_cmd(host, None)[1]
             except C.Refusal:
                 pass
             if prog and os.path.exists(os.path.join(rundir, "launch.json")):
-                subprocess.run([prog, "cleanup", rundir])
+                cleanup_run(host, prog, rundir)
+            if used_fd is not None:
+                os.close(used_fd)
             # F2: a dispatch refused before its start was logged leaves no clone without a record
             if clone and not os.path.exists(os.path.join(rundir, "log.jsonl")):
                 try:
@@ -2707,8 +2925,17 @@ def explain(host, root, context, flags, cmd):
                 json.dump(policy, f)
             with open(os.path.join(tmp, "launch.json"), "w") as f:
                 json.dump(launch, f)
-            r = subprocess.run([bprog, "prepare", tmp, "--print"])
-            subprocess.run([bprog, "cleanup", tmp])    # prepare's S1 placeholders, removed
+            locks = placeholder_locks(host, launch)
+            try:
+                used_fd = claim_placeholders(host, tmp, launch)
+                r = subprocess.run([bprog, "prepare", tmp, "--print"])
+                note_placed(tmp, used_fd)
+            finally:
+                unlock(locks)
+            try:
+                cleanup_run(host, bprog, tmp)    # prepare's S1 placeholders, removed
+            finally:
+                os.close(used_fd)
             return r.returncode
         else:
             sys.stdout.write(C.explain_text(policy, report, root, width_of(sys.stdout)))
@@ -3391,7 +3618,7 @@ def load_record(host, rid, rundir, recover=True):
                             time.sleep(0.2)
                     if got and R.needs_after(R.read_log(lf), R.process_alive):
                         after_event(prog, rundir, recovered=True)
-                        subprocess.run([prog, "cleanup", rundir])
+                        cleanup_run(host, prog, rundir)
                 except OSError:
                     pass
                 finally:

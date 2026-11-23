@@ -52,7 +52,10 @@ kits and the home-manager module build (`pot-root`, `pot-root-claude`, `pot-gate
 `POT_TEST_FAULT=after-exit` (a backend that prints no `after` event) let `tests/run.sh dispatch` check that such a
 run lands in `review` with `fetch failed: the host's look failed (…)`, listed and kept. The backend reads it from
 the environment of the pot that starts the run, on the host; a run's own environment never reaches it. It can only
-make a run's look fail, which lands the run in `review`: it widens nothing.
+make a run's look fail, which lands the run in `review`: it widens nothing. `POT_TEST_FAULT=start-barrier` with
+`POT_TEST_BARRIER=DIR` holds a start, its pins resolved and its prepare not begun, until a second start reaches
+the same step (30 seconds at most), so `tests/run.sh pot` can start two runs in two worktrees of one repository at
+the same moment every time. It only delays a start: it widens nothing.
 
 **The docs check** is in `dev/flake.nix`, so that knowledge-base-kit is in no root's or producer's lock. It reads
 the whole repository, so run it from the checkout as a git flake, `nix flake check ./dev`, never as `path:`; like

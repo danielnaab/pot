@@ -806,6 +806,47 @@ while True:
   expect "host git ran none of the run's config (the marker is absent)" test ! -e "$mk"
   rm -rf -- alt
 
+  # S1 with two runs at once in two worktrees of one repository: both plan the shared git directory's placeholders
+  # (POT_TEST_FAULT=start-barrier: both resolve their pins before either prepares). Both start; the first to end
+  # leaves the placeholder the other still runs with; the last one out removes it
+  local wt1=$work/sbwt1 wt2=$work/sbwt2 bar=$work/sbbar p1 p2 s1=0 s2=0
+  git_ worktree add -q "$wt1" -b sbwt1 && git_ worktree add -q "$wt2" -b sbwt2 && mkdir -p "$bar"
+  expect "pot: before two starts at once, the repository has no commondir" test ! -e "$c/.git/commondir"
+  (cd "$wt1" && POT_TEST_FAULT=start-barrier POT_TEST_BARRIER=$bar sb_ echo one) >"$work/sbwt1.out" 2>&1 &
+  p1=$!
+  # shellcheck disable=SC2016 # the run's shell expands them
+  (cd "$wt2" && POT_TEST_FAULT=start-barrier POT_TEST_BARRIER=$bar sb_ bash -c 'for _ in $(seq 600); do
+      [ -e .go ] && break; sleep 0.1; done
+    echo x > "$1/commondir" 2>/dev/null && echo "wrote commondir" || echo "commondir: refused"' _ "$c/.git") >"$work/sbwt2.out" 2>&1 &
+  p2=$!
+  wait "$p1" || s1=$?
+  out=$(cat "$work/sbwt1.out")
+  expect "pot: two runs start at once in two worktrees of one repository: the first runs" test "$s1" = 0
+  expect "the first ends; the placeholder stays, for the run still going" test -f "$c/.git/commondir"
+  touch "$wt2/.go"
+  wait "$p2" || s2=$?
+  out=$(cat "$work/sbwt2.out")
+  expect "the second runs too" test "$s2" = 0
+  expect "and its placeholder held after the first ended" has "commondir: refused"
+  expect "the last run out removes it" test ! -e "$c/.git/commondir"
+  # a run killed outright (SIGKILL: its pot, its backend and its command) leaves its placeholders; the next run
+  # starts, and removes them
+  rm -f -- "$wt2/.go"
+  (cd "$wt1" && exec setsid env -u CLAUDECODE -u CODEX_SANDBOX -u POT POT_QUIET=1 "$work/sbr/bin/pot" sleep 3301) >/dev/null 2>&1 &
+  p1=$!
+  for _ in $(seq 120); do pgrep -f '^sleep 3301' >/dev/null && break; sleep 0.5; done
+  expect "pot: a run in a worktree has its placeholder" test -f "$c/.git/commondir"
+  kill -KILL -- "-$p1" 2>/dev/null || true
+  pkill -KILL -f '^sleep 3301' || true
+  wait "$p1" 2>/dev/null || true
+  expect "killed outright, it leaves the placeholder" test -f "$c/.git/commondir"
+  # shellcheck disable=SC2016 # the inner shell expands them
+  ran "pot: the next run, in the other worktree, starts" bash -c 'cd "$1" && shift && "$@"' _ "$wt2" \
+    env -u CLAUDECODE -u CODEX_SANDBOX -u POT POT_QUIET=1 "$work/sbr/bin/pot" true
+  expect "and removes the killed run's placeholder" test ! -e "$c/.git/commondir"
+  git_ worktree remove --force "$wt1" && git_ worktree remove --force "$wt2"
+  git_ branch -q -D sbwt1 sbwt2
+
   # S: §16.11: names a run chose reach the host escaped
   # shellcheck disable=SC2016 # the run's shell expands them
   ran "pot: a run-made name with an escape byte" sb_loud bash -c 'd=$(printf "e\033]0;x\007v"); mkdir "$d" && git -C "$d" init -q'
