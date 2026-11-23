@@ -4933,6 +4933,9 @@ while True:
 req = json.loads(data)
 note(json.dumps({"pid": os.getpid(), "sid": os.getsid(0), "req": req}))
 mode = req["args"][0]
+if mode == "container":
+    # a sibling that is itself a container run: its backend's run, as pot's host entry starts it
+    os.execv(req["args"][1], req["args"][1:])
 if mode == "ok":
     print("sibling-ran", *req["args"], flush=True)
     sys.exit(7)
@@ -5177,6 +5180,7 @@ fn clone_world(name: &str, engine: &str, program: &str) -> Option<(PathBuf, Path
 /// run in a container of its own (the `git` verb), and reports bwrap's clone fields: the commit on `main`, the agent
 /// configuration the clone proposes (`.envrc`), what stays uncommitted. No git container, engine state or upload-pack
 /// script is left, and before.json and staging/ stay (pot review reads them).
+#[allow(clippy::too_many_lines)] // the run, the host's look, cleanup and a recovered look
 fn clone_case(engine: &str) {
     let Some(program) = engine_program(engine) else {
         return;
@@ -5261,6 +5265,14 @@ echo "top=$({g} rev-parse --show-toplevel)"
         "{:?}",
         names(&run)
     );
+    // a recovered after (pot review, once the host pot died before its after event): the same look, from the kept
+    // before.json, with git in a container again
+    let again = after_event(&top, &run);
+    assert_eq!(
+        (&again["commits"], &again["refs"], &again["agent_config"]),
+        (&ev["commits"], &ev["refs"], &ev["agent_config"])
+    );
+    assert!(!run.join("gitlook").exists());
     // the git verb runs git only in this run's clone
     let out = verb(&top, &run, "git")
         .arg(&ws)
@@ -5285,4 +5297,89 @@ fn podman_a_clone_runs_at_the_original_path_and_its_commits_are_staged_in_a_cont
 #[test]
 fn docker_a_clone_runs_at_the_original_path_and_its_commits_are_staged_in_a_container() {
     clone_case("docker");
+}
+
+/// A sibling that is a container run of its own, under ENGINE, whose command ignores SIGTERM: when its request goes away
+/// the broker sends SIGTERM to its session each second and SIGKILL after 10 s, so its backend's run must stop and
+/// remove its container within that time; no container of the sibling's is left, and its run records its status.
+fn sibling_stops_in_time_case(engine: &str) {
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some(python) = find("python3") else {
+        return;
+    };
+    let sleep = coreutils("sleep");
+    let (stop, srun) = world(
+        &format!("{engine}-sibling-stubborn"),
+        engine,
+        &program,
+        &[
+            "/bin/sh",
+            "-c",
+            &format!("trap '' TERM; echo stubborn-up; {sleep} 120"),
+        ],
+    );
+    let mut l: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(srun.join("launch.json")).unwrap()).unwrap();
+    l["siblingOf"] = "0abc".into();
+    fs::write(srun.join("launch.json"), l.to_string()).unwrap();
+    prepare(&stop, &srun);
+    let py = python.display().to_string();
+    let (bin, cfg, sr) = (
+        BIN,
+        stop.join("config.json").display().to_string(),
+        srun.display().to_string(),
+    );
+    let script = format!(
+        r#"{{ "{py}" -I -c '{CLIENT}' container {bin} --config {cfg} run {sr} & echo $! > /tmp/pid; wait; }} | while read -r l; do echo "$l" >> /tmp/o; done &
+until case "$(cat /tmp/o 2>/dev/null)" in *stubborn-up*) true ;; *) false ;; esac; do sleep 0.1; done; kill -9 "$(cat /tmp/pid)"; sleep 14; echo done"#
+    );
+    let Some((top, run, _)) =
+        sibling_world(&format!("{engine}-siblings-stubborn"), engine, &program, &script)
+    else {
+        return;
+    };
+    prepare(&top, &run);
+    let out = verb(&top, &run, "run").stdin(Stdio::null()).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // its run ended in time, recording its status (137 under podman: SIGKILL after the stop's 3 s)
+    let st = fs::read_to_string(srun.join("status")).unwrap_or_default();
+    assert!(!st.is_empty(), "the sibling's run was killed before it ended");
+    if engine == "podman" {
+        let ps = podman(&program, &srun, &["ps", "--all", "--quiet"]);
+        assert_eq!(
+            String::from_utf8_lossy(&ps.stdout).trim(),
+            "",
+            "the sibling's container is left"
+        );
+    } else {
+        let ps = Command::new(&program)
+            .args(["ps", "-a", "--filter", "name=pot-", "--format", "{{.Names}}"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ps.stdout).trim(),
+            "",
+            "the sibling's container is left"
+        );
+    }
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+    ok(&verb(&stop, &srun, "cleanup").output().unwrap());
+}
+
+#[test]
+fn podman_a_container_sibling_stops_within_the_brokers_grace() {
+    sibling_stops_in_time_case("podman");
+}
+
+#[test]
+fn docker_a_container_sibling_stops_within_the_brokers_grace() {
+    sibling_stops_in_time_case("docker");
 }

@@ -68,7 +68,23 @@ pub fn remove_argv(engine: Engine, program: &str, rundir: &str) -> Vec<String> {
 
 /// The command that stops the run's container (SIGTERM, then SIGKILL after 10 s), when `run` is asked to stop:
 /// podman's by the id in its cidfile (none yet: `None`), docker's by its name.
+#[cfg(test)]
 pub fn stop_argv(engine: Engine, program: &str, rundir: &str, cid: Option<&str>) -> Option<Vec<String>> {
+    stop_argv_within(engine, program, rundir, cid, 10)
+}
+
+/// How long a sibling's container has between SIGTERM and SIGKILL: its broker sends its session SIGKILL 10 s after its
+/// first SIGTERM (siblings.py's GRACE), so the container is stopped, and removed, well within that (Seatbelt's 3 s).
+pub const SIBLING_STOP: u32 = 3;
+
+/// [`stop_argv`] with SECS between SIGTERM and SIGKILL.
+pub fn stop_argv_within(
+    engine: Engine,
+    program: &str,
+    rundir: &str,
+    cid: Option<&str>,
+    secs: u32,
+) -> Option<Vec<String>> {
     let mut v = vec![program.to_string()];
     let target = match engine {
         Engine::Podman => {
@@ -77,7 +93,7 @@ pub fn stop_argv(engine: Engine, program: &str, rundir: &str, cid: Option<&str>)
         }
         Engine::Docker => docker_name(rundir),
     };
-    v.extend(["stop", "--time", "10", &target].map(String::from));
+    v.extend(["stop".to_string(), "--time".into(), secs.to_string(), target]);
     Some(v)
 }
 

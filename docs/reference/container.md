@@ -611,7 +611,16 @@ beside the run, under its own policy only.
   container run is a container run of its own, never a container in the caller's container.
 - **The end.** When the command ends (and on every early return) `run` sends the broker SIGTERM and gives it 12 s
   (bwrap's), which it spends stopping each sibling (SIGTERM to its session, again each second, SIGKILL after 10 s); the
-  broker also stops itself once `run` is gone. `cleanup` stops one still there (a process in the run folder whose
+  broker also stops itself once `run` is gone. **A sibling that is a container run** (its own `siblingOf`) is stopped
+  with `stop --time 3` (Seatbelt's 3 s), and its stop and removal run in a process group of their own: its broker sends
+  SIGTERM to its whole session each second and SIGKILL after 10 s, which before this ended the engine's own `stop` each
+  time and then `run`, leaving a command that ignores SIGTERM running in its container (found in this slice's own
+  review, under podman; `a_container_sibling_stops_within_the_brokers_grace`, both engines). Such a command's status is
+  then 137 under podman; docker's client reports 1.
+- **Differences from bubblewrap, stated.** A sibling's standard input is its container's: the engine's pipe (or pty),
+  never the fd its caller handed over, so a sibling given `/dev/null` reads that through a pipe (`[ -p /dev/stdin ]` is
+  true); nothing of the caller's crosses either way. A container run has no generated `~/.gitconfig` yet (above), so a
+  commit in it, a hook's included, names its author (`git -c user.name=… -c user.email=…`) or fails as git does. `cleanup` stops one still there (a process in the run folder whose
   arguments hold `children.sock` and `--run RUNDIR`, and whose program is the config's python), removes `children.sock`,
   and, for a top run (no `siblingOf`), the tree's slots, `STATE/trees/NAME`.
 

@@ -18,6 +18,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -881,8 +882,10 @@ fn engine_processes(rundir: &str, names: &[String]) -> Vec<String> {
 /// (conmon and its exit command outlive `podman run`, N7). docker's daemon removes the container before `rm` returns.
 fn remove_container(e: Engine, program: &str, rundir: &str, set: &[(String, String)]) -> Result<(), String> {
     let argv = lifecycle::remove_argv(e, program, rundir);
+    // a process group of its own, as the stop's: a sibling's session keeps getting its broker's SIGTERM
     let out = engine::command(&argv[0], &[], set)
         .args(&argv[1..])
+        .process_group(0)
         .stdin(std::process::Stdio::null())
         .output()
         .map_err(|err| format!("can't run {program} to remove the run's container: {err}"))?;
@@ -1732,6 +1735,7 @@ fn wait_engine(
     program: &str,
     abs: &Path,
     set: &[(String, String)],
+    stop_secs: u32,
 ) -> Result<std::process::ExitStatus, String> {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -1754,10 +1758,13 @@ fn wait_engine(
         if let Some(since) = asked {
             let busy = stopper.as_mut().is_some_and(|s| matches!(s.try_wait(), Ok(None)));
             if !busy && last_stop.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
-                match lifecycle::stop_argv(e, program, &r, container_id(abs).as_deref()) {
+                match lifecycle::stop_argv_within(e, program, &r, container_id(abs).as_deref(), stop_secs) {
                     Some(a) => {
+                        // a process group of its own: a sibling's broker sends SIGTERM to its whole session each
+                        // second, which would end the stop itself
                         stopper = engine::command(&a[0], &[], set)
                             .args(&a[1..])
+                            .process_group(0)
                             .stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
@@ -1935,7 +1942,13 @@ fn run(cfg: &Config, rundir: &Path) -> Result<u8, Refusal> {
         let data = lifecycle::secret_records(&env.piped, |n| piped_value(&env, &vals, n));
         feed_fifo(abs.join("secrets.fifo"), data, Arc::clone(&done))
     });
-    let status = wait_engine(&mut child, &stop, e, &program, &abs, &set);
+    // a sibling's container is stopped within its broker's grace (SIGKILL to its session 10 s after the first SIGTERM)
+    let sibling = read_own(&abs.join("launch.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|l| !l.get("siblingOf").is_none_or(serde_json::Value::is_null));
+    let secs = if sibling { lifecycle::SIBLING_STOP } else { 10 };
+    let status = wait_engine(&mut child, &stop, e, &program, &abs, &set, secs);
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(f) = feeder {
         let _ = f.join();
