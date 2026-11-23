@@ -966,8 +966,10 @@ def select_backend(host, flags, ctx):
 
 def probe(prog, rundir, host=None, backend=None):
     """The backend's guarantees, probed once per backend build (cached in pot's state by its path). BACKEND (a
-    select_backend result) names it in a refusal."""
-    cf = os.path.join(host.state, "cache", "probe-" + hashlib.sha256(os.path.realpath(prog).encode()).hexdigest()[:16]) if host else None
+    select_backend result) names it in a refusal. A container backend's probe is never cached (container.md): its answer
+    depends on the caller and the engine's state, and with no program named, on PATH."""
+    cf = os.path.join(host.state, "cache", "probe-" + hashlib.sha256(os.path.realpath(prog).encode()).hexdigest()[:16]) \
+        if host and (backend or {}).get("kind") != "container" else None
     if cf:
         try:
             with open(cf) as f:

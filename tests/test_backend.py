@@ -82,6 +82,37 @@ class Probe(unittest.TestCase):
                          "chooses another of this root's backends, pot host CMD runs unsandboxed; pot doctor shows each backend.")
 
 
+    def test_a_container_probe_is_never_cached(self):
+        # container.md: the probe's answer depends on the caller and the engine's state (and, with no program named,
+        # on PATH), so pot probes it for every run: a working engine once never vouches for a missing one later
+        with tempfile.TemporaryDirectory() as d:
+            prog = os.path.join(d, "backend")
+
+            def says(out):
+                with open(prog, "w") as f:
+                    f.write("#!/bin/sh\necho '" + out + "'\n")
+                os.chmod(prog, stat.S_IRWXU)
+            h = types.SimpleNamespace(root=ROOT, state=d)
+            b = pot.select_backend(h, {}, ctx())
+            says('{"guarantees":["own-netns"]}')
+            self.assertEqual(pot.probe(prog, d, h, b), ["own-netns"])
+            says('{"error":"podman: gone","guarantees":[]}')
+            with self.assertRaises(C.Refusal) as e:
+                pot.probe(prog, d, h, b)
+            self.assertIn("proves nothing here: podman: gone", e.exception.message)
+
+    def test_bubblewraps_probe_is_cached_per_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            prog = os.path.join(d, "backend")
+            with open(prog, "w") as f:
+                f.write("#!/bin/sh\necho '{\"guarantees\":[\"own-netns\"]}'\n")
+            os.chmod(prog, stat.S_IRWXU)
+            h = types.SimpleNamespace(root=ROOT, state=d)
+            b = pot.select_backend(h, {"backend": "bubblewrap"}, ctx())
+            self.assertEqual(pot.probe(prog, d, h, b), ["own-netns"])
+            os.remove(prog)
+            self.assertEqual(pot.probe(prog, d, h, b), ["own-netns"])
+
 class Validate(unittest.TestCase):
     def test_a_contexts_backend_the_root_does_not_offer(self):
         root = {"backends": {"bubblewrap": {}}, "contexts": {"ci": {"extends": "work", "backend": "container"}}}
