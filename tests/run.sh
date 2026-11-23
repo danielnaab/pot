@@ -2720,6 +2720,30 @@ sibling_container() {
   ran "sibling ($e): pot review --discard" nb_ review "$n" --discard
   expect "removes the clone" test ! -e "$work/nstate/runs/$n/clone"
   expect "and never follows the link the run left in it" test -f "$work/nkeep-$e/f"
+  # (QA) a container dispatch whose pot is killed with its process group (SIGKILL): the container outlives it (the
+  # engine's own processes), its command committing on; the recovered look stops it first, so what is staged is what the
+  # run left in the clone, as under bubblewrap, where the group's SIGKILL ends the command
+  local runs0 lead k i
+  runs0=$(find "$work/nstate/runs" -mindepth 1 -maxdepth 1 -name '????' -printf '%f\n' | sort)
+  # shellcheck disable=SC2016 # the run's own variables
+  setsid env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-pot" dispatch --backend container agent -c \
+    'i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo $i > k.md; git add k.md; git -c user.name=t -c user.email=t@e commit -q --no-verify -m k$i; sleep 0.2; done' \
+    </dev/null >/dev/null 2>&1 &
+  lead=$!
+  k=""
+  for i in $(seq 1 120); do
+    k=$(comm -13 <(echo "$runs0") <(find "$work/nstate/runs" -mindepth 1 -maxdepth 1 -name '????' -printf '%f\n' | sort) | head -1)
+    [ -n "$k" ] && [ "$(git_ -C "$work/nstate/runs/$k/clone" rev-list --count main 2>/dev/null || echo 0)" -gt 8 ] && break
+    sleep 0.5
+  done
+  kill -9 -- "-$lead"
+  wait "$lead" 2>/dev/null || true
+  ran "sibling ($e): a dispatch whose pot was killed, recovered (pot runs)" "$work/nc-$e-pot" runs --all
+  expect "its look comes after the run's end: the clone's main is the staged main" \
+    test "$(git_ -C "$work/nstate/runs/$k/clone" rev-parse main)" = "$(git_ --git-dir "$work/nstate/runs/$k/staging/top.git" rev-parse main)"
+  expect "and the event says so" jq -e --arg n "$(git_ -C "$work/nstate/runs/$k/clone" rev-list --count main --not "$(jq -r .clone.base "$work/nstate/runs/$k/launch.json")")" \
+    'select(.ev == "after") | select(.recovered and .refCommits.main == ($n | tonumber))' "$work/nstate/runs/$k/log.jsonl"
+  ran "sibling ($e): its discard" nb_ review "$k" --discard
   if [ "$e" = docker ]; then
     ran "sibling ($e): docker's containers" "$2" ps -a --filter name=pot- --format '{{.Names}}'
     expect "none of pot's is left" test -z "$out"

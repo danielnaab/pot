@@ -375,6 +375,12 @@ handlers are in place before `run` checks anything: a SIGTERM before the engine 
 status recorded, and no engine started (S6). `status` exists once `run` has finished, as pot's `helpers_alive`
 reads it.
 
+**`after` without a `status`** (QA of the siblings slice): when `run` never finished (pot killed with its process
+group, then a recovered `after`), the container outlives it, the engine's own processes keeping it, and its command
+goes on writing. For a look (write access in place, a clone) `after` first removes the run's container and engine
+state as `cleanup` does, so the look sees what the run left, as under bubblewrap, where that SIGKILL ends the command;
+when it can't, `after` fails, naming why, and pot keeps the run in review (K1).
+
 **`cleanup`** (audit N6) removes, in order:
 
 - The run's helpers, if they still run, each a process whose working folder is the run folder, whose arguments are a

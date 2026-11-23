@@ -13,6 +13,8 @@ v2.14.0's `sandbox` on).
   `same-path-clone` when its config names `python`, `pins`, `git` and `gitClosure`: the clone bound at the original
   path with bwrap's pins over it (`pins.py clone`), and `after` runs bwrap's own `clone_after` (new `core/clonelook.py`)
   with each git command of the look in a container of its own (`pot-container git`, the clone read-only, no network).
+  An `after` whose `run` never finished (a recovered look) removes the run's container first, which outlives a killed
+  pot, so the look sees what the run left.
 - **The container backend starts siblings** ([container.md](docs/reference/container.md#siblings)): with a sibling row
   and `hostPot`, `run` starts pot's children broker (`siblings.py`) on the host, bound at `/run/pot/children.sock` and
   checked by the entry; the broker stops each sibling at the run's end (12 s), and `cleanup` stops a broker left and

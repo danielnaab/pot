@@ -2200,6 +2200,29 @@ fn after(cfg: Result<&Config, &String>, cfg_path: Option<&Path>, rundir: &Path) 
             ));
         }
     };
+    // (QA) a run whose `run` never wrote its status (pot killed with its process group, say): its container outlives
+    // it (podman's conmon, docker's daemon) and its command goes on writing, so the look would see a workspace still
+    // moving. Its container is removed first, as cleanup would, and a look it cannot stop is refused (the run stays in
+    // review, K1). Under bubblewrap the group's SIGKILL ends the command itself.
+    let looks = p.mode == "clone" || (p.access == "write" && p.mode == "in-place");
+    if looks && rundir.join("status").symlink_metadata().is_err() {
+        let abs = fs::canonicalize(rundir).map_err(|e| {
+            Refusal::new(
+                &p.context,
+                format!("the container backend's after: {}: {e}", rundir.display()),
+            )
+        })?;
+        let failed = cleanup_engine(cfg, &abs);
+        if !failed.is_empty() {
+            return Err(Refusal::new(
+                &p.context,
+                format!(
+                    "the container backend's after: the run's container could not be stopped before the look: {}",
+                    failed.join("; ")
+                ),
+            ));
+        }
+    }
     // write access: the host's look after the run (pins.py: bwrap's code), against before.json
     let looked = if p.mode == "clone" {
         let c = cfg.map_err(|m| Refusal::new(&p.context, m.clone()))?;
