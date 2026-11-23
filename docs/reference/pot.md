@@ -991,7 +991,7 @@ proves …`. The startup line names the guarantees that the root's usual backend
 | `no-tiocsti` | The run cannot type into the caller's terminal. |
 | `protected-as-mounts` | Protected paths are read-only mount points. |
 | `local-listen` | The run can listen on its own loopback. |
-| `resource-limits` | Memory and task limits: the run is in the [resource scope](#resource-limits). |
+| `resource-limits` | Memory and task limits: the run is in the [resource scope](#resource-limits), and its backend keeps what it starts there. |
 | `separate-kernel` | The run has its own kernel. |
 | `in-place` | The workspace is the host's working tree. |
 | `same-path-clone` | A clone appears at the original path. |
@@ -1015,20 +1015,34 @@ A run without a terminal (stdin or stderr is not one), every `--detach` run, and
 `systemd-run --user --scope -p MemoryMax=M -p TasksMax=T`, with the root's `limits.memoryMax` (default `"50%"`) and
 `limits.tasksMax` (default `2048`). bubblewrap runs inside it; with the probe that comes first, it costs about
 14 ms. pot sets `XDG_RUNTIME_DIR` from the password database, not from the caller, and runs the `systemd-run` on the
-caller's `PATH`. `resource-limits` is in policy.json's `proved` only for a run in the scope, so `pot explain` at a
-terminal lists it among the backend's lacks; its `resources` row says that a run without a terminal gets the scope. `pot explain` has a
+caller's `PATH`.
+
+pot claims `resource-limits` only where it holds (since 0.3.0): the run is in the scope, and its backend keeps what it
+starts there, which the backend's probe says by listing `resource-limits`. bubblewrap's sandbox is pot's child, so it
+does; so does the [container backend](container.md#probe) under podman. docker's daemon starts each container in a
+cgroup of its own, so a run under docker has no limits, with a terminal or without. policy.json's `proved` lists
+`resource-limits` only for a run that has them, and `backend.resources` says what the run got: its limits, or why it
+has none (`at a terminal`, `no user systemd`, `the container backend can't keep its run in pot's scope here`). The
+run's `start` event carries the same ([runs/1](../../contracts/runs-1.md)). `pot explain` at a terminal lists
+`resource-limits` among the backend's lacks; its `resources` row says that a run without a terminal gets the scope. `pot explain` has a
 `resources` row after `backend`:
 
 ```
 resources  none at a terminal; a run without one gets a user systemd scope, MemoryMax=50% TasksMax=2048
 ```
 
-and for a run that gets it, `resources  this run: a user systemd scope, MemoryMax=50% TasksMax=2048`.
+and for a run that gets it, `resources  this run: a user systemd scope, MemoryMax=50% TasksMax=2048`. For a
+backend that can't keep its run in the scope, `resources  none (the container backend can't keep its run in pot's
+scope here)`; a run without a terminal still starts in the scope, which then holds only pot and the engine's
+client, and its startup line says `no resource limits (the container backend can't keep its run in pot's scope here:
+pot doctor)`.
 
 Without user systemd, a run that would get the scope starts without it, with the startup note
 `no resource limits (no user systemd: pot doctor)`: `pot: work · flexion-assistant · no resource limits (no user
 systemd: pot doctor) · pot explain`. A context that `requires` `resource-limits` exits 125 there, as for any
-missing guarantee, ending ` (resource-limits: a user systemd scope, for runs without a terminal: pot doctor)`.
+missing guarantee, ending ` (resource-limits: a user systemd scope, for runs without a terminal: pot doctor)`; on a
+backend that can't keep its run in the scope, ` (resource-limits: the container backend can't keep its run in pot's
+scope here)`.
 An interactive run has no limits.
 
 ## The command line
@@ -1612,7 +1626,10 @@ notebook-kit is `unverified` here because the bump branch pins it before its rel
   starts`. Where user systemd answers, it says `resource-limits: for runs without a terminal`; where it does
   not, `resource-limits` is among the lacks, and `resources` says why:
   `! resources no user systemd (systemd-run --user failed): runs without a terminal start without limits`. A
-  marked row is `! LABEL TEXT`.
+  marked row is `! LABEL TEXT`. Where the backend can't keep its run in the scope (its probe does not list
+  `resource-limits`: the container backend under docker), `resource-limits` is among the lacks, and `resources` says so,
+  unmarked: `resources  none: the container backend can't keep its run in pot's scope here, so no run has limits (user
+  systemd works)`.
 - `grants` says whether the file parses, how many kits it holds, this machine's entry (`no entry for platform-vm in
   the grants file's machines`, or `N in the grants file's machines entry for platform-vm`), and, when it is
   tracked, `tracked in TOP, committed` or `with uncommitted changes`. No file: `grants     PATH: missing: pot grant

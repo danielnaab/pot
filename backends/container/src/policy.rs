@@ -103,12 +103,27 @@ pub struct Policy {
     pub grants: Vec<Grant>,
 }
 
+// Info fields are parsed so that an unknown one is refused; a backend must not act on them.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Backend {
     pub name: String,
     pub requires: Vec<String>,
     pub proved: Vec<String>,
+    /// C1 (0.3.0): Info, the run's limits or why it has none; `proved` alone decides (`resource-limits`).
+    #[serde(default)]
+    pub resources: Option<Resources>,
+}
+
+// Info fields are parsed so that an unknown one is refused; a backend must not act on them.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resources {
+    pub limits: Option<String>,
+    #[serde(default)]
+    pub why: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -681,6 +696,21 @@ mod tests {
         v["run"] = serde_json::json!(["sk-live-123"]);
         let e = parse(&v.to_string()).unwrap_err().to_string();
         assert_eq!(e, "pot (review): policy.json/1: run: expected a string");
+    }
+
+    /// C1 (0.3.0): `backend.resources`, the run's limits or why it has none, is Info: read and never acted on, and
+    /// closed as pot writes it.
+    #[test]
+    fn backend_resources_is_read() {
+        let text = include_str!("../../../docs/reference/container/prepare.in/read-only/policy.json");
+        let mut v: serde_json::Value = serde_json::from_str(text).unwrap();
+        v["backend"]["resources"] = serde_json::json!({ "limits": null, "why": "the container backend can't keep its run in pot's scope here" });
+        parse(&v.to_string()).unwrap();
+        v["backend"]["resources"] = serde_json::json!({ "limits": "MemoryMax=50% TasksMax=2048" });
+        parse(&v.to_string()).unwrap();
+        v["backend"]["resources"] = serde_json::json!({ "limits": null, "other": 1 });
+        let e = parse(&v.to_string()).unwrap_err().to_string();
+        assert!(e.ends_with("backend.resources.other: unknown field `other`"), "{e}");
     }
 
     /// policy-1's schema names this backend in `backend.name` (a new value within version 1).

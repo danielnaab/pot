@@ -2652,15 +2652,7 @@ EOF
 # root $work/nr): each sibling is started by the host under its own grant, and runs under the container backend too
 # (its caller's), never in the caller's container.
 sibling_container() {
-  local e=$1 st n
-  # (QA: a run without a terminal is in pot's scope, so its policy proves resource-limits, which no docker container
-  # upholds: the backend refuses every such run under docker, these included)
-  if [ "$e" = docker ]; then
-    echo "skip sibling (docker): pot proves resource-limits for a run without a terminal, which docker can't uphold (but for a clone's look, under a terminal)"
-    container_root "nc-$e" "$work/nr" "$e" "$2"
-    look_left "$e" "$2"
-    return
-  fi
+  local e=$1 st n cp
   container_root "nc-$e" "$work/nr" "$e" "$2"
   # shellcheck disable=SC2317
   cb_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok STAND=standing WIDE_TOK=w "$work/nc-$e-pot" --backend container "$@"; }
@@ -2673,6 +2665,45 @@ sibling_container() {
     jq -e 'select(.ev == "start") | select(.by == "host" and .backend == "container" and .invoker == "run" and .depth == 1 and (.caller | test("^[0-9a-f]{4}$")))' "$n"
   expect "and its caller ran under the container backend too" \
     jq -e 'select(.ev == "start") | select(.backend == "container")' "$work/nstate/runs/$(jq -r 'select(.ev == "start") | .caller' "$n")/log.jsonl"
+  # C1: pot claims resource-limits only where the backend upholds it. Both runs have no terminal, so they are in pot's
+  # scope; podman's container stays in it (--cgroups=split), docker's never does: there the guarantee is not claimed,
+  # and the policy, the start record and the startup line say why
+  cp="$work/nstate/runs/$(jq -r 'select(.ev == "start") | .caller' "$n")"
+  if [ "$e" = podman ]; then
+    expect "sibling ($e), C1: the caller's policy proves resource-limits, with its limits" \
+      jq -e '.backend | (.proved | index("resource-limits")) and (.resources.limits | test("^MemoryMax="))' "$cp/policy.json"
+    expect "and the sibling's too" jq -e '.backend.proved | index("resource-limits")' "$(dirname "$n")/policy.json"
+    expect "its start record names the limits" jq -e 'select(.ev == "start") | .resources.limits | test("^MemoryMax=")' "$cp/log.jsonl"
+    refuse "and no startup note says it has none" holds "no resource limits"
+    jq '.defaultBackend = "container"' "$work/nc-$e.json" > "$work/nc-$e-d.json"
+    sed "s|$work/nc-$e.json|$work/nc-$e-d.json|" "$work/nc-$e-pot" > "$work/nc-$e-dpot" && chmod +x "$work/nc-$e-dpot"
+    out=$(env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-dpot" doctor 2>&1 || true)
+    pass "sibling ($e), C1: pot doctor, the container backend the root's default"
+    if systemd-run --user --scope --quiet true 2>/dev/null; then
+      expect "says resource-limits holds for runs without a terminal" grep -qE '^backend +container: .*; resource-limits: for runs without a terminal; lacks' <<<"$out"
+      refuse "and not among the lacks" grep -qE '^backend +container: .*; lacks .*resource-limits' <<<"$out"
+    fi
+  else
+    expect "sibling ($e), C1: the caller's policy never claims resource-limits" \
+      jq -e '.backend | (.proved | index("resource-limits") | not) and .resources == {limits: null, why: "the container backend can'"'"'t keep its run in pot'"'"'s scope here"}' "$cp/policy.json"
+    expect "nor the sibling's" jq -e '.backend | (.proved | index("resource-limits") | not) and .resources.limits == null' "$(dirname "$n")/policy.json"
+    expect "its start record says why it has none" \
+      jq -e 'select(.ev == "start") | .resources.why == "the container backend can'"'"'t keep its run in pot'"'"'s scope here"' "$cp/log.jsonl"
+    expect "and so does its startup line" holds "no resource limits (the container backend can't keep its run in pot's scope here: pot doctor)"
+    ran "sibling ($e), C1: pot explain" env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=x "$work/nc-$e-pot" explain --backend container agent
+    expect "names no limits, and why" holds "resources  none (the container backend can't keep its run in pot's scope here)"
+    expect "and lists resource-limits among the lacks" holds "lacks resource-limits"
+    # pot doctor, with the container backend the root's default: plain, and not marked (a fact of the engine)
+    jq '.defaultBackend = "container"' "$work/nc-$e.json" > "$work/nc-$e-d.json"
+    sed "s|$work/nc-$e.json|$work/nc-$e-d.json|" "$work/nc-$e-pot" > "$work/nc-$e-dpot" && chmod +x "$work/nc-$e-dpot"
+    out=$(env -u CLAUDECODE -u CODEX_SANDBOX -u POT "$work/nc-$e-dpot" doctor 2>&1 || true)
+    pass "sibling ($e), C1: pot doctor"
+    expect "lists resource-limits among the container backend's lacks" grep -qE '^backend +container: .*; lacks .*resource-limits' <<<"$out"
+    if systemd-run --user --scope --quiet true 2>/dev/null; then
+      expect "and its resources row says no run has limits" \
+        has "resources  none: the container backend can't keep its run in pot's scope here, so no run has limits (user systemd works)"
+    fi
+  fi
   cb_ agent -c 'nk-chk fail' >/dev/null 2>&1 && st=0 || st=$?
   expect "sibling ($e): its exit code, 7, comes back" test "$st" = 7
   ran "sibling ($e): its stdin and stdout" cb_ agent -c 'echo piped | nk-chk cat; nk-chk cat < notes.md'
@@ -2735,7 +2766,8 @@ sibling_container() {
   k=""
   for i in $(seq 1 120); do
     k=$(comm -13 <(echo "$runs0") <(find "$work/nstate/runs" -mindepth 1 -maxdepth 1 -name '????' -printf '%f\n' | sort) | head -1)
-    [ -n "$k" ] && [ "$(git_ -C "$work/nstate/runs/$k/clone" rev-list --count main 2>/dev/null || echo 0)" -gt 8 ] && break
+    # the run's own commits (k1, k2, …), not the base's: the kill comes once the command has committed some
+    [ -n "$k" ] && [ "$(git_ -C "$work/nstate/runs/$k/clone" rev-list --count --grep='^k[0-9]*$' main 2>/dev/null || echo 0)" -gt 8 ] && break
     sleep 0.5
   done
   kill -9 -- "-$lead"

@@ -18,7 +18,8 @@ $ pot-container --config docker.json probe .
 
 ```
 
-docker never lists `resource-limits`: a docker container is not in pot's scope, so `prepare` refuses it there. A
+docker never lists `resource-limits`: a docker container is not in pot's scope, so pot never claims it for a run
+there (and `prepare` refuses a policy that does). A
 daemon whose seccomp profile is `unconfined` proves nothing:
 
 ```console

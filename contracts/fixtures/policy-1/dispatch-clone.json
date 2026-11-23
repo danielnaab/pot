@@ -21,7 +21,10 @@
    "private-proxy",
    "root-files",
    "resource-limits"
-  ]
+  ],
+  "resources": {
+   "limits": "MemoryMax=50% TasksMax=2048"
+  }
  },
  "workspace": [
   {

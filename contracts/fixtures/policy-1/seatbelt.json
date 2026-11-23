@@ -12,7 +12,11 @@
    "no-tiocsti",
    "in-place",
    "private-proxy"
-  ]
+  ],
+  "resources": {
+   "limits": null,
+   "why": "the seatbelt backend can't keep its run in pot's scope here"
+  }
  },
  "workspace": [
   {

@@ -2260,6 +2260,7 @@ mod tests {
                 "neither admitted nor refused, or both",
             ),
             ("unknown-field", "unknown field `owner`"),
+            ("resources-unknown-field", "unknown field `until`"),
             (
                 "version-2",
                 "policy.json's version is not 1: this backend reads version 1 only",

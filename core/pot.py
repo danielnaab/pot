@@ -1056,11 +1056,10 @@ def gather(host, root, context, flags, cmd, rundir=None, run_id="0000", clones=N
             for e in rq.get("env") or []:
                 env_names.add(e if isinstance(e, str) else e.get("name", ""))
     bname, bprog = backend_cmd(host, flags.get("backend") or ctx.get("backend"))
-    probed = [g for g in probe(bprog, rundir or host.state, host) if g != "resource-limits"]
-    if scope and scope.get("argv"):
-        probed.append("resource-limits")   # §11: proved for a run in a user systemd scope, missing otherwise
+    # §11, C1: resource-limits for a run in a user systemd scope whose backend upholds it, missing otherwise
+    probed, resources = C.run_resources(probe(bprog, rundir or host.state, host), scope, bname)
     inp = {"root": root, "context": ctx["name"], "argv": cmd, "flags": fl, "workspace": ws, "grants": grants,
-           "machine": host.machine, "run": run_id, "probe": probed, "backendName": bname,
+           "machine": host.machine, "run": run_id, "probe": probed, "resources": resources, "backendName": bname,
            "stateDir": host.state, "grantsName": os.path.basename(host.grants_path),
            "host": {"home": host.home, "user": host.user, "env": {n: n in os.environ for n in env_names},
                     "resolve": resolve, "hidden": resolve_hidden(host, root), "tz": host.tz()}}
@@ -1078,6 +1077,9 @@ def gather(host, root, context, flags, cmd, rundir=None, run_id="0000", clones=N
     report["wsFacts"] = facts
     if scope and scope.get("note"):
         report["notes"].append(scope["note"])
+    elif scope and scope.get("argv") and not resources["limits"]:
+        # C1: the run is in the scope, but its backend's run is not: never claimed, and said at start
+        report["notes"].append(f"no resource limits ({resources['why']}: pot doctor)")
     for w in ws:
         if os.path.isdir(os.path.join(w["top"], ".githooks")) and not run_git(host, w["top"], "config", "core.hooksPath").stdout.strip():
             report["notes"].append(f"{os.path.basename(w['top'])} has .githooks but core.hooksPath is unset: commits run no hook "
@@ -1467,7 +1469,7 @@ def scope_for(host, root, ctx, flags, detach):
     if not want:
         return {}
     if sys.platform == "darwin":
-        return {"note": "no resource limits (Seatbelt has none)"}
+        return {"note": "no resource limits (Seatbelt has none)", "why": "Seatbelt has none"}
     lim = root.get("limits") or {}
     mem, tasks = str(lim.get("memoryMax", "50%")), str(lim.get("tasksMax", 2048))
     sr = shutil.which("systemd-run")
@@ -1488,7 +1490,7 @@ def scope_for(host, root, ctx, flags, detach):
                 pass
             return {"argv": [sr, "--user", "--scope", "--quiet", "--collect", "-p", f"MemoryMax={mem}", "-p", f"TasksMax={tasks}", "--"],
                     "env": env, "limits": f"MemoryMax={mem} TasksMax={tasks}"}
-    return {"note": "no resource limits (no user systemd: pot doctor)"}
+    return {"note": "no resource limits (no user systemd: pot doctor)", "why": "no user systemd"}
 
 
 # v2.20.1: children.sock too; under Seatbelt (a TCP proxy) a run with no git binding has no other
@@ -2035,6 +2037,8 @@ def run(host, root, context, flags, cmd):
             sys.stderr = os.fdopen(2, "w", buffering=1)
         sev = start_event(rid, ctx, policy["backend"]["name"], launch["argv"], kits, report, ws, flags, cinfo, detach,
                           invoker=invoker, typed=argv0)
+        if policy["backend"].get("resources"):
+            sev["resources"] = policy["backend"]["resources"]   # C1: this run's limits, or why it has none
         if sib:
             sev.update(via="sibling", invoker="run", caller=sib["callerId"], depth=sib["depth"])
         log(rundir, sev)
@@ -4117,13 +4121,15 @@ def doctor(host, root, rootjson):
     except (C.Refusal, ValueError, OSError) as e:
         bname, g = "none", []
     # the resource scope: resource-limits is proved per run (a run in the scope), so where the scope works it is
-    # no lack; it is one only when the probe fails (L1)
+    # no lack; it is one only when the probe fails (L1), or the backend can't uphold it (C1: its probe lacks it)
     sc = scope_for(host, root, {"requires": ["resource-limits"]}, {}, True)
+    held = "resource-limits" in g and bool(sc.get("argv"))
     if g:
-        lacks = [x for x in C.GUARANTEES if x not in g and not (x == "resource-limits" and sc.get("argv"))]
+        g = [x for x in g if x != "resource-limits"]
+        lacks = [x for x in C.GUARANTEES if x not in g and not (x == "resource-limits" and held)]
         works = "sandbox-exec works" if sys.platform == "darwin" else "user namespaces work"
         row("backend", f"{bname}: {works}; proves {' '.join(g)}"
-            + ("; resource-limits: for runs without a terminal" if sc.get("argv") else "") + f"; lacks {' '.join(lacks)}")
+            + ("; resource-limits: for runs without a terminal" if held else "") + f"; lacks {' '.join(lacks)}")
     elif not shutil.which("true"):
         # F9: the probe runs true from PATH; without one it says nothing about user namespaces
         row("backend", f"{bname}: its probe runs true, and PATH has none (PATH={os.environ.get('PATH', '')}); user namespaces were not tested", True)
@@ -4131,8 +4137,11 @@ def doctor(host, root, rootjson):
         row("backend", f"{bname}: /usr/bin/sandbox-exec does not start a sandbox here, so no run starts (pot host CMD runs unsandboxed)", True)
     else:
         row("backend", f"{bname}: cannot create a user namespace here, so no run starts (pot host CMD runs unsandboxed)", True)
-    if sc.get("argv"):
+    if sc.get("argv") and (held or not g):
         row("resources", f"user systemd: runs without a terminal get {sc['limits']}")
+    elif sc.get("argv"):
+        # C1: plain, not a fault: the backend's runs are outside the scope, so pot claims no limits for them
+        row("resources", f"none: {C.cant_uphold(bname)}, so no run has limits (user systemd works)")
     elif sys.platform == "darwin":
         row("resources", "Seatbelt has no resource limits: a context that requires resource-limits stops (125)")
     else:

@@ -44,6 +44,29 @@ GUARANTEES = ("closure-store", "own-netns", "own-pidns", "no-tiocsti", "protecte
               "resource-limits", "separate-kernel", "in-place", "same-path-clone", "nest", "private-proxy",
               "root-files")
 
+
+def cant_uphold(backend):
+    """C1: why a backend's runs have no resource limits, when its probe does not list resource-limits."""
+    return f"the {backend} backend can't keep its run in pot's scope here"
+
+
+def run_resources(probed, scope, backend):
+    """C1 (0.3.0): the guarantees a run proves from its backend's probe, and pot's plain word on its resource limits.
+    resource-limits holds only where both do: the run is in the resource scope (scope_for's argv), and the backend
+    keeps what it starts in its caller's cgroup, which its probe says by listing resource-limits (bubblewrap does;
+    the container backend under podman, never under docker). Returns (proved, resources): resources is
+    {"limits": "MemoryMax=… TasksMax=…"}, or {"limits": None, "why": …} (policy.json's backend.resources); None
+    for no run (scope None: pot explain) on a backend that upholds it."""
+    upholds = "resource-limits" in probed
+    proved = [g for g in probed if g != "resource-limits"]
+    if not upholds:
+        return proved, {"limits": None, "why": cant_uphold(backend)}
+    if scope is None:
+        return proved, None   # not a run (pot explain): its resources depend on how a run starts
+    if scope.get("argv"):
+        return proved + ["resource-limits"], {"limits": scope["limits"]}
+    return proved, {"limits": None, "why": scope.get("why") or "at a terminal"}
+
 # M2: names pot owns, refused from kits' env.set
 OWNED_ENV = {"BASH_ENV", "PATH", "HOME", "NIX_REMOTE", "SSL_CERT_FILE", "TZ", "HTTP_PROXY", "HTTPS_PROXY",
              "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
@@ -1246,7 +1269,10 @@ def compose(inp):
         report["notes"].append("clone at its own path")
     missing = [g for g in requires if g not in proved]
     if missing:
-        hint = " (resource-limits: a user systemd scope, for runs without a terminal: pot doctor)" if "resource-limits" in missing else ""
+        res = inp.get("resources") or {}
+        hint = ("" if "resource-limits" not in missing
+                else f" (resource-limits: {res['why']})" if res.get("why") == cant_uphold(inp.get("backendName", "bubblewrap"))
+                else " (resource-limits: a user systemd scope, for runs without a terminal: pot doctor)")
         raise Refusal(f"pot ({ctx['name']}): requires {' '.join(missing)}; {inp.get('backendName', 'the backend')} proves "
                       f"{' '.join(proved) or 'nothing'}{hint}", EXIT_GRANT)
 
@@ -1262,7 +1288,8 @@ def compose(inp):
         "context": ctx["name"],
         "mode": "clone" if clone_mode else "in-place",
         "access": access,
-        "backend": {"name": inp.get("backendName", "bubblewrap"), "requires": requires, "proved": proved},
+        "backend": {"name": inp.get("backendName", "bubblewrap"), "requires": requires, "proved": proved,
+                    **({"resources": inp["resources"]} if inp.get("resources") else {})},
         "workspace": workspace,
         "items": items,
         # launcher: the in-run pointer the host binds (v2.18.0); a wrapper that finds it named here, and not in the
@@ -2099,11 +2126,14 @@ def explain_text(policy, report, root, width=100):
     lacks = [g for g in GUARANTEES if g not in b["proved"]]
     out += wrap_words("backend    ", f"{b['name']} proves {' '.join(b['proved']) or 'nothing'}; lacks {' '.join(lacks)}".split(" "),
                       width, 11)
-    # §11: resource-limits is proved per run, for a run in a user systemd scope
+    # §11: resource-limits is proved per run, for a run in a user systemd scope; C1: and a backend that upholds it
     sc = report.get("scope") or {}
+    res = b.get("resources") or {}
     lim = root.get("limits") or {}
-    if sc.get("limits"):
-        out.append(f"resources  this run: a user systemd scope, {sc['limits']}")
+    if res.get("limits") or (sc.get("limits") and not res):
+        out.append(f"resources  this run: a user systemd scope, {sc.get('limits') or res['limits']}")
+    elif kind != "seatbelt" and res.get("why") == cant_uphold(b["name"]):
+        out.append(f"resources  none ({res['why']})")
     elif sc.get("note"):
         out.append(f"resources  {sc['note']}")
     elif kind == "seatbelt":

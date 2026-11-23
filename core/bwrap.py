@@ -33,7 +33,9 @@ from pins import (EMPTY_BLOB, GIT, GITFILES, HOST_RUN_EXTRA, PLACED, PLACEHOLDER
 import pins as P  # noqa: E402
 
 GUARANTEES = ["closure-store", "own-netns", "own-pidns", "no-tiocsti", "protected-as-mounts", "local-listen",
-              "in-place", "same-path-clone", "private-proxy", "root-files"]
+              "in-place", "same-path-clone", "private-proxy", "root-files",
+              # C1: the sandbox is pot's child, so it stays in pot's resource scope; pot keeps it only for a run there
+              "resource-limits"]
 SECRET_RE = re.compile(r"^(\.env|\.env\..*|.*\.tfstate.*|id_(rsa|dsa|ecdsa|ed25519).*|\.git-credentials|\.netrc"
                        r"|.*\.pem|.*\.key)$")
 PAYLOAD_DIRS = {".venv", "node_modules", "site-packages"}

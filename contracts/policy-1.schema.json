@@ -72,6 +72,41 @@
             "$ref": "#/$defs/guarantee"
           },
           "uniqueItems": true
+        },
+        "resources": {
+          "description": "Info, since 0.3.0 (optional): this run's resource limits, or why it has none. proved alone decides.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "limits"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "limits": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "limits",
+                "why"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "limits": {
+                  "type": "null"
+                },
+                "why": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
         }
       }
     },

@@ -139,6 +139,18 @@ v2.14.0's `sandbox` on).
   runs wider for not knowing it (bubblewrap and Seatbelt are built with pot; an older container backend refuses
   write access and ignores the field). `pins.py before|after` is the host's look (bwrap's before.json and the
   in-place part of its after event) for a backend built apart.
+- **pot claims `resource-limits` only where the backend upholds it** (C1, decided 2026-11-23; a contract change:
+  0.3.0). Before, pot added it for every run in its user systemd scope, whatever the backend; docker's daemon starts
+  each container in a cgroup of its own, so the container backend under docker refused every run without a terminal.
+  A backend's probe now lists `resource-limits` when what it starts stays in its caller's scope (bubblewrap; the
+  container backend under podman, never under docker), and pot keeps it for a run in the scope only then
+  (`compose.run_resources`). A run without limits says so: policy.json/1's new optional, Info
+  `backend.resources` (`{ limits }` or `{ limits: null, why }`; prose, schema, fixtures, an invalid fixture, and the
+  container backend reads it), the runs/1 `start` event's `resources` (a value added), the startup line (`no resource
+  limits (the container backend can't keep its run in pot's scope here: pot doctor)`), `pot explain`'s `resources`
+  row, `pot doctor` (unmarked: a fact of the engine), and a `requires` refusal's hint. `tests/run.sh sibling` runs its
+  docker leg through pot (its killed dispatch now waits for the run's own commits, not the base's nine, which docker's
+  slower start exposed).
 
 ### Fixed
 

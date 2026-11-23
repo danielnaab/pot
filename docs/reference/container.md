@@ -77,9 +77,11 @@ The engine must run as the caller and filter system calls; the checks are the ph
   `newuidmap` fails under it, and systemd's `DynamicUser` sets it); its seccomp filter is on; version 4.4 or later.
 - **docker:** its seccomp profile is on; version 20.10 or later. docker-group membership is root-equivalent: use
   docker only where the caller already is (a CI VM).
-- `resource-limits` when the engine reports the memory and pids controllers (podman's delegated controllers;
-  docker's `MemoryLimit` and `PidsLimit`). pot proves it per run (a run in its user systemd scope), so it ignores
-  the probe's.
+- `resource-limits` under podman, when it reports the memory and pids controllers (its delegated controllers):
+  podman keeps the container in the scope of the pot that starts it. Never under docker, whose daemon starts the
+  container in a cgroup of its own. pot claims it for a run only where the probe lists it and the run is in its
+  user systemd scope ([Resource limits](pot.md#resource-limits)): a run under docker has no limits, and its policy,
+  its start record, its startup line, `pot explain` and `pot doctor` say so.
 
 Guarantees, in bubblewrap's vocabulary (no new names):
 
@@ -636,10 +638,10 @@ Tested in `run.rs` under both engines with a fake host entry (`podman_a_sibling_
 `docker_…`): the request reaches the host entry with the run folder, the row's key, the arguments and the cwd; the
 entry is a session leader on the host; its output is the run's and its stdin the run's pipe; its status (7) comes back;
 the client killed stops it (SIGTERM); the run's end stops it before `run` returns; no broker, socket or tree is left.
-End to end through pot, `tests/run.sh sibling` with `POT_TEST_PODMAN`. With `POT_TEST_DOCKER` it says it skips: a run
-without a terminal is in pot's scope, so its policy proves `resource-limits`, which `prepare` refuses under docker
-(tried by hand under a terminal: the siblings and a dispatch clone's look behave as under podman). It still runs, under
-a terminal, a dispatch whose look is interrupted (`look_left`), with either engine.
+End to end through pot, `tests/run.sh sibling` under each engine given (`POT_TEST_PODMAN`, `POT_TEST_DOCKER`): the
+same siblings, a dispatch clone and its look, a killed dispatch recovered, and a dispatch whose look is interrupted
+(`look_left`). Under docker a run proves no `resource-limits`, and says why (before 0.3.0 pot claimed it for every
+run without a terminal, which `prepare` refuses under docker, so the docker leg was skipped).
 
 ## Refusals
 
@@ -669,7 +671,7 @@ refused, since a field this backend does not know could narrow the run):
 - a `hookEnv` naming a variable other than `GIT_INDEX_FILE` and `GIT_PREFIX`;
 - inspect's `view`;
 - `dir` items (folders of links) and `file` items in mode `seed` or `reassert`;
-- `resource-limits` under docker;
+- `resource-limits` under docker (pot never claims it there: its probe does not list it);
 - a path a bind can't name (`:`, `,`, `"` or a control character, such as a newline: X5), a sealed entry whose name is not
   UTF-8 (named), and a command whose name holds `=` (`env` would read it as a variable);
 - a run's variable that configures the container engine, or that bash can't hand over (above); a binding's variable

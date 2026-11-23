@@ -154,6 +154,23 @@
           "depth": {
             "type": "integer",
             "minimum": 1
+          },
+          "resources": {
+            "type": "object",
+            "required": [
+              "limits"
+            ],
+            "properties": {
+              "limits": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "why": {
+                "type": "string"
+              }
+            }
           }
         }
       }

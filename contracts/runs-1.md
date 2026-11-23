@@ -37,7 +37,7 @@ Every event has `ev` and `by`:
 
 | `ev` | When | Keys |
 |---|---|---|
-| `start` | the run starts (also `pot host`: since v2.21.0 with `mode` `none` and `pid`, `pidStart`, `boot`) | `run`, `context`, `backend`, `argv`, `kits`, `invoker`, `time`; `mode`, `workspace`, `command`, `pid`, `boot`, `pidStart`, `pane`, `detached`, `parent`, `oneRun`, in clone mode `clone` (`{ base, branch, path, nested }`), and for a sibling (since v2.20.0) `caller` (the id of the run that asked) and `depth` (1 for a sibling of a top-level run) |
+| `start` | the run starts (also `pot host`: since v2.21.0 with `mode` `none` and `pid`, `pidStart`, `boot`) | `run`, `context`, `backend`, `argv`, `kits`, `invoker`, `time`; `mode`, `workspace`, `command`, `pid`, `boot`, `pidStart`, `pane`, `detached`, `parent`, `oneRun`, in clone mode `clone` (`{ base, branch, path, nested }`), and for a sibling (since v2.20.0) `caller` (the id of the run that asked) and `depth` (1 for a sibling of a top-level run); since 0.3.0 `resources`, policy.json's `backend.resources`: `{ limits }`, or `{ limits: null, why }` |
 | `stop` | pot refused to start the run with exit 125 | `reason` (`grant` or `guarantee`), `kits` (each `{ id, status, digest, source }`: what was wanted), `fix` (such as `pot grant flexion-assistant`), `text` (the 125 lines), `workspace`, `time` |
 | `net` | a network decision | `host`, `port`, `verdict`, `count`, `bytes_out`; a request the proxy could not read is `{ "host": null, "port": null, "verdict": "malformed" }` |
 | `cap`, `notfound` | in the shape; not written yet | |

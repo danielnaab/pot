@@ -83,7 +83,8 @@ podman
 
 ## docker
 
-docker can't keep a container in pot's scope, so it refuses a run that has `resource-limits`:
+docker can't keep a container in pot's scope, so its probe never lists `resource-limits` and pot never claims it
+there. A policy that does anyway is refused:
 
 ```console
 $ pot-container --config config-docker.json prepare --print read-only
