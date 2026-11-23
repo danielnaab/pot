@@ -2640,7 +2640,8 @@ EOF
   refuse "nothing ran" holds "args=rr"
   # the container backend (pot phase 2): the same siblings from a run in a container, under each engine given
   local eng prog
-  while read -r eng prog; do sibling_container "$eng" "$prog"; done < <(engines)
+  # the engines on fd 3: a run in the loop reads its stdin, which would take the next engine's line
+  while read -r eng prog <&3; do sibling_container "$eng" "$prog"; done 3< <(engines)
   [ -n "$(engines)" ] || echo "skip sibling: the container backend (POT_TEST_PODMAN and POT_TEST_DOCKER are unset)"
   expect "sibling: runs/1, every log line and record validates (siblings, wrappers, hooks)" runs_valid "$work/nstate" nb_
   expect "sibling: policy.json/1, every policy.json validates (siblings, wrappers, hooks)" policies_valid "$work/nstate"
@@ -2652,6 +2653,12 @@ EOF
 # (its caller's), never in the caller's container.
 sibling_container() {
   local e=$1 st n
+  # (QA: a run without a terminal is in pot's scope, so its policy proves resource-limits, which no docker container
+  # upholds: the backend refuses every such run under docker, these included)
+  if [ "$e" = docker ]; then
+    echo "skip sibling (docker): pot proves resource-limits for a run without a terminal, which docker can't uphold"
+    return
+  fi
   container_root "nc-$e" "$work/nr" "$e" "$2"
   # shellcheck disable=SC2317
   cb_() { env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok STAND=standing WIDE_TOK=w "$work/nc-$e-pot" --backend container "$@"; }

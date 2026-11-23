@@ -628,7 +628,9 @@ Tested in `run.rs` under both engines with a fake host entry (`podman_a_sibling_
 `docker_…`): the request reaches the host entry with the run folder, the row's key, the arguments and the cwd; the
 entry is a session leader on the host; its output is the run's and its stdin the run's pipe; its status (7) comes back;
 the client killed stops it (SIGTERM); the run's end stops it before `run` returns; no broker, socket or tree is left.
-End to end through pot, `tests/run.sh sibling` with `POT_TEST_PODMAN` or `POT_TEST_DOCKER`.
+End to end through pot, `tests/run.sh sibling` with `POT_TEST_PODMAN`. With `POT_TEST_DOCKER` it says it skips: a run
+without a terminal is in pot's scope, so its policy proves `resource-limits`, which `prepare` refuses under docker
+(tried by hand under a terminal: the siblings and a dispatch clone's look behave as under podman).
 
 ## Refusals
 
