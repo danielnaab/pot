@@ -120,7 +120,7 @@ engines() {
 # container_root NAME ROOT ENGINE PROGRAM: the built root ROOT (a link to its package) offering the container backend
 # too, as `--backend container` (no root offers it yet: choosing it from a root is a later step). pot-container is
 # built from this checkout; its --config is ROOT's own bubblewrap config less bwrap's own keys, plus the engine, core's
-# pins.py and the shims' closure (python's and pot's). Writes $work/NAME.json (ROOT's manifest plus backends.container)
+# pins.py and the shims' closure (python's and pot's); gitClosure (clone mode's look) is bwrap's own. Writes $work/NAME.json (ROOT's manifest plus backends.container)
 # and $work/NAME-pot (ROOT's pot with that manifest, so a sibling's host entry is it too).
 container_root() {
   local name=$1 root=$2 engine=$3 program=$4 pc m bprog bcfg src python
@@ -130,8 +130,10 @@ container_root() {
   bcfg=$(grep -o -- '--config [^ ]*' "$bprog" | cut -d' ' -f2)
   src=$(dirname "$(jq -r .broker "$bcfg")") && python=$(jq -r .python "$bcfg")
   nix-store -qR "$(dirname "$(dirname "$python")")" "$src" > "$work/$name-shim.txt"
+  # socat as its real file (the entry runs it; bin/socat is a link to socat1)
   jq --arg e "$engine" --arg p "$program" --arg sc "$work/$name-shim.txt" --arg pins "$src/pins.py" \
-    'del(.bwrap, .bpf, .netwrap, .fd, .find, .gitClosure) + {engine: $e, ($e): $p, shimClosure: $sc, pins: $pins}' \
+    --arg socat "$(readlink -f "$(jq -r .socat "$bcfg")")" \
+    'del(.bwrap, .bpf, .netwrap, .fd, .find) + {engine: $e, ($e): $p, shimClosure: $sc, pins: $pins, socat: $socat}' \
     "$bcfg" > "$work/$name-cfg.json"
   printf '#!/bin/sh\nexec %s --config %s "$@"\n' "$pc" "$work/$name-cfg.json" > "$work/$name-backend"
   chmod +x "$work/$name-backend"
@@ -2668,7 +2670,10 @@ sibling_container() {
   expect "a pipe passes" has "piped"
   expect "a file is piped by the client" holds "data"
   ran "sibling ($e): a directory as stdin" cb_ agent -c 'nk-chk fd0 < .'
-  expect "gets /dev/null for it" has "nk-chk fd0: not a pipe"
+  # the client hands the broker /dev/null for it; a container's stdin is the engine's pipe (or pty), so the sibling
+  # reads /dev/null's nothing through a pipe, never the caller's directory
+  expect "gets nothing of the caller's view: the engine's pipe in place of /dev/null" has "nk-chk fd0: a pipe"
+  refuse "and lists nothing through it" holds "a directory it can list"
   ran "sibling ($e): a sibling with network" cb_ agent -c 'nk-net 1 2'
   expect "reaches its own host (the port is closed: 502)" has "nk-net 1 502"
   expect "and is refused, by its own proxy, a host only the caller reaches" has "nk-net 2 403"
@@ -2685,11 +2690,29 @@ sibling_container() {
   expect "and the sibling is stopped" test "$(pgrep -fc 'sleep 3122' || true)" = 0
   ran "sibling ($e): the caller's run ends" cb_ agent -c 'nk-chk sleep 3123 & sleep 5; echo leaving'
   expect "stops the sibling with it" test "$(pgrep -fc 'sleep 3123' || true)" = 0
+  # (no ~/.gitconfig is placed in a container run yet: the commit names its author)
   echo container >> notes.md
-  ran "sibling ($e): git commit -a inside a container run" cb_ agent -c 'git commit -q -a -m container'
+  ran "sibling ($e): git commit -a inside a container run" cb_ agent -c 'git -c user.name=t -c user.email=t@e commit -q -a -m container'
   expect "runs the hook command as a sibling, on the caller's index (hookEnv)" holds "nk-hook POT=work index=$c/.git/index.lock staged=notes.md"
   ran "sibling ($e): the runs' folders" bash -c "ls -d '$work'/nstate/runs/*/enginestore '$work'/nstate/runs/*/children.sock '$work'/nstate/trees/* 2>/dev/null || true"
   expect "hold no engine store, children socket or tree of slots: each run was cleaned up by its own backend" test -z "$out"
+  # a dispatch clone under the container backend: at the original path, its hook a sibling in the clone, its commit
+  # staged by the host's look (git in a container of its own), fetched and discarded as any clone; a link the run left in
+  # the clone is never followed by the discard
+  mkdir -p "$work/nkeep-$e" && echo keep > "$work/nkeep-$e/f"
+  ran "sibling ($e): a container dispatch whose commit runs the hook" env -u CLAUDECODE -u CODEX_SANDBOX -u POT AGTOK=secret-agtok \
+    "$work/nc-$e-pot" dispatch --backend container agent -c "echo x > n-$e.md; git add n-$e.md; git -c user.name=t -c user.email=t@e commit -q -m in-container-clone; echo top=\$(git rev-parse --show-toplevel); ln -s '$work/nkeep-$e' outside; echo committed"
+  expect "the clone is at the original path (same-path-clone)" has "top=$c"
+  expect "the hook command ran, in the clone (as a sibling)" holds "nk-hook POT=dispatch index=$c/.git/index staged=n-$e.md"
+  expect "and the commit is there" has "committed"
+  n=$(sed -n 's/^pot: run \([0-9a-f]*\) · 1 commit on main.*/\1/p' <<<"$out")
+  expect "it comes back as the dispatch's commit, staged by the host's look" test -n "$n"
+  expect "its record names the container backend" jq -e 'select(.ev == "start") | select(.backend == "container" and .mode == "clone")' "$work/nstate/runs/$n/log.jsonl"
+  ran "sibling ($e): pot review --fetch" nb_ review "$n" --fetch
+  expect "fetches the commit" test "$(git_ log -1 --format=%s "refs/remotes/pot-$n/main")" = in-container-clone
+  ran "sibling ($e): pot review --discard" nb_ review "$n" --discard
+  expect "removes the clone" test ! -e "$work/nstate/runs/$n/clone"
+  expect "and never follows the link the run left in it" test -f "$work/nkeep-$e/f"
   if [ "$e" = docker ]; then
     ran "sibling ($e): docker's containers" "$2" ps -a --filter name=pot- --format '{{.Names}}'
     expect "none of pot's is left" test -z "$out"
