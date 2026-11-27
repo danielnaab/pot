@@ -197,6 +197,9 @@ v2.14.0's `sandbox` on).
    gone too (Linux detaches a mount whose file is removed in another namespace), so the run could create
    `config.worktree` or `commondir` there and point host git at a config it wrote. A v0.2.0 run that is lost (its pot
    killed) is safe: the newer pot's cleanup of it leaves what a live run relies on.
+2. **Upgrade pot and its container backend together.** A `pot-container` built apart from this pot (an older one)
+   reads policy.json strictly and rejects unknown fields, so it refuses every run once pot writes `backend.resources`
+   (C1), as launch.json's `pins` needs this backend too. A root built by `pot.lib.mkRoot` builds both from one pot.
 
 ## v0.2.0 - 2026-11-21
 
