@@ -107,7 +107,8 @@ pub fn storage_conf(store: &str) -> String {
     )
 }
 
-/// The run's containers.conf: nothing in it adds to a container. The default seccomp profile applies.
+/// The run's containers.conf: nothing in it adds to a container. The seccomp profile is the run's own (L1:
+/// `--security-opt seccomp=RUNDIR/seccomp.json`), never podman's default.
 pub fn containers_conf(empty_file: &str) -> String {
     format!(
         "# pot-container: the only containers.conf podman reads for this run (CONTAINERS_CONF).\n\

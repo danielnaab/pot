@@ -126,6 +126,15 @@ Tested in `run.rs` under both engines (`*_no_run_creates_a_user_namespace`: `uns
 `CLONE_NEWUSER` EPERM, `clone3` ENOSYS, a fork and a thread work; without the profile, podman's run creates one) and
 end to end by `tests/run.sh sibling` (the caller and its sibling, under each engine).
 
+Under podman the profile is narrower than podman's own default (containers/common, podman 5.4.1) in most places: it
+also refuses `mount`, `umount2`, `pivot_root`, the new mount API (`fsopen`, `open_tree`, …), `keyctl`, `add_key`,
+`pidfd_getfd`, `syslog`, `reboot`, `mbind` and `AF_VSOCK` sockets. It allows a few that podman's refuses, all in
+docker's default for every docker container: `vmsplice`, `io_pgetevents`, `futex_waitv`, `cachestat`,
+`map_shadow_stack`, and a `NETLINK_AUDIT` socket (opened, but the kernel refuses its messages: ECONNREFUSED in
+podman's user namespace, EPERM without `CAP_AUDIT_WRITE` under docker). Neither allows `bpf`, `perf_event_open`,
+`userfaultfd` or `io_uring`; both allow `ptrace`, which the kernel limits as before (QA, 2026-11-27, x86_64, each
+syscall tried under both).
+
 ## The engine's configuration
 
 podman and docker read configuration that changes every container: `CONTAINERS_CONF_OVERRIDE` and the user's
