@@ -5,7 +5,7 @@ and a patch never does. Until 0.1.0 pot shipped inside graft; its history up to 
 [graft's CHANGELOG](https://github.com/danielnaab/graft/blob/v2/CHANGELOG.md) (the entries that name pot, from
 v2.14.0's `sandbox` on).
 
-## Unreleased
+## v0.3.0 - 2026-11-27
 
 ### Added
 
