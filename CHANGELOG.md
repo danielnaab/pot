@@ -188,6 +188,9 @@ v2.14.0's `sandbox` on).
   `placeholders.json` alone) is taken on too, so its cleanup leaves it while a run relies on it. On every backend
   (Seatbelt untested here).
 - **`pot --backend NAME`'s cleanup is that backend's** (and a context's `backend`), not the root's default.
+- **`pot host CMD` at a terminal gives `CMD` the terminal** ([host](docs/reference/pot.md#host)): `CMD` is its own
+  process group and the terminal's foreground, so tmux names the window after `CMD` (`claude`), not pot's `python3`;
+  `^Z` stops the job and `fg` resumes it, as Seatbelt's runs do. Off a terminal, `CMD` runs in pot's group, as before.
 
 ### Upgrading
 

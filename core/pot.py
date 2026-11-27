@@ -2776,18 +2776,11 @@ def host_run(host, root, ctx, flags, cmd, quiet_line=False):
                  "invoker": by, "time": now_iso(), "mode": "none", **proc_facts()})
     before = host_look_before(host, os.getcwd())
     try:
-        proc = subprocess.Popen(cmd, env={**os.environ, "POT_RUN": rid})
+        status = host_wait(cmd, {**os.environ, "POT_RUN": rid})
     except FileNotFoundError:
         err(f"pot: {cmd[0]}: not found")
         log(rundir, {"ev": "exit", "by": "host", "status": 127, "time": now_iso()})
         return 127
-    # ^C is the command's (an agent's interrupt): pot waits for it, and logs its end, rather than dying with it
-    import signal
-    was = signal.signal(signal.SIGINT, signal.SIG_IGN)
-    try:
-        status = proc.wait()
-    finally:
-        signal.signal(signal.SIGINT, was)
     if status < 0:
         status = 128 - status
     log(rundir, {"ev": "exit", "by": "host", "status": status, "time": now_iso()})
@@ -2797,6 +2790,59 @@ def host_run(host, root, ctx, flags, cmd, quiet_line=False):
         for line in host_after_lines(rid, ev):
             err(line)
     return status
+
+
+def host_wait(cmd, env):
+    """Start pot host's CMD and wait for it: its exit code (negative: the signal that ended it).
+    At a terminal where pot is in the foreground, CMD is its own process group and the terminal's foreground, so a
+    terminal multiplexer names the window after CMD (tmux reads the foreground group leader's name, which was pot's
+    python3), ^C and ^Z reach CMD alone, and the terminal comes back to pot's group when CMD ends. Off a terminal,
+    CMD runs in pot's group. Either way ^C is the command's (an agent's interrupt): pot waits for it and logs its
+    end, rather than dying with it. The job control is Seatbelt's (seatbelt.wait_job)."""
+    import signal
+    fg = False
+    try:
+        fg = os.isatty(0) and os.tcgetpgrp(0) == os.getpgrp()
+    except OSError:
+        pass
+    if not fg:
+        proc = subprocess.Popen(cmd, env=env)
+        was = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            return proc.wait()
+        finally:
+            signal.signal(signal.SIGINT, was)
+    proc = subprocess.Popen(cmd, env=env, process_group=0)
+    old = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTTOU)}
+
+    def hand(pgid):
+        try:
+            os.tcsetpgrp(0, pgid)
+        except OSError:          # CMD already gone: its group with it
+            pass
+
+    def resume():
+        try:
+            os.killpg(proc.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+    try:
+        hand(proc.pid)
+        resume()                 # in case it read the terminal before it was in the foreground
+        while True:
+            _, st = os.waitpid(proc.pid, os.WUNTRACED)
+            if not os.WIFSTOPPED(st):
+                proc.returncode = os.waitstatus_to_exitcode(st)
+                return proc.returncode
+            # ^Z: pot's group stops too, so the shell sees the job stopped; when the shell resumes pot, CMD resumes
+            hand(os.getpgrp())
+            os.killpg(os.getpgrp(), signal.SIGSTOP)
+            hand(proc.pid)
+            resume()
+    finally:
+        hand(os.getpgrp())
+        for s, h in old.items():
+            signal.signal(s, h)
 
 
 HOST_LOOK_MAX = 200     # commits the after look of pot host records; the rest are counted
