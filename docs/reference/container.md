@@ -35,8 +35,10 @@ by the same names, `engine` and its program (always named: the root's `pkgs.podm
 closure) and `socat` as its real file (`bin/socat` is a link to `socat1`); its `pot-backend-container` runs
 `pot-container --config` with it.
 
-**`--config`** (JSON; unknown keys refused): `engine` (`podman` or `docker`; by default podman when it is on `PATH`,
-else docker), `podman` and `docker` (the programs), `image` (docker's empty image, default `localhost/pot-empty:1`),
+**`--config`** (JSON; unknown keys refused): `engine` (`podman` or `docker`; by default the one whose program is
+named), `podman` and `docker` (the programs: the engine's is required, an absolute path, or `./NAME` in the config
+file's folder; the backend never looks an engine up on `PATH`, where a repository's `bin` or a run could put one, and
+refuses without it: [probe](container/probe.md)), `image` (docker's empty image, default `localhost/pot-empty:1`),
 and the store paths bound into every run, named as bwrap's config names them: `sh`, `shell`, `env`, `cacert`,
 `terminfo`, `tzdir` and `baseClosure` (a file of store paths). `prepare` needs all of the store paths. The network's
 programs, also named as bwrap's config names them: `python` and `proxy` (pot's `proxy.py`), which run on the host,

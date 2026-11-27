@@ -89,11 +89,12 @@ fn visible(s: &str) -> String {
     out
 }
 
-fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
-}
+/// Why an engine's program is never looked up on PATH (QA B2): a repository's `bin`, or a run, could put one there.
+const NOT_FROM_PATH: &str = "(pot-container never runs an engine it finds on PATH)";
 
-/// The engine and its program: the config's, else podman when it is on PATH, else docker.
+/// The engine and its program, both the config's: the engine named (or the one whose program is named), and its
+/// program an absolute path (`read_config` resolves `./NAME` against the config's folder). No engine is ever taken
+/// from PATH.
 fn engine(cfg: &Config) -> Result<(Engine, String), String> {
     let e = match cfg.engine.as_deref() {
         Some("podman") => Engine::Podman,
@@ -103,14 +104,32 @@ fn engine(cfg: &Config) -> Result<(Engine, String), String> {
                 "the backend's --config names engine {other:?}: podman or docker"
             ));
         }
-        None if cfg.podman.is_some() || on_path("podman") => Engine::Podman,
-        None => Engine::Docker,
+        None if cfg.podman.is_some() => Engine::Podman,
+        None if cfg.docker.is_some() => Engine::Docker,
+        None => {
+            return Err(format!(
+                "the backend's --config names no engine: podman or docker, with its program's absolute path {NOT_FROM_PATH}"
+            ));
+        }
     };
-    let program = match e {
-        Engine::Podman => cfg.podman.clone().unwrap_or_else(|| "podman".into()),
-        Engine::Docker => cfg.docker.clone().unwrap_or_else(|| "docker".into()),
+    Ok((e, engine_program(cfg, e)?))
+}
+
+/// ENGINE's program in the config: an absolute path, or a refusal.
+fn engine_program(cfg: &Config, e: Engine) -> Result<String, String> {
+    let (name, program) = match e {
+        Engine::Podman => ("podman", cfg.podman.as_deref()),
+        Engine::Docker => ("docker", cfg.docker.as_deref()),
     };
-    Ok((e, program))
+    match program {
+        None => Err(format!(
+            "the backend's --config names no {name} program: give its absolute path {NOT_FROM_PATH}"
+        )),
+        Some(p) if !p.starts_with('/') => Err(format!(
+            "the backend's --config names {name} {p:?}: give its absolute path {NOT_FROM_PATH}"
+        )),
+        Some(p) => Ok(p.to_string()),
+    }
 }
 
 fn read_config(path: Option<&Path>) -> Result<Config, String> {
@@ -119,10 +138,24 @@ fn read_config(path: Option<&Path>) -> Result<Config, String> {
     };
     let text = fs::read_to_string(path)
         .map_err(|e| format!("can't read the backend's --config {}: {e}", path.display()))?;
-    serde_json::from_str(&text)
+    let mut cfg: Config = serde_json::from_str(&text)
         .map_err(|e| e.to_string())
         .and_then(policy::decode)
-        .map_err(|e| format!("the backend's --config {}: {e}", path.display()))
+        .map_err(|e| format!("the backend's --config {}: {e}", path.display()))?;
+    // an engine's program written ./NAME is the config's folder's (never the caller's working directory)
+    let dir = std::path::absolute(path)
+        .map_err(|e| format!("the backend's --config {}: {e}", path.display()))?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    for p in [&mut cfg.podman, &mut cfg.docker].into_iter().flatten() {
+        if let Some(rest) = p.strip_prefix("./") {
+            *p = dir.join(rest).to_string_lossy().into_owned();
+        } else if p.starts_with("../") {
+            *p = dir.join(&*p).to_string_lossy().into_owned();
+        }
+    }
+    Ok(cfg)
 }
 
 fn load(rundir: &Path) -> Result<(Policy, Launch), Refusal> {
@@ -2380,10 +2413,7 @@ fn cleanup_engine(cfg: Result<&Config, &String>, abs: &Path) -> Vec<String> {
     let mut failed: Vec<String> = vec![];
     let program = |e: Engine| -> Result<String, String> {
         let c = cfg.map_err(Clone::clone)?;
-        Ok(match e {
-            Engine::Podman => c.podman.clone().unwrap_or_else(|| "podman".into()),
-            Engine::Docker => c.docker.clone().unwrap_or_else(|| "docker".into()),
-        })
+        engine_program(c, e)
     };
     let store = rd("enginestore");
     let mut keep = false;
@@ -2741,12 +2771,7 @@ fn stop_helpers(abs: &Path, exes: &HelperExes) -> Vec<String> {
 /// probe leaves nothing in the folder pot gives it, often pot's state (audit N3).
 fn probe_now(e: Engine, program: &str, net: bool) -> Result<Vec<&'static str>, String> {
     use std::os::unix::fs::DirBuilderExt;
-    let found = if program.contains('/') {
-        Path::new(program).is_file()
-    } else {
-        on_path(program)
-    };
-    if !found {
+    if !Path::new(program).is_file() {
         return Err(format!("{}: can't run {program}: not found", e.name()));
     }
     let nanos = std::time::SystemTime::now()

@@ -72,9 +72,13 @@ pot (work): policy.json/1: children: row root:relay:relaytest is neither admitte
 mode. `cleanup` succeeds on a run directory it never prepared.
 
 ```console
-$ pot-container run work-bindings
+$ pot-container --config config.json run work-bindings
 ? 1
 pot (work): [CWD]/work-bindings/container.argv: No such file or directory (os error 2) (run prepare first)
+
+$ pot-container run work-bindings
+? 1
+pot (work): the backend's --config names no engine: podman or docker, with its program's absolute path (pot-container never runs an engine it finds on PATH)
 
 $ pot-container after work-bindings
 ? 1

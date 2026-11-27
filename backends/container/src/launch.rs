@@ -133,9 +133,9 @@ pub struct HostTools {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Config {
-    /// `podman` or `docker`; by default podman when it is on `PATH`, else docker.
+    /// `podman` or `docker`; by default the one whose program is named.
     pub engine: Option<String>,
-    /// The engines' programs (default: the name, on `PATH`).
+    /// The engines' programs: the engine's is required, an absolute path (never one on `PATH`).
     pub podman: Option<String>,
     pub docker: Option<String>,
     /// docker only: the empty image the run starts from (default `localhost/pot-empty:1`).

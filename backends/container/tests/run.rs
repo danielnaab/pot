@@ -56,8 +56,16 @@ fn coreutils(name: &str) -> String {
 }
 
 /// A run folder for ARGV: the read-only fixture with a real workspace and state directory, and the config's store
-/// paths real ones (sh, env and their closure), so the command runs. ENGINE is `podman` or `docker`.
+/// paths real ones (sh, env and their closure), so the command runs. ENGINE is `podman` or `docker`; PROGRAM its
+/// program, where a bare name (a test that starts no container) is one that is not there: the backend never looks one
+/// up on PATH.
 fn world(name: &str, engine: &str, program: &str, argv: &[&str]) -> (PathBuf, PathBuf) {
+    let absent = format!("/nonexistent/{program}");
+    let program = if program.contains('/') {
+        program
+    } else {
+        absent.as_str()
+    };
     let top = Path::new(env!("CARGO_TARGET_TMPDIR")).join("run").join(name);
     if top.exists() {
         // what an earlier run of this test left: through cleanup, which knows the engine's store

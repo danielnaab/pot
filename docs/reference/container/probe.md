@@ -6,7 +6,7 @@ status: draft
 `pot-container [--config CONFIG] probe RUNDIR` prints the guarantees this host's engine proves, as pot's backends
 do ([policy.json/1, For backend authors](../../../contracts/policy-1.md#for-backend-authors)): `{ "guarantees":
 [ … ] }`, or none beside an `error`. It always exits 0; pot refuses the run when the list is empty. The engine is the
-config's `engine`, else podman when it is on `PATH`, else docker. See [the container backend](../container.md#probe)
+config's `engine` (else the one whose program it names), run by the program the config names, never one on `PATH`. See [the container backend](../container.md#probe)
 for the checks.
 
 These transcripts run in `probe.in/`, where `fake-docker` prints what docker 27.5.1 says of a host with the memory
@@ -32,10 +32,26 @@ An engine that is not there, or one this backend does not know:
 
 ```console
 $ pot-container --config missing.json probe .
-{"error":"podman: can't run ./no-such-podman: not found","guarantees":[]}
+{"error":"podman: can't run [CWD]/no-such-podman: not found","guarantees":[]}
 
 $ pot-container --config lxc.json probe .
 {"error":"the backend's --config names engine [..]
+
+```
+
+The engine's program is always the config's, an absolute path: pot's root names it (its `pkgs.podman`, or the
+docker program it was given). The backend never runs an engine it finds on `PATH`, where a repository's `bin`, or a
+run, could put a program of its own (QA B2):
+
+```console
+$ pot-container --config no-program.json probe .
+{"error":"the backend's --config names no podman program: give its absolute path (pot-container never runs an engine it finds on PATH)","guarantees":[]}
+
+$ pot-container --config relative.json probe .
+{"error":"the backend's --config names docker [..]
+
+$ pot-container --config empty.json probe .
+{"error":"the backend's --config names no engine: podman or docker, with its program's absolute path (pot-container never runs an engine it finds on PATH)","guarantees":[]}
 
 ```
 

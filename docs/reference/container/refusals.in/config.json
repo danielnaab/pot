@@ -1,1 +1,18 @@
-../prepare.in/config-podman.json
+{
+  "engine": "podman",
+  "sh": "/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/sh",
+  "shell": "/nix/store/nn27l879np49xvx6l1a8nqnqlp9apd8n-bash-interactive-5.2p37/bin/bash",
+  "env": "/nix/store/zwplch93wbpj82bp7riwaixmdx2xi0ah-coreutils-9.7/bin/env",
+  "cacert": "/nix/store/7f6kqbjr4l3qkl1m2s0a9hb3s5z7r0bq-nss-cacert-3.111/etc/ssl/certs/ca-bundle.crt",
+  "terminfo": "/nix/store/1ylb9cjvz6p8pjkl3l4bl6wq0b1hd8xm-ncurses-6.5/share/terminfo",
+  "tzdir": "/nix/store/3kgf5kq7p5xj6q9q0gk8m9z3xy7a0a7r-tzdata-2025b/share/zoneinfo",
+  "baseClosure": "base-closure.txt",
+  "python": "/nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3",
+  "proxy": "/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/proxy.py",
+  "socat": "/nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat",
+  "netClosure": "net-closure.txt",
+  "broker": "/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/broker.py",
+  "shim": "/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/shim.py",
+  "shimClosure": "shim-closure.txt",
+  "podman": "/usr/bin/podman"
+}

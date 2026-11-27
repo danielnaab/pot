@@ -20,7 +20,9 @@ v2.14.0's `sandbox` on).
   and the way out. `pot explain` says why (`chosen by …`); `pot doctor` probes every offered backend and names the
   one `pot CMD` runs under; a broken one marks it (exit 1) only when the root selects it (its default or a context's),
   else it is a note (QA I1). Known: evaluating such a root prints crane's warning that it wants nixpkgs 26.05 (pot's flake
-  pins 25.05; the backend builds and its tests pass). The root manifest's `backends.container` carries `engine` and `enginePath`. The root
+  pins 25.05; the backend builds and its tests pass). The root manifest's `backends.container` carries `engine` and `enginePath`. `pot-container` refuses a config that names no engine program, or one
+  that is not an absolute path (`./NAME` is the config file's folder's), and never looks one up on `PATH` (QA B2).
+  The root
   always names the engine's program (podman's default `pkgs.podman`; docker's must be given): pot never runs an engine
   it finds on `PATH` (QA B2). pot probes the container backend for every run, never from its cache ([container.md](docs/reference/container.md#probe)).
 - **The container backend runs dispatch clones** ([container.md](docs/reference/container.md#clone-mode)) and proves

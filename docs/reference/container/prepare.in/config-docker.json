@@ -10,5 +10,6 @@
   "python": "/nix/store/jd20rkmqmkfkcvk2wl2lmzz7acq4svlr-python3-3.12.12/bin/python3",
   "proxy": "/nix/store/7v2kq1n2h0b8yq1d4l3s1w8d0m2c9x3a-pot/proxy.py",
   "socat": "/nix/store/q17xc8gl00wiq6gdblhn5gzln98zibm4-socat-1.8.0.3/bin/socat",
-  "netClosure": "net-closure.txt"
+  "netClosure": "net-closure.txt",
+  "docker": "/usr/bin/docker"
 }

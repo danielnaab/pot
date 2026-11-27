@@ -28,7 +28,7 @@ fn world(name: &str) -> (PathBuf, PathBuf) {
     fs::create_dir_all(store.join("terminfo")).unwrap();
     fs::create_dir_all(store.join("zoneinfo")).unwrap();
     let s = |f: &str| store.join(f).display().to_string();
-    let config = serde_json::json!({ "engine": "podman", "sh": s("sh"), "shell": s("bash"), "env": s("env"),
+    let config = serde_json::json!({ "engine": "podman", "podman": "/usr/bin/podman", "sh": s("sh"), "shell": s("bash"), "env": s("env"),
         "cacert": s("ca.crt"), "terminfo": s("terminfo"), "tzdir": s("zoneinfo"), "baseClosure": s("base.txt") });
     fs::write(top.join("config.json"), config.to_string()).unwrap();
     let docs =

@@ -21,7 +21,7 @@ the host paths exist here, so no read path, mask or socket is bound.
 $ pot-container --config config-podman.json prepare --print read-only
 # the podman command for this run, an option a line (pot explain --backend-command)
 # the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM; and CONTAINERS_CONF=[CWD]/read-only/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/read-only/storage.conf HOME=[CWD]/read-only/enginehome
-podman
+/usr/bin/podman
   --root [CWD]/read-only/enginestore --runroot [CWD]/read-only/engineroot --tmpdir [CWD]/read-only/enginetmp
   run --interactive
   --init
@@ -100,7 +100,7 @@ Without it (`access-none/`: no workspace at all, so the command starts in the ho
 $ pot-container --config config-docker.json prepare --print access-none
 # the docker command for this run, an option a line (pot explain --backend-command)
 # the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and DOCKER_CONFIG=[CWD]/access-none/dockercfg
-docker
+/usr/bin/docker
   run --interactive
   --init
   --log-driver none
@@ -170,7 +170,7 @@ command; the proxy's variables are bwrap's. The variables passed by name go over
 $ pot-container --config config-podman.json prepare --print network
 # the podman command for this run, an option a line (pot explain --backend-command)
 # the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM; and CONTAINERS_CONF=[CWD]/network/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/network/storage.conf HOME=[CWD]/network/enginehome
-podman
+/usr/bin/podman
   --root [CWD]/network/enginestore --runroot [CWD]/network/engineroot --tmpdir [CWD]/network/enginetmp
   run --interactive
   --init
@@ -250,7 +250,7 @@ every run, as bubblewrap's) names the variable, never its value:
 $ pot-container --config config-podman.json prepare --print bindings
 # the podman command for this run, an option a line (pot explain --backend-command)
 # the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM; and CONTAINERS_CONF=[CWD]/bindings/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/bindings/storage.conf HOME=[CWD]/bindings/enginehome
-podman
+/usr/bin/podman
   --root [CWD]/bindings/enginestore --runroot [CWD]/bindings/engineroot --tmpdir [CWD]/bindings/enginetmp
   run --interactive
   --init
@@ -323,7 +323,7 @@ whole store is bound read-only; the broker and the nix relay are shown as `run` 
 $ pot-container --config config-podman.json prepare --print relays
 # the podman command for this run, an option a line (pot explain --backend-command)
 # the engine runs with only these of the caller's variables: PATH HOME USER LOGNAME XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM NOTES_TOKEN; and CONTAINERS_CONF=[CWD]/relays/containers.conf CONTAINERS_STORAGE_CONF=[CWD]/relays/storage.conf HOME=[CWD]/relays/enginehome
-podman
+/usr/bin/podman
   --root [CWD]/relays/enginestore --runroot [CWD]/relays/engineroot --tmpdir [CWD]/relays/enginetmp
   run --interactive
   --init
