@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pins import (EMPTY_BLOB, GIT, GITFILES, HOST_RUN_EXTRA, PLACED, PLACEHOLDERS, SEAL_MAX, Pins, Stop,  # noqa: E402,F401
                   fingerprint, fold, git, git_lines, git_run, hostrun_hashes, refs, sealed_dirs, sealed_left, tilde, visible, walk_named)
 import pins as P  # noqa: E402
+import fg as F  # noqa: E402
 
 GUARANTEES = ["closure-store", "own-netns", "own-pidns", "no-tiocsti", "protected-as-mounts", "local-listen",
               "in-place", "same-path-clone", "private-proxy", "root-files",
@@ -1023,12 +1024,16 @@ def run(cfg, rundir):
         cmd.append(cfg["netwrap"])
     cmd += launch["argv"]
     # pot and the backend ignore INT while the run goes; the command's is the default again (env
-    # --default-signal), so ^C reaches the command alone, and the after event survives it
+    # --default-signal), so ^C reaches the command alone, and the after event survives it. At a terminal, bwrap is
+    # its own process group in the terminal's foreground (fg.py), named after the command (its argv[0]), so tmux
+    # names the window after the command, not pot's python3 or bwrap
+    fg = F.in_foreground()
     old = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        p = subprocess.Popen(cmd, env={}, pass_fds=(closure, r, bpf), close_fds=True)
+        p = subprocess.Popen([window_name(launch)] + cmd[1:], executable=cfg["bwrap"], env={},
+                             pass_fds=(closure, r, bpf), close_fds=True, process_group=F.popen_group(fg))
         os.close(r)
-        status = p.wait()
+        status = F.wait(p, fg)
     finally:
         signal.signal(signal.SIGINT, old)
         tools = launch.get("hostTools") or {}
@@ -1043,6 +1048,14 @@ def run(cfg, rundir):
     with open(os.path.join(rundir, "status"), "w") as f:
         f.write(str(status))
     return status
+
+
+def window_name(launch):
+    """bwrap's argv[0] for a run: the command's name (`claude`), which is what a terminal multiplexer shows for the
+    run's window, as bwrap stays the group leader while the command runs as its child. bwrap reads its arguments
+    from --args descriptors, never from argv[0]."""
+    argv = launch.get("argv") or []
+    return os.path.basename(argv[0]) if argv and argv[0] else "bwrap"
 
 
 def stop_helpers(procs):

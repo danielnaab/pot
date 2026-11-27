@@ -199,7 +199,9 @@ Since v2.21.0 (attribution for host-level agents), `CMD` gets `POT_RUN`, the run
 [pot trailer](#trailer) writes into its commit messages. `^C` is the command's: pot waits for it to end and logs
 its exit, where earlier versions died with it and took it down. At a terminal, `CMD` is its own process group and
 the terminal's foreground while it runs, so tmux names the window after `CMD` rather than pot's `python3`, and `^Z`
-stops the job (`fg` resumes it); off a terminal it runs in pot's group. At the end, when `CMD` ran in a git checkout,
+stops the job (`fg` resumes it); off a terminal it runs in pot's group. A bubblewrap run does the same, with bwrap
+as the group and its `argv[0]` set to the command's name, as bwrap stays the group leader (Seatbelt's run, whose
+command replaces `sandbox-exec`, always has: [On macOS](#on-macos)). At the end, when `CMD` ran in a git checkout,
 pot looks at what it left there: the commits on the checkout's `HEAD` that no branch, remote branch, tag or `HEAD`
 held at the start, each with its signature as host git reports it (`%G?`, and the signer's principal from
 `gpg.ssh.allowedSignersFile`, else its key). It prints them on stderr, up to 20:

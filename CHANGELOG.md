@@ -191,6 +191,8 @@ v2.14.0's `sandbox` on).
 - **`pot host CMD` at a terminal gives `CMD` the terminal** ([host](docs/reference/pot.md#host)): `CMD` is its own
   process group and the terminal's foreground, so tmux names the window after `CMD` (`claude`), not pot's `python3`;
   `^Z` stops the job and `fg` resumes it, as Seatbelt's runs do. Off a terminal, `CMD` runs in pot's group, as before.
+  A bubblewrap run does the same: bwrap is its own process group in the terminal's foreground, and its `argv[0]` is
+  the command's name, as bwrap stays the group leader (`ps` on the host shows `claude --args 3 …` for it).
 
 ### Upgrading
 

@@ -31,15 +31,26 @@ ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_AUTHOR
        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
 
+def env_config():
+    """git's configuration from the environment (GIT_CONFIG_COUNT and its KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS):
+    what a host agent's wrapper sets (commit.gpgsign, its signing key), which GIT_CONFIG_GLOBAL does not isolate"""
+    return [k for k in os.environ if k in ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
+            or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))]
+
+
 def git(cwd, *args):
+    env = {k: v for k, v in os.environ.items() if k not in env_config()}
     return subprocess.run([GIT, "-C", cwd, *args], check=True, capture_output=True, text=True,
-                          env={**os.environ, **ENV}).stdout.strip()
+                          env={**env, **ENV}).stdout.strip()
 
 
 class Env:
-    """POT_RUN (and git's isolation) for one test, restored after."""
+    """POT_RUN (and git's isolation, the environment's git configuration removed) for one test, restored after."""
     def __init__(self, tc, **kv):
-        self.saved = {k: os.environ.get(k) for k in list(kv) + list(ENV)}
+        cleared = env_config()
+        self.saved = {k: os.environ.get(k) for k in list(kv) + list(ENV) + cleared}
+        for k in cleared:
+            os.environ.pop(k)
         os.environ.update(ENV)
         for k, v in kv.items():
             if v is None:
