@@ -50,6 +50,8 @@ USAGE = """usage: pot [VERB | CONTEXT] [FLAGS] [--] [CMD [ARGS...]]
   pot why PATH|HOST|CMD|VAR     why one item is or is not in the run (works inside a run)
   pot why HOST|URL --json       whether a run here (inside: this run) reaches it; exit 0 yes, 1 no
   pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace PATH]
+  pot grant --pending [--workspace PATH]... [--commit]
+                                grant every changed source here (asking for no more) in one answer
   pot dispatch [--from REF] [--detach] CMD
                                 run CMD in a throwaway clone; its commits come back by pot review RUN --fetch
   pot runs [RUN] [--json] [--follow] [--all]
@@ -338,11 +340,32 @@ def tree_hash(host, top, rel):
     return "sha256-" + h.hexdigest()
 
 
-def source_tree(host, top, rel):
-    """§7.4, a repo kit's source: the tree of the flake directory's tracked content as the index holds
-    it (HEAD plus what is staged), from a copy of the index; never the working tree or scions' status."""
+def commit_index(host, top):
+    """In a commit's hook: the index git gave it (GIT_INDEX_FILE: `index`, or `index.lock` and `next-index-N.lock`
+    for `git commit -a` and `git commit PATH`), when it is this repository's (in its git common directory); else
+    None. A relative one is the working directory's, as git gives it to a hook."""
+    v = os.environ.get("GIT_INDEX_FILE")
+    if not v or "\n" in v:
+        return None
+    p = os.path.realpath(os.path.join(os.getcwd(), v))
+    common = run_git(host, top, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
+    if common and HOOK_INDEX.fullmatch(os.path.basename(p)) and C.under(p, os.path.realpath(common)):
+        return p
+    return None
+
+
+def source_tree(host, top, rel, worktree=True):
+    """§7.4, a repo kit's source: the tree of the flake directory's tracked content as the commit being made, or
+    the next one, holds it. In a commit's hook, the index git gave the hook (commit_index); else this
+    repository's index with the flake directory's tracked changes added, as `git commit -a` adds them (not in a
+    dispatch clone, worktree=False: it is at its base, and the host's git runs no filter of a clone's). From a
+    copy of the index, its objects in pot's state; never untracked files or scions' working trees."""
     import tempfile
-    gd = run_git(host, top, "rev-parse", "--path-format=absolute", "--git-path", "index").stdout.strip()
+    g = [host.git, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "safe.directory=*", "-C", top]
+    plain = {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
+    hook = commit_index(host, top)
+    gd = hook or subprocess.run(g + ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+                                capture_output=True, text=True, env=plain).stdout.strip()
     with tempfile.NamedTemporaryFile(dir=host.state, prefix="index-") as tmp:
         try:
             with open(gd, "rb") as f:
@@ -351,9 +374,12 @@ def source_tree(host, top, rel):
         except OSError:
             pass
         # no fsmonitor or hook (a clone's index is read here when the run is a dispatch: ruling 7, M2's filter check)
-        r = subprocess.run([host.git, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "safe.directory=*",
-                            "-C", top, "write-tree"] + ([f"--prefix={rel}/"] if rel else []),
-                           capture_output=True, text=True, env={**os.environ, **object_env(host, top), "GIT_INDEX_FILE": tmp.name})
+        env = {**plain, **object_env(host, top), "GIT_INDEX_FILE": tmp.name, "GIT_LITERAL_PATHSPECS": "1"}
+        if worktree and not hook:
+            # what `git commit -a` adds: the flake directory's changed and deleted tracked files (and moved
+            # gitlinks), into the copy, their blobs into pot's objects
+            subprocess.run(g + ["add", "-u", "--", rel or "."], capture_output=True, env=env)
+        r = subprocess.run(g + ["write-tree"] + ([f"--prefix={rel}/"] if rel else []), capture_output=True, text=True, env=env)
     return r.stdout.strip() or None
 
 
@@ -464,7 +490,7 @@ def repo_kit(host, w, rel, ctxname="work"):
     key = tree_hash(host, w["top"], rel)
     w["tree"] = key
     os.makedirs(host.state, exist_ok=True)
-    w["source"] = source_tree(host, w["top"], rel)
+    w["source"] = source_tree(host, w["top"], rel, worktree=not w.get("clone"))
     cdir = os.path.join(host.state, "cache", "kits")
     cfile = os.path.join(cdir, key.replace("/", "_") + ".json")
     try:
@@ -837,7 +863,7 @@ def parse(argv, root):
             cmd = cmd + [a]
             j += 1
             continue
-        if verb == "grant" and a in ("--diff", "--verbose", "--commit"):
+        if verb == "grant" and a in ("--diff", "--verbose", "--commit", "--pending"):
             flags[a[2:]] = True
             j += 1
             continue
@@ -3474,6 +3500,92 @@ def grant_flow(host, root, grants, sts, inline=False, commit=False):
     return wrote
 
 
+def pending_split(sts):
+    """pot grant --pending: (the kits to grant: a changed source, its requests the grant's or fewer; the kits it
+    skips: ones that ask for more, which pot grant KIT asks about item by item)."""
+    return [s for s in sts if s["status"] == "source"], [s for s in sts if s["status"] == "grown"]
+
+
+def pending_status(host, root, flags):
+    """Every kit's status in this workspace and each --workspace (root kits once), each with the workspace it was
+    found in when that was named."""
+    here = os.getcwd()
+    context = root.get("defaultContext") or "work"
+    out, seen = [], set()
+    tmp = os.path.join(host.state, "runs", "grant-" + secrets.token_hex(3))
+    os.makedirs(tmp, exist_ok=True)
+    try:
+        for p in flags.get("workspace") or [None]:
+            if p:
+                os.chdir(C.expand(p, host.home))
+            try:
+                for st in all_kit_status(host, root, context, flags):
+                    if st["kit"] not in seen:
+                        seen.add(st["kit"])
+                        if p and st["kind"] != "root":
+                            st["workspace"] = os.path.realpath(os.getcwd())
+                        out.append(st)
+            finally:
+                os.chdir(here)
+    finally:
+        scratch_done(host, tmp)
+    return out
+
+
+def grant_pending(host, root, grants, sts, commit=False):
+    """pot grant --pending at a terminal: every kit whose source changed since its grant, with its requests the
+    grant's or fewer, shown with its diffstat and powerful items, approved by one answer and written in one write
+    of the grants file. A kit that asks for more is named with the pot grant KIT to run, and skipped."""
+    m = agent_marker(root)
+    if m:
+        raise C.Refusal(f"pot grant is for people: {m} is set (an agent's environment). Run pot grant in your own terminal.")
+    t = tty()
+    if t is None:
+        raise C.Refusal("pot grant is for people: it reads its answers from /dev/tty, and there is none")
+    todo, skipped = pending_split(sts)
+    try:
+        for st in skipped:
+            where = f" --workspace {C.canon_path(st['workspace'], host.home)}" if st.get("workspace") else ""
+            t.write(visible(f"skipped {st['name']}: asks for more ({len(st.get('added') or [])} more): "
+                            f"pot grant {st['name']}{where}\n"))
+        if not todo:
+            t.write("pot grant --pending: no changed source to grant\n")
+            return False
+        for st in todo:
+            kind = {"root": "root kit", "repo": "repo kit", "scion": "submodule kit"}[st["kind"]]
+            t.write(visible(f"{st['name']}   {kind} ({st['kit']})   changed source\n"))
+            was, now = st.get("was") or {}, st.get("now") or st.get("source") or {}
+            t.write(visible(f"  source: {C.fmt_source(was)} -> {C.fmt_source(now)}\n"))
+            if st.get("top") and was.get("tree") and now.get("tree"):
+                for d in tree_diffstat(host, st["top"], was["tree"], now["tree"], flake_dir(host, st["top"])):
+                    t.write(visible(f"    {d}\n"))
+            gone = sorted(set((st.get("entry") or {}).get("requests") or []) - set(st["requests"]))
+            for c in st.get("powerful") or []:
+                t.write(visible(f"  powerful: {c}{binding_note(root, c, st['kit'])}\n"))
+            for c in gone:
+                t.write(visible(f"  no longer asked: - {c}\n"))
+        n = len(todo)
+        if not ask(t, f"grant {n} changed source{'' if n == 1 else 's'}? [y/N] "):
+            t.write("pot grant --pending: nothing granted\n")
+            return False
+        when = f"{datetime.date.today().isoformat()} {host.machine}"
+        for st in todo:
+            src = st.get("source") if st["kind"] != "root" else None
+            where = C.write_grant(grants, st["kit"], st["requests"], src, host.machine, when,
+                                  local=st["kit"].startswith("repo:") and C.is_local_identity(st["kit"]))
+            st["granted"] = True
+            t.write(visible(f"granted {st['name']} (changed source), in {where}\n"))
+        save_grants(host, grants)
+        if commit:
+            t.write(visible(commit_grants(host, [st["name"] for st in todo]) + "\n"))
+        else:
+            t.write(visible(f"wrote {C.canon_path(host.grants_path, host.home)}. Commit it with your root's next change.\n"))
+        return True
+    finally:
+        t.flush()
+        t.close()
+
+
 def grant(host, root, flags, kits_named):
     if inside_run():
         raise C.Refusal("pot grant is for people, on the host: a run never writes its root's grants file")
@@ -3484,9 +3596,19 @@ def grant(host, root, flags, kits_named):
         raise C.Refusal(f"pot grant is for people: {m} is set (an agent's environment). Run pot grant in your own terminal.")
     if flags.get("commit") and flags.get("diff"):
         raise Usage("grant --commit records grants; --diff only shows them")
+    if flags.get("pending") and (flags.get("diff") or flags.get("revoke") or flags.get("root") or kits_named):
+        raise Usage("grant --pending grants every changed source here; it takes no KIT, --revoke or --diff")
     if flags.get("commit"):
         commit_check(host)      # before anything is written, --revoke included (R4)
     grants, text = load_grants(host, lenient=True)
+    if flags.get("pending"):
+        t = tty()       # refused before the workspaces' kits are built
+        if t is None:
+            raise C.Refusal("pot grant is for people: it reads its answers from /dev/tty, and there is none")
+        t.close()
+        sts = pending_status(host, root, flags)
+        grant_pending(host, root, grants, sts, commit=bool(flags.get("commit")))
+        return 0
     if flags.get("revoke"):
         revoked = []
         granted = sorted(set(grants["grants"]) | {i for m in grants["machines"].values() for i in m})
