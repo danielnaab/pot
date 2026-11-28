@@ -4989,7 +4989,13 @@ fn sibling_world(
     script: &str,
 ) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let python = find("python3")?;
-    let w = relay_world(name, engine, program, &["/bin/sh", "-c", script], &[])?;
+    // the scripts' bare cat and sleep: the host's coreutils first on PATH (the fixture's PATH names a coreutils of
+    // its own store path, which is the host's only while nixpkgs pins that one)
+    let script = format!(
+        "PATH={}:$PATH; {script}",
+        which("env").parent().unwrap().display()
+    );
+    let w = relay_world(name, engine, program, &["/bin/sh", "-c", &script], &[])?;
     let (top, run) = (w.top, w.run);
     let (entry, log) = (top.join("fake-entry.py"), top.join("entry.log"));
     fs::write(
