@@ -155,6 +155,9 @@ guarantee. So the engine starts with:
 
 - **an environment of pot's**: the caller's cleared, but for `PATH HOME USER LOGNAME XDG_RUNTIME_DIR
   DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM` (`engine::KEEP`) and the run's variables passed by name;
+  a `TMPDIR` longer than 88 bytes is `/tmp` (`engine::tmpdir`): with `--tty`, podman's conmon makes its console
+  socket there (`conmon-term.XXXXXX`), and a socket's path holds 107 bytes, so a longer one failed the run
+  (`crun: open console socket`);
 - **podman:** `CONTAINERS_CONF` the run's `containers.conf` (it replaces every other containers.conf; no default
   mounts file, volumes, variables or devices); `CONTAINERS_STORAGE_CONF` the run's
   `storage.conf` (native overlay, no `mount_program`: a user's storage.conf named a program the engine ran at the

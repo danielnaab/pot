@@ -5474,3 +5474,52 @@ fn podman_a_container_sibling_stops_within_the_brokers_grace() {
 fn docker_a_container_sibling_stops_within_the_brokers_grace() {
     sibling_stops_in_time_case("docker");
 }
+
+/// I1: at a terminal (`--tty`), a run whose caller has a long TMPDIR, and whose folder's path is long, runs: conmon makes
+/// its console socket in TMPDIR, and a unix socket's path (`sun_path`) holds 107 bytes.
+#[test]
+fn podman_runs_at_a_terminal_with_a_long_tmpdir_and_run_folder() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let Some(script) = find("script") else {
+        eprintln!("no script(1) here: no terminal to run at");
+        return;
+    };
+    let long = format!("podman-tty-{}", "l".repeat(120));
+    let (top, run) = world(
+        &long,
+        "podman",
+        &program,
+        &["/bin/sh", "-c", "[ -t 0 ] && echo at-a-terminal"],
+    );
+    assert!(
+        run.display().to_string().len() > 108,
+        "the run folder's path is long"
+    );
+    prepare(&top, &run);
+    let cmd = format!(
+        "{BIN} --config {} run {}",
+        top.join("config.json").display(),
+        run.display()
+    );
+    // the caller's TMPDIR is long too (the engine keeps it)
+    let long_tmp = top.join(format!("tmp-{}", "t".repeat(120)));
+    fs::create_dir_all(&long_tmp).unwrap();
+    let out = Command::new(script)
+        .args(["-qec", &cmd, "/dev/null"])
+        .env("TMPDIR", &long_tmp)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("at-a-terminal"),
+        "exit {:?}: {text}{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(run.join("status")).unwrap(), "0");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}

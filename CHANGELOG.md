@@ -25,6 +25,14 @@ v2.14.0's `sandbox` on).
   When `releaseSigners` is set and a repo kit's changed source still asks, its diffstat ends with why:
   `not a signed release move: …`.
 
+### Fixed
+
+- **The container backend runs at a terminal when the caller's `TMPDIR` is long** ([container
+  backend](docs/reference/container.md#the-engines-configuration)). With stdin a terminal (`--tty`), podman's conmon
+  makes its console socket in `TMPDIR`, and a unix socket's path holds 107 bytes: a `TMPDIR` over 88 bytes failed
+  the run (`crun: open console socket: ... No such file or directory`, exit 127). The engine now gets `/tmp` as its
+  `TMPDIR` then.
+
 ### Upgrading
 
 Nothing to migrate: without `releaseSigners` every changed source asks, as in 0.5.0. To use it, set
