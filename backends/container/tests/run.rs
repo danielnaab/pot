@@ -4989,7 +4989,13 @@ fn sibling_world(
     script: &str,
 ) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let python = find("python3")?;
-    let w = relay_world(name, engine, program, &["/bin/sh", "-c", script], &[])?;
+    // the scripts' bare cat and sleep: the host's coreutils first on PATH (the fixture's PATH names a coreutils of
+    // its own store path, which is the host's only while nixpkgs pins that one)
+    let script = format!(
+        "PATH={}:$PATH; {script}",
+        which("env").parent().unwrap().display()
+    );
+    let w = relay_world(name, engine, program, &["/bin/sh", "-c", &script], &[])?;
     let (top, run) = (w.top, w.run);
     let (entry, log) = (top.join("fake-entry.py"), top.join("entry.log"));
     fs::write(
@@ -5473,4 +5479,125 @@ fn podman_a_container_sibling_stops_within_the_brokers_grace() {
 #[test]
 fn docker_a_container_sibling_stops_within_the_brokers_grace() {
     sibling_stops_in_time_case("docker");
+}
+
+/// I1: at a terminal (`--tty`), a run whose caller has a long TMPDIR, and whose folder's path is long, runs: conmon makes
+/// its console socket in TMPDIR, and a unix socket's path (`sun_path`) holds 107 bytes.
+#[test]
+fn podman_runs_at_a_terminal_with_a_long_tmpdir_and_run_folder() {
+    let Ok(program) = std::env::var("POT_TEST_PODMAN") else {
+        eprintln!("POT_TEST_PODMAN is not set: no container started");
+        return;
+    };
+    let Some(script) = find("script") else {
+        eprintln!("no script(1) here: no terminal to run at");
+        return;
+    };
+    let long = format!("podman-tty-{}", "l".repeat(120));
+    let (top, run) = world(
+        &long,
+        "podman",
+        &program,
+        &["/bin/sh", "-c", "[ -t 0 ] && echo at-a-terminal"],
+    );
+    assert!(
+        run.display().to_string().len() > 108,
+        "the run folder's path is long"
+    );
+    prepare(&top, &run);
+    let cmd = format!(
+        "{BIN} --config {} run {}",
+        top.join("config.json").display(),
+        run.display()
+    );
+    // the caller's TMPDIR is long too (the engine keeps it)
+    let long_tmp = top.join(format!("tmp-{}", "t".repeat(120)));
+    fs::create_dir_all(&long_tmp).unwrap();
+    let out = Command::new(script)
+        .args(["-qec", &cmd, "/dev/null"])
+        .env("TMPDIR", &long_tmp)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("at-a-terminal"),
+        "exit {:?}: {text}{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(run.join("status")).unwrap(), "0");
+    ok(&verb(&top, &run, "cleanup").output().unwrap());
+}
+
+/// L2: a git container's look killed with SIGKILL (the verb and its engine, one process group) at any moment of the
+/// engine's create, then `cleanup`: the look's container, conmon and engine state go, and nothing is kept.
+fn killed_create_case(engine: &str) {
+    use std::os::unix::process::CommandExt as _;
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some((top, run, _, clone)) = clone_world(&format!("{engine}-killed-create"), engine, &program) else {
+        return;
+    };
+    prepare(&top, &run);
+    let (mut kept, mut orphans) = (vec![], 0);
+    for delay_ms in (0..=600).step_by(25) {
+        let mut child = verb(&top, &run, "git")
+            .arg(&clone)
+            .arg("/clone")
+            .arg("--")
+            .args(["upload-pack", "--strict", "/clone/.git"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let pgid = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-KILL", "--", &pgid]).status();
+        let _ = child.wait();
+        drop(child.stdin.take());
+        let started = Instant::now();
+        let out = verb(&top, &run, "cleanup").output().unwrap();
+        let took = started.elapsed();
+        let looks = run.join("gitlook").display().to_string();
+        let left: Vec<String> = fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter_map(|e| fs::read(e.path().join("cmdline")).ok())
+            .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+            .filter(|c| c.contains(&looks))
+            .collect();
+        if took > Duration::from_secs(3) {
+            orphans += 1;
+        }
+        if !out.status.success() || run.join("gitlook").exists() || !left.is_empty() {
+            kept.push(format!(
+                "{delay_ms} ms: exit {:?} in {took:?}: {}; left running: {left:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+            break;
+        }
+        prepare(&top, &run);
+    }
+    assert_eq!(
+        kept,
+        Vec::<String>::new(),
+        "a killed create left the look's container"
+    );
+    // how often the kill fell in the create's window (a conmon whose podman died before recording the container)
+    eprintln!("{engine}: {orphans} orphaned creates recovered");
+}
+
+#[test]
+fn podman_a_look_killed_during_create_is_cleaned_up() {
+    killed_create_case("podman");
+}
+
+#[test]
+fn docker_a_look_killed_during_create_is_cleaned_up() {
+    killed_create_case("docker");
 }

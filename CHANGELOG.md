@@ -25,6 +25,28 @@ v2.14.0's `sandbox` on).
   When `releaseSigners` is set and a repo kit's changed source still asks, its diffstat ends with why:
   `not a signed release move: …`.
 
+### Changed
+
+- **pot's own flake takes nixpkgs from `nixos-26.05`** (was `nixos-25.05`, which is past its support), so evaluating
+  pot's packages, checks and default root no longer prints crane's warning (`crane requires at least nixpkgs-26.05`,
+  QA I2). A root built by `pot.lib.mkRoot` or `programs.pot` still uses the caller's `pkgs`: a caller on a nixpkgs
+  older than 26.05 still sees the warning, and its container backend still builds. `dev/flake.nix`'s docs check pins
+  the same revision. The container backend's code takes the newer clippy's three suggestions; it behaves the same.
+
+### Fixed
+
+- **The container backend runs at a terminal when the caller's `TMPDIR` is long** ([container
+  backend](docs/reference/container.md#the-engines-configuration)). With stdin a terminal (`--tty`), podman's conmon
+  makes its console socket in `TMPDIR`, and a unix socket's path holds 107 bytes: a `TMPDIR` over 88 bytes failed
+  the run (`crun: open console socket: ... No such file or directory`, exit 127). The engine now gets `/tmp` as its
+  `TMPDIR` then.
+- **A container run or clone look killed with SIGKILL during podman's create is cleaned up** ([container
+  backend](docs/reference/container.md#run-and-cleanup)). podman killed before it recorded the container left conmon and `crun
+  create` waiting for it forever; no `rm` could name the container, so `cleanup` and the next look kept the engine's
+  state after waiting 30 s, and `pot review` kept the run (failing closed). A conmon still there 3 s after a
+  successful `rm` is now stopped with SIGKILL, its runtime first. crun's own state for that container stays in
+  `$XDG_RUNTIME_DIR/crun` (a tmpfs).
+
 ### Upgrading
 
 Nothing to migrate: without `releaseSigners` every changed source asks, as in 0.5.0. To use it, set

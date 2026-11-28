@@ -155,6 +155,9 @@ guarantee. So the engine starts with:
 
 - **an environment of pot's**: the caller's cleared, but for `PATH HOME USER LOGNAME XDG_RUNTIME_DIR
   DBUS_SESSION_BUS_ADDRESS TMPDIR LANG TERM COLORTERM` (`engine::KEEP`) and the run's variables passed by name;
+  a `TMPDIR` longer than 88 bytes is `/tmp` (`engine::tmpdir`): with `--tty`, podman's conmon makes its console
+  socket there (`conmon-term.XXXXXX`), and a socket's path holds 107 bytes, so a longer one failed the run
+  (`crun: open console socket`);
 - **podman:** `CONTAINERS_CONF` the run's `containers.conf` (it replaces every other containers.conf; no default
   mounts file, volumes, variables or devices); `CONTAINERS_STORAGE_CONF` the run's
   `storage.conf` (native overlay, no `mount_program`: a user's storage.conf named a program the engine ran at the
@@ -404,7 +407,13 @@ R1, R4). It then waits until none of the engine's processes for this run is left
 named as the configured program is (its name, its real file's, or nix's `.NAME-wrapped`, S7) whose arguments hold
 the exact pair `--root RUNDIR/enginestore` (its `run`, `rm`, `stop` and conmon's exit command),
 and a conmon whose bundle (`-b`) is in the run's store, whose `--exit-dir` is the run's, or whose pidfile is in the
-run's runroot. A process that only names a path there is not one of them (R5). It writes the status to `RUNDIR/status`, as bwrap's `run` does, and exits with it: the command's
+run's runroot. A process that only names a path there is not one of them (R5). A conmon still there 3 s after a
+successful `rm` is an orphan (L2): its podman was killed with SIGKILL during the create, before it recorded the
+container, so no `rm` can name it, and its `crun create` waits for that podman forever. It is stopped with SIGKILL,
+everything below it first (the runtime, and a container process it reaped), so the wait ends and `cleanup` and the
+next look remove the state instead of keeping it. What such a create leaves outside the run folder is crun's own
+state for the container (`$XDG_RUNTIME_DIR/crun/ID`: its config, `exec.fifo`, `status`), on a tmpfs, which pot
+does not remove. It writes the status to `RUNDIR/status`, as bwrap's `run` does, and exits with it: the command's
 exit code, or 128 and the signal's number when a signal ended the engine. A removal that failed is one line on
 stderr; the status is still the command's.
 
@@ -805,6 +814,12 @@ write runs only.
   file's contents are in no exec, and the caller's `SSH_AUTH_SOCK` reaches only the broker and the host ssh and
   workmux it runs, never the engine, the relay or the run; `cleanup` stops a live broker and relay (not orphaned) and
   removes their sockets; a missing `hostTools.ssh` or `.nix` stops `prepare` with bwrap's message
+- Two fixes' tests in `run.rs` (rootless podman 5.4.1 and docker on platform-vm, 2026-11-28): at a terminal under
+  `script`, with a `TMPDIR` and a run folder each over 108 bytes, the command sees a terminal and exits 0 (I1; exit
+  127, `crun: open console socket`, before); a clone look's `git` verb killed with SIGKILL as a process group at each
+  25 ms from 0 to 600 ms after its start, then `cleanup`: it exits 0 each time, with `gitlook/` gone and no process
+  naming it (L2; before, a kill at 75-100 ms left conmon and `crun create` waiting, and `cleanup` kept the store after
+  30 s)
 - [core/broker.py](../../core/broker.py) (status.relay's and git.fetch's broker), [core/shim.py](../../core/shim.py)
   (the run's shims)
 - [core/pins.py](../../core/pins.py): `Pins`, `resolve_workspace` (the pins), `before_look`, `look_after` (the look)

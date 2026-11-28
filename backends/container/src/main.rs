@@ -936,10 +936,18 @@ fn remove_container(e: Engine, program: &str, rundir: &str, set: &[(String, Stri
     }
     let names = lifecycle::engine_names(program);
     let start = std::time::Instant::now();
+    let mut orphans_stopped = false;
     loop {
         let left = engine_processes(rundir, &names);
         if left.is_empty() {
             return Ok(());
+        }
+        // L2: once `rm --all` has removed every container the engine knows, a conmon still here after the grace is one
+        // whose podman was killed during the create, before the container was recorded: its `crun create` waits for
+        // that podman forever, and no `rm` can name it. Its tree is stopped (SIGKILL), the runtime first.
+        if !orphans_stopped && start.elapsed() > ORPHAN_GRACE {
+            orphans_stopped = true;
+            stop_orphaned_conmons(&left);
         }
         if start.elapsed() > ENGINE_WAIT {
             return Err(format!(
@@ -949,6 +957,51 @@ fn remove_container(e: Engine, program: &str, rundir: &str, set: &[(String, Stri
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// How long a conmon may outlive a successful `rm --all` of the run's store before it is taken for an orphan (L2): its
+/// cleanup normally ends it within milliseconds.
+const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// L2: each of LEFT (the pids of the engine's processes for the run) that is a conmon, stopped with SIGKILL after every
+/// process below it (its `crun create`, and a container process conmon reaped as subreaper), deepest first, so no
+/// runtime is left behind under no conmon. podman processes are left to the wait.
+fn stop_orphaned_conmons(left: &[String]) {
+    let parents: Vec<(u32, u32)> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(e.path().join("stat")).ok()?;
+            // the fields after the command's name, which is in parentheses and may hold anything
+            let parent = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+            Some((pid, parent))
+        })
+        .collect();
+    for l in left {
+        let Ok(pid) = l.parse::<u32>() else {
+            continue;
+        };
+        let exe = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let name = exe.split(|b| *b == 0).next().unwrap_or_default();
+        if name.rsplit(|b| *b == b'/').next() != Some(b"conmon".as_slice()) {
+            continue;
+        }
+        // breadth first from conmon: reversed, the deepest come first and conmon last
+        let mut tree = vec![pid];
+        let mut i = 0;
+        while i < tree.len() {
+            let p = tree[i];
+            tree.extend(parents.iter().filter(|(_, pp)| *pp == p).map(|(c, _)| *c));
+            i += 1;
+        }
+        for p in tree.iter().rev() {
+            if let Some(p) = i32::try_from(*p).ok().and_then(rustix::process::Pid::from_raw) {
+                let _ = rustix::process::kill_process(p, rustix::process::Signal::KILL);
+            }
+        }
     }
 }
 
@@ -1140,10 +1193,8 @@ fn engine_paths(
     // the status run records: a file, or nothing; an empty folder in its place is removed
     let status = abs.join("status");
     match status.symlink_metadata() {
-        Ok(m) if m.is_dir() => {
-            if fs::remove_dir(&status).is_err() {
-                bad.push(format!("{} (a folder, not empty)", status.display()));
-            }
+        Ok(m) if m.is_dir() && fs::remove_dir(&status).is_err() => {
+            bad.push(format!("{} (a folder, not empty)", status.display()));
         }
         _ => {}
     }
@@ -2391,10 +2442,11 @@ fn unshare_rm(program: &str, paths: &[PathBuf]) -> Result<(), String> {
 fn podman_cleanup_set(abs: &Path, home: &Path) -> Vec<(String, String)> {
     let own_file = |n: &str| {
         let p = abs.join(n);
-        p.symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_file())
-            .then(|| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/dev/null".into())
+        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_file()) {
+            p.to_string_lossy().into_owned()
+        } else {
+            "/dev/null".into()
+        }
     };
     vec![
         ("CONTAINERS_CONF".to_string(), own_file("containers.conf")),

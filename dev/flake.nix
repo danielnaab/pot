@@ -6,7 +6,7 @@
   #   nix flake check ./dev
   # knowledge-base-kit is read from this input alone (pot grafts nothing). To check against an unreleased edit:
   #   nix flake check ./dev --override-input knowledge-base-kit path:PATH/TO/knowledge-base-kit
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/ac62194c3917d5f474c1a844b6fd6da2db95077d";   # pot's nixos-25.05
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/5b31ff946309736077f0c4ee23bb85d0a0a1c181";   # pot's nixos-26.05
   inputs.knowledge-base-kit = { url = "github:danielnaab/knowledge-base-kit/v2.1.0"; flake = false; };
 
   outputs = { nixpkgs, knowledge-base-kit, ... }:

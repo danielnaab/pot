@@ -8,6 +8,7 @@
 # without them those parts are skipped, saying so.
 # Usage: tests/run.sh [SECTION...] (from anywhere; default: every section but rollback, in order). KEEP=1 leaves
 # the work directory, to debug a failure.
+# shellcheck disable=SC2329 # the helpers each section passes by name to ran, refused and expect (shellcheck >= 0.11)
 set -euo pipefail
 
 src=$(cd "$(dirname "$0")/.." && pwd)

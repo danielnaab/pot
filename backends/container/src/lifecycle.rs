@@ -281,7 +281,7 @@ pub fn names_proxy(cmdline: &[u8], rundir: &str) -> bool {
 pub fn helper_program(cmdline: &[u8], rundir: &str) -> Option<Helper> {
     let denials = format!("{}/denials", rundir.trim_end_matches('/'));
     let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-    let has = |w: &str| args.iter().any(|a| *a == w.as_bytes());
+    let has = |w: &str| args.contains(&w.as_bytes());
     let broker = (has("relay.sock") || has("git.sock"))
         && args
             .windows(2)

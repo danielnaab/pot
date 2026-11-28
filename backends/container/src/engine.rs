@@ -121,17 +121,50 @@ pub fn containers_conf(empty_file: &str) -> String {
     )
 }
 
-/// The engine's command: the caller's environment cleared, then KEEP (and EXTRA) from it, then SET.
+/// The longest `TMPDIR` the engine keeps (I1): with `--tty`, podman's conmon makes its console socket in `TMPDIR`,
+/// as `conmon-term.XXXXXX`, and a unix socket's path holds 107 bytes (`sun_path`, 108 with its NUL); crun then fails
+/// to open a socket conmon could not make (`open console socket: ... No such file or directory`).
+pub const TMPDIR_MAX: usize = 107 - "/conmon-term.XXXXXX".len();
+
+/// The `TMPDIR` the engine gets for the caller's VALUE: VALUE, or `/tmp` when it is longer than [`TMPDIR_MAX`].
+pub fn tmpdir(value: &std::ffi::OsStr) -> std::ffi::OsString {
+    if value.len() > TMPDIR_MAX {
+        "/tmp".into()
+    } else {
+        value.to_os_string()
+    }
+}
+
+/// The engine's command: the caller's environment cleared, then KEEP (and EXTRA) from it, then SET. A `TMPDIR` too
+/// long for a socket's path under it is `/tmp` ([`tmpdir`]).
 pub fn command(program: &str, extra: &[String], set: &[(String, String)]) -> Command {
     let mut c = Command::new(program);
     c.env_clear();
     for k in KEEP.iter().copied().chain(extra.iter().map(String::as_str)) {
         if let Some(v) = std::env::var_os(k) {
-            c.env(k, v);
+            if k == "TMPDIR" {
+                c.env(k, tmpdir(&v));
+            } else {
+                c.env(k, v);
+            }
         }
     }
     for (k, v) in set {
         c.env(k, v);
     }
     c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tmpdir_too_long_for_conmons_socket_is_tmp() {
+        let at = "/".to_string() + &"t".repeat(TMPDIR_MAX - 1);
+        assert_eq!(tmpdir(at.as_ref()), std::ffi::OsString::from(&at));
+        assert_eq!((at.clone() + "/conmon-term.XXXXXX").len(), 107);
+        let over = at + "t";
+        assert_eq!(tmpdir(over.as_ref()), std::ffi::OsString::from("/tmp"));
+    }
 }
