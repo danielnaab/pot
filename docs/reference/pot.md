@@ -845,7 +845,7 @@ is `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines
 |---|---|
 | Nothing new | The run proceeds. |
 | A stale kit (not granted, asks for more, changed source), at a terminal with no agent marker | The grant prompt appears inline, with the difference, and the run continues after it. The agent markers are the floor `CODEX_SANDBOX`, `CLAUDECODE` and `POT`, the root kits' `agent.markers`, and the root's `agentMarkers`. A workmux pane is not one. |
-| A stale kit, otherwise | Exit 125, with every kit's difference and `pot grant KIT`. The run's log records it as `stopped` ([pot runs](#pot-runs)). When a kit that applies to the run (its command's kit, a workspace kit or an included one; not a root kit the command does not use) requests `status.relay`, the root binds it with `workmux = true`, the caller is in tmux and `workmux` is on its `PATH`, pot also sets the launching pane's workmux status to `waiting`. No other message. |
+| A stale kit, otherwise | Exit 125, with every kit's difference and the command that grants it (`cd WORKSPACE && pot grant`, or `pot grant KIT` for a kit never granted). The run's log records it as `stopped` ([pot runs](#pot-runs)). When a kit that applies to the run (its command's kit, a workspace kit or an included one; not a root kit the command does not use) requests `status.relay`, the root binds it with `workmux = true`, the caller is in tmux and `workmux` is on its `PATH`, pot also sets the launching pane's workmux status to `waiting`. No other message. |
 | An unverified submodule kit with requests (its gitlink is not a release tag at its URL, or the URL did not answer) | The run proceeds without that kit's reach, with one startup note: `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply`, or `meeting-kit: its URL did not answer, so its kit is unverified and its grant does not apply`. Its command runs with its see items. |
 | A repo kit that is stale, in `inspect` | The run proceeds: a repo kit's reach does not apply in `inspect`. The startup line notes `NAME not granted (its reach does not apply in inspect)`. |
 | The file changed since this machine last read it | One line, `pot: the grants file changed since this machine last read it: pot grant --diff`, at each start until `pot grant --diff` or a grant acknowledges it. Nothing stops. A pull and a local edit read the same. |
@@ -1348,36 +1348,36 @@ repository`.
 ### pot grant
 
 ```
-pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace PATH]
-pot grant --pending [--workspace PATH]... [--commit]
+pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace PATH]...
 ```
 
-- `--pending` (0.4.0) grants, with one answer, every kit whose source changed since its grant (what `--diff` lists
-  as `changed source`) in this workspace (and each `--repo`), or in each `--workspace PATH` given (repeat it), and
-  the root kits. Only such kits: their requests are the grant's or fewer, so only the code they come from is new. It
-  shows each (`potting-shed   repo kit (repo:…)   changed source`, its `source: tree A -> tree B` line and
-  diffstat, `powerful: ITEM` for each powerful item it approves again, and `no longer asked: - ITEM` for any request
-  dropped), then asks `grant N changed sources? [y/N]`. On yes it writes the grants file once, with each kit's
-  requests as it asks them now and its new source, and prints `granted NAME (changed source), in SECTION` for
-  each, then the `wrote …` line, or with `--commit` the commit line (one commit for all). On anything else:
-  `pot grant --pending: nothing granted`. A kit that asks for more is not granted: it is listed first, with the
-  command that asks for its new items one by one, `skipped NAME: asks for more (N more): pot grant NAME` (and
-  `--workspace PATH` for a named workspace). A kit never granted is not touched. With no changed source:
-  `pot grant --pending: no changed source to grant`. It is refused, as `pot grant` is, under an agent marker,
-  without a terminal and inside a run; with a `KIT`, `--revoke` or `--diff` it is a usage error (exit 2).
-- With no `KIT`, it prompts for two kinds of kit, in this order:
+- With no `KIT`, it prompts for two kinds of kit:
   1. every kit that a `stopped` run waits for, in any workspace that still exists, root kits included, with its
      status computed again there (never from the record). It is headed with the run:
      `flexion-assistant   repo kit (repo:…), for every run in this repository   not granted   (stopped run 8b3f)`,
      or `(stopped run 9427, in ~/src/flexion-assistant)` for another workspace;
-  2. then each kit of this workspace (and of each `--repo`) and each root kit whose grant is stale: it asks for more,
-     or its source changed.
+  2. each kit of this workspace (and of each `--repo`), or of each `--workspace PATH` given (repeat it; a kit
+     found there is headed `(in ~/src/…)` when there are several), and each root kit, whose grant is stale: it asks
+     for more, or its source changed.
 
-  Each shows only the difference: the new items, or a changed source's diffstat and its powerful items. A kit that
-  was never granted and that no run waits for is not prompted. After the prompts, one line names those kits:
+  It never looks further: not every repository, not every workspace a grant names. Of those kits, the updated ones,
+  whose source changed and whose requests are the grant's or fewer (only the code they come from is new), come
+  first and together (0.5.0): each is shown (`potting-shed   repo kit (repo:…), for every run in this repository
+  changed source`, its `source: tree A -> tree B` line and diffstat, `powerful: ITEM` for each powerful item it
+  approves again, and `no longer asked: - ITEM` for any request dropped), then one question,
+  `grant N updated kits? [y/N]`. On yes each is granted as it asks now, with its new source
+  (`granted NAME (changed source), in SECTION`); on anything else `not granted: NAME, …`. Then the others, a kit
+  that asks for more and a never-granted kit a stopped run waits for, are prompted one by one, each with only the
+  difference: its new items, ordinary ones together and each powerful one alone. Everything granted is written in
+  one write of the grants file (`wrote …`), or with `--commit` in one commit. A kit that was never granted and that
+  no run waits for is not prompted. After the prompts, one line names those kits:
   `pot: also not granted: claude-code@flexion, claude-code@personal (pot grant NAME)`. With nothing to prompt:
   `pot: nothing to grant` (and that line, when there are any). A named kit with nothing to do:
-  `pot grant: standing is granted`.
+  `pot grant: standing is granted`. `pot grant --pending` (0.4.0) is gone in 0.5.0: plain `pot grant` does what it
+  did, and an unknown option is a usage error (exit 2).
+- A refusal for a kit whose source changed, or that asks for more, names the command to run with the kit's
+  workspace (its own repository for a repo kit, else the run's): `  grant it: cd ~/src/potting-shed && pot grant`.
+  A kit never granted: `  grant it: pot grant NAME`.
 - `KIT` and `--revoke KIT` take the short names that `pot` prints everywhere (startup line, grant list, `--diff`,
   `pot explain`, the 125 message), so the name a 125 line offers always works, also for a repository with a local
   origin (its folder) and a submodule named unlike its URL: `daniel`, `flexion-assistant`, or `claude-code` for every instance
@@ -2077,7 +2077,7 @@ The other messages, after `pot (<context>): `:
 | Writing a root (1) | `WHAT PATH is the root ROOT: a run never writes a root (pot inspect reads it; pot host CMD runs unsandboxed)`, with `is inside` or `holds` in place of `is`; WHAT is `--write`, `--repo` (with write access) or `KIT's write` for a granted `requests.write` item: `--write ~/src/w holds the root ~/src/w/rootrepo: …` |
 | Not a repository (1) | `~/Downloads is not inside a git repository: pot inspect CMD, or pot host CMD` |
 | A `--repo` outside git (1) | `--repo PATH is not inside a git repository` |
-| Stale grant (125) | `meeting-kit (git:…) asks for more than its grant:`, then each new request as `  + network api.github.com:443`, then `  grant it: pot grant meeting-kit`. Also `… requests reach that is not granted:`; `… changed source since its grant:` with `  source: tree A -> tree B` and up to 12 lines of `git diff --stat` of the defining files when they changed (`nix/agent-tools/flake.lock | 1 +`), else of the tree, and the line `    the kit as built changed` when the build differs. The text is as before. The run is recorded as `stopped`, and the launching pane set to `waiting` when the run holds it ([What pot checks at start](#what-pot-checks-at-start)). |
+| Stale grant (125) | `meeting-kit (git:…) asks for more than its grant:`, then each new request as `  + network api.github.com:443`, then `  grant it: cd ~/src/team-kb && pot grant` (0.5.0: plain `pot grant` in the kit's workspace, its own repository for a repo kit, else the run's; the path shell-quoted when it needs it). Also `… requests reach that is not granted:`, which ends `  grant it: pot grant NAME`; `… changed source since its grant:`, which ends as `asks for more` does, with `  source: tree A -> tree B` and up to 12 lines of `git diff --stat` of the defining files when they changed (`nix/agent-tools/flake.lock | 1 +`), else of the tree, and the line `    the kit as built changed` when the build differs. The text is as before. The run is recorded as `stopped`, and the launching pane set to `waiting` when the run holds it ([What pot checks at start](#what-pot-checks-at-start)). |
 | An unverified submodule kit (start note, no stop) | `meeting-kit: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply`; offline, `meeting-kit: its URL did not answer, so its kit is unverified and its grant does not apply`. Its command runs without its reach. |
 | `--repo` in clone mode (1) | `--repo comes to clone mode in a later release; a dispatch clones this repository only` |
 | `pot dispatch`, `--clone` or `--detach` inside a run (1) | `pot dispatch is the host's: a run starts no clone inside it; run it on the host` |

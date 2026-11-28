@@ -49,9 +49,9 @@ USAGE = """usage: pot [VERB | CONTEXT] [FLAGS] [--] [CMD [ARGS...]]
   pot explain [CONTEXT] [FLAGS] [CMD] [--json] [--backend-command]
   pot why PATH|HOST|CMD|VAR     why one item is or is not in the run (works inside a run)
   pot why HOST|URL --json       whether a run here (inside: this run) reaches it; exit 0 yes, 1 no
-  pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace PATH]
-  pot grant --pending [--workspace PATH]... [--commit]
-                                grant every changed source here (asking for no more) in one answer
+  pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace PATH]...
+                                with no KIT: every stale kit here; the updated ones (a changed source,
+                                asking for no more) on one answer, then the rest one by one
   pot dispatch [--from REF] [--detach] CMD
                                 run CMD in a throwaway clone; its commits come back by pot review RUN --fetch
   pot runs [RUN] [--json] [--follow] [--all]
@@ -863,7 +863,7 @@ def parse(argv, root):
             cmd = cmd + [a]
             j += 1
             continue
-        if verb == "grant" and a in ("--diff", "--verbose", "--commit", "--pending"):
+        if verb == "grant" and a in ("--diff", "--verbose", "--commit"):
             flags[a[2:]] = True
             j += 1
             continue
@@ -1942,6 +1942,13 @@ def test_barrier():
         time.sleep(0.05)
 
 
+def grant_workspace(ws, st):
+    """Where plain pot grant grants a stale kit of this run: its own workspace for a repo kit (a --repo's included),
+    else the run's (its first workspace, or this folder)."""
+    w = next((w for w in ws or [] if w["id"] == st["kit"]), None) or (ws[0] if ws else None)
+    return w["top"] if w else os.path.realpath(os.getcwd())
+
+
 def run(host, root, context, flags, cmd):
     if inside_run():
         ctxn = os.environ.get("POT", "run")
@@ -2013,7 +2020,7 @@ def run(host, root, context, flags, cmd):
                     w = next((w for w in ws if w["id"] == s["kit"]), None)
                     if w:
                         source_diff(host, w, s)
-                texts.append(C.stale_message(ctx["name"], s))
+                texts.append(C.stale_message(ctx["name"], s, C.canon_path(grant_workspace(ws, s), host.home)))
                 err(texts[-1])
             stopped(host, root, rundir, rid, ctx, argv0, "grant", "\n".join(texts), report, ws, flags, cinfo=cinfo, kits=
                     [s for s in stale if s["status"] != "unverified"])
@@ -3431,8 +3438,67 @@ def binding_note(root, canon, kit_id):
     return "  bound: " + C.binding_desc(name, b[1])
 
 
-def grant_flow(host, root, grants, sts, inline=False, commit=False):
-    """The people-only prompt: ordinary items together, each powerful item alone, from /dev/tty."""
+KIND_WORDS = {"root": "root kit", "repo": "repo kit", "scion": "submodule kit"}
+
+
+def kit_heading(host, st):
+    """A prompt's first line for a kit: its name, kind, identity and scope, its status, and the run or workspace
+    it was found for."""
+    scope = {"root": "every run that uses it", "repo": "every run in this repository",
+             "scion": f"every workspace that pins {st['kit'][4:]}"}[st["kind"]]
+    if st.get("stoppedRun"):
+        where_ = (f"   (stopped run {st['stoppedRun']}" + (f", in {C.canon_path(st['stoppedIn'], host.home)})"
+                                                            if st.get("stoppedIn") else ")"))
+    elif st.get("workspace"):
+        where_ = f"   (in {C.canon_path(st['workspace'], host.home)})"
+    else:
+        where_ = ""
+    return f"{st['name']}   {KIND_WORDS[st['kind']]} ({st['kit']}), for {scope}   {C.STATUS_WORDS[st['status']]}{where_}\n"
+
+
+def source_lines(host, t, st):
+    """A changed source's `source: A -> B` line and its diffstat."""
+    was, now = st.get("was") or {}, st.get("now") or st.get("source") or {}
+    t.write(visible(f"  source: {C.fmt_source(was)} -> {C.fmt_source(now)}\n"))
+    if st.get("top") and was.get("tree") and now.get("tree"):
+        for d in tree_diffstat(host, st["top"], was["tree"], now["tree"], flake_dir(host, st["top"])):
+            t.write(visible(f"    {d}\n"))
+
+
+def batch_split(sts):
+    """Plain pot grant: (the updated kits, granted together on one answer: a changed source, its requests the
+    grant's or fewer; the rest, prompted one by one: a kit that asks for more, one never granted, unverified)."""
+    return [s for s in sts if s["status"] == "source"], [s for s in sts if s["status"] != "source"]
+
+
+def grant_batch(host, root, grants, t, batch):
+    """The updated kits shown together (each one's diffstat, powerful items and dropped requests) and granted on one
+    answer, as each asks now with its new source. Returns whether it granted them (the caller writes the file)."""
+    for st in batch:
+        t.write(visible(kit_heading(host, st)))
+        source_lines(host, t, st)
+        for c in st.get("powerful") or []:
+            t.write(visible(f"  powerful: {c}{binding_note(root, c, st['kit'])}\n"))
+        for c in sorted(set((st.get("entry") or {}).get("requests") or []) - set(st["requests"])):
+            t.write(visible(f"  no longer asked: - {c}\n"))
+    n = len(batch)
+    if not ask(t, f"grant {n} updated kit{'' if n == 1 else 's'}? [y/N] "):
+        t.write(visible(f"not granted: {', '.join(st['name'] for st in batch)}\n"))
+        return False
+    when = f"{datetime.date.today().isoformat()} {host.machine}"
+    for st in batch:
+        src = st.get("source") if st["kind"] != "root" else None
+        where = C.write_grant(grants, st["kit"], st["requests"], src, host.machine, when,
+                              local=st["kit"].startswith("repo:") and C.is_local_identity(st["kit"]))
+        st["granted"] = True
+        t.write(visible(f"granted {st['name']} (changed source), in {where}\n"))
+    return True
+
+
+def grant_flow(host, root, grants, sts, inline=False, commit=False, batch=()):
+    """The people-only prompt, from /dev/tty: first the updated kits in BATCH, granted together on one answer; then
+    each kit of STS, its ordinary items together and each powerful item alone. One write of the grants file (and,
+    with COMMIT, one commit) for everything granted."""
     m = agent_marker(root)
     if m:
         raise C.Refusal(f"pot grant is for people: {m} is set (an agent's environment). Run pot grant in your own terminal.")
@@ -3441,6 +3507,8 @@ def grant_flow(host, root, grants, sts, inline=False, commit=False):
         raise C.Refusal("pot grant is for people: it reads its answers from /dev/tty, and there is none")
     wrote = False
     try:
+        if batch:
+            wrote = grant_batch(host, root, grants, t, batch)
         for st in sts:
             if st["status"] == "unverified":
                 t.write(visible(f"{st['name']}: gitlink is not a release tag at its URL; its kit is unverified and its grant does not apply\n"))
@@ -3448,24 +3516,14 @@ def grant_flow(host, root, grants, sts, inline=False, commit=False):
             entry = st.get("entry")
             have = set(entry["requests"]) if entry else set()
             reqs = st["requests"]
-            kind = {"root": "root kit", "repo": "repo kit", "scion": "submodule kit"}[st["kind"]]
-            scope = {"root": "every run that uses it", "repo": "every run in this repository",
-                     "scion": f"every workspace that pins {st['kit'][4:]}"}[st["kind"]]
-            state = C.STATUS_WORDS[st["status"]]
-            where_ = (f"   (stopped run {st['stoppedRun']}" + (f", in {C.canon_path(st['stoppedIn'], host.home)})" if st.get("stoppedIn") else ")")
-                      if st.get("stoppedRun") else "")
-            t.write(visible(f"{st['name']}   {kind} ({st['kit']}), for {scope}   {state}{where_}\n"))
+            t.write(visible(kit_heading(host, st)))
             if st.get("uncommitted"):
                 t.write("  note: its defining file has uncommitted changes\n")
             cls = {c: ("powerful" if c in st.get("powerful", []) else "ordinary") for c in reqs}
             # a changed source asks again for each powerful item, alone (P2)
             again = st["status"] == "source"
             if again:
-                was, now = st.get("was") or {}, st.get("now") or st.get("source") or {}
-                t.write(visible(f"  source: {C.fmt_source(was)} -> {C.fmt_source(now)}\n"))
-                if st.get("top") and was.get("tree") and now.get("tree"):
-                    for d in tree_diffstat(host, st["top"], was["tree"], now["tree"], flake_dir(host, st["top"])):
-                        t.write(visible(f"    {d}\n"))
+                source_lines(host, t, st)
             approved = {c for c in set(have) & set(reqs) if not (again and cls[c] == "powerful")}
             ordinary = [c for c in reqs if c not in have and cls[c] == "ordinary"]
             powerful = [c for c in reqs if (c not in have or again) and cls[c] == "powerful"]
@@ -3491,7 +3549,7 @@ def grant_flow(host, root, grants, sts, inline=False, commit=False):
         if wrote:
             save_grants(host, grants)
             if commit:
-                t.write(visible(commit_grants(host, [st["name"] for st in sts if st.get("granted")]) + "\n"))
+                t.write(visible(commit_grants(host, [st["name"] for st in list(batch) + list(sts) if st.get("granted")]) + "\n"))
             else:
                 t.write(visible(f"wrote {C.canon_path(host.grants_path, host.home)}. Commit it with your root's next change.\n"))
         t.flush()
@@ -3500,17 +3558,10 @@ def grant_flow(host, root, grants, sts, inline=False, commit=False):
     return wrote
 
 
-def pending_split(sts):
-    """pot grant --pending: (the kits to grant: a changed source, its requests the grant's or fewer; the kits it
-    skips: ones that ask for more, which pot grant KIT asks about item by item)."""
-    return [s for s in sts if s["status"] == "source"], [s for s in sts if s["status"] == "grown"]
-
-
-def pending_status(host, root, flags):
-    """Every kit's status in this workspace and each --workspace (root kits once), each with the workspace it was
-    found in when that was named."""
+def workspace_status(host, root, context, flags):
+    """Every kit's status in this workspace (and each --repo), or in each --workspace PATH given, root kits once;
+    a kit found in a named workspace carries it (its prompt says where)."""
     here = os.getcwd()
-    context = root.get("defaultContext") or "work"
     out, seen = [], set()
     tmp = os.path.join(host.state, "runs", "grant-" + secrets.token_hex(3))
     os.makedirs(tmp, exist_ok=True)
@@ -3522,7 +3573,7 @@ def pending_status(host, root, flags):
                 for st in all_kit_status(host, root, context, flags):
                     if st["kit"] not in seen:
                         seen.add(st["kit"])
-                        if p and st["kind"] != "root":
+                        if p and st["kind"] != "root" and len(flags["workspace"]) > 1:
                             st["workspace"] = os.path.realpath(os.getcwd())
                         out.append(st)
             finally:
@@ -3532,58 +3583,33 @@ def pending_status(host, root, flags):
     return out
 
 
-def grant_pending(host, root, grants, sts, commit=False):
-    """pot grant --pending at a terminal: every kit whose source changed since its grant, with its requests the
-    grant's or fewer, shown with its diffstat and powerful items, approved by one answer and written in one write
-    of the grants file. A kit that asks for more is named with the pot grant KIT to run, and skipped."""
-    m = agent_marker(root)
-    if m:
-        raise C.Refusal(f"pot grant is for people: {m} is set (an agent's environment). Run pot grant in your own terminal.")
-    t = tty()
-    if t is None:
-        raise C.Refusal("pot grant is for people: it reads its answers from /dev/tty, and there is none")
-    todo, skipped = pending_split(sts)
+def grant_here(host, root, grants, context, flags):
+    """pot grant with no KIT (L2): the kits a stopped run waits for (wherever it ran; status from that workspace),
+    then this workspace's stale grants. The updated ones (a changed source, asking for no more) are granted together
+    on one answer; the rest are prompted one by one. A kit never granted that no run waits for is only named."""
+    sts = workspace_status(host, root, context, flags)
+    here = os.getcwd()
+    if flags.get("workspace"):
+        os.chdir(C.expand(flags["workspace"][0], host.home))
     try:
-        for st in skipped:
-            where = f" --workspace {C.canon_path(st['workspace'], host.home)}" if st.get("workspace") else ""
-            t.write(visible(f"skipped {st['name']}: asks for more ({len(st.get('added') or [])} more): "
-                            f"pot grant {st['name']}{where}\n"))
-        if not todo:
-            t.write("pot grant --pending: no changed source to grant\n")
-            return False
-        for st in todo:
-            kind = {"root": "root kit", "repo": "repo kit", "scion": "submodule kit"}[st["kind"]]
-            t.write(visible(f"{st['name']}   {kind} ({st['kit']})   changed source\n"))
-            was, now = st.get("was") or {}, st.get("now") or st.get("source") or {}
-            t.write(visible(f"  source: {C.fmt_source(was)} -> {C.fmt_source(now)}\n"))
-            if st.get("top") and was.get("tree") and now.get("tree"):
-                for d in tree_diffstat(host, st["top"], was["tree"], now["tree"], flake_dir(host, st["top"])):
-                    t.write(visible(f"    {d}\n"))
-            gone = sorted(set((st.get("entry") or {}).get("requests") or []) - set(st["requests"]))
-            for c in st.get("powerful") or []:
-                t.write(visible(f"  powerful: {c}{binding_note(root, c, st['kit'])}\n"))
-            for c in gone:
-                t.write(visible(f"  no longer asked: - {c}\n"))
-        n = len(todo)
-        if not ask(t, f"grant {n} changed source{'' if n == 1 else 's'}? [y/N] "):
-            t.write("pot grant --pending: nothing granted\n")
-            return False
-        when = f"{datetime.date.today().isoformat()} {host.machine}"
-        for st in todo:
-            src = st.get("source") if st["kind"] != "root" else None
-            where = C.write_grant(grants, st["kit"], st["requests"], src, host.machine, when,
-                                  local=st["kit"].startswith("repo:") and C.is_local_identity(st["kit"]))
-            st["granted"] = True
-            t.write(visible(f"granted {st['name']} (changed source), in {where}\n"))
-        save_grants(host, grants)
-        if commit:
-            t.write(visible(commit_grants(host, [st["name"] for st in todo]) + "\n"))
-        else:
-            t.write(visible(f"wrote {C.canon_path(host.grants_path, host.home)}. Commit it with your root's next change.\n"))
-        return True
+        todo = stopped_kits(host, root, context, flags)
     finally:
-        t.flush()
-        t.close()
+        os.chdir(here)
+    have = {s["kit"] for s in todo}
+    todo += [s for s in sts if s["status"] in ("grown", "source") and s["kit"] not in have]
+    have = {s["kit"] for s in todo}
+    also = [s["name"] for s in sts if s["status"] == "never" and s["kit"] not in have]
+    also_line = f"pot: also not granted: {', '.join(also)} (pot grant NAME)" if also else None
+    if not todo:
+        print("pot: nothing to grant")
+        if also_line:
+            print(also_line)
+        return 0
+    batch, rest = batch_split(todo)
+    grant_flow(host, root, grants, rest, commit=bool(flags.get("commit")), batch=batch)
+    if also_line:
+        print(also_line)
+    return 0
 
 
 def grant(host, root, flags, kits_named):
@@ -3596,19 +3622,9 @@ def grant(host, root, flags, kits_named):
         raise C.Refusal(f"pot grant is for people: {m} is set (an agent's environment). Run pot grant in your own terminal.")
     if flags.get("commit") and flags.get("diff"):
         raise Usage("grant --commit records grants; --diff only shows them")
-    if flags.get("pending") and (flags.get("diff") or flags.get("revoke") or flags.get("root") or kits_named):
-        raise Usage("grant --pending grants every changed source here; it takes no KIT, --revoke or --diff")
     if flags.get("commit"):
         commit_check(host)      # before anything is written, --revoke included (R4)
     grants, text = load_grants(host, lenient=True)
-    if flags.get("pending"):
-        t = tty()       # refused before the workspaces' kits are built
-        if t is None:
-            raise C.Refusal("pot grant is for people: it reads its answers from /dev/tty, and there is none")
-        t.close()
-        sts = pending_status(host, root, flags)
-        grant_pending(host, root, grants, sts, commit=bool(flags.get("commit")))
-        return 0
     if flags.get("revoke"):
         revoked = []
         granted = sorted(set(grants["grants"]) | {i for m in grants["machines"].values() for i in m})
@@ -3650,9 +3666,11 @@ def grant(host, root, flags, kits_named):
         return 0
     if flags.get("root"):
         raise C.Refusal("pot grant --root comes with deployment roots, in a later release", 2)
+    context = root.get("defaultContext") or "work"
+    if not kits_named and not flags.get("diff"):
+        return grant_here(host, root, grants, context, flags)
     if flags.get("workspace"):
         os.chdir(C.expand(flags["workspace"][0], host.home))
-    context = root.get("defaultContext") or "work"
     tmp = os.path.join(host.state, "runs", "grant-" + secrets.token_hex(3))
     os.makedirs(tmp, exist_ok=True)
     try:
@@ -3693,30 +3711,11 @@ def grant(host, root, flags, kits_named):
         for line in C.grant_diff_lines(sts, utf8=C.utf8_output(), verbose=flags.get("verbose")) + arrived:
             print(visible(line))
         return 0
-    if kits_named:
-        todo = [s for s in sts if s["status"] in ("never", "grown", "source", "unverified")]
-        if not todo:
-            print("pot grant: " + ", ".join(s["name"] for s in sts) + (" is" if len(sts) == 1 else " are") + " granted")
-            return 0
-        grant_flow(host, root, grants, todo, commit=bool(flags.get("commit")))
-        return 0
-    # L2, no argument: the kits a stopped run waits for (wherever it ran; status from that workspace), stopped ones
-    # first, then this workspace's stale grants (a changed request or source). A kit never granted that no run waits
-    # for is only named.
-    todo = stopped_kits(host, root, context, flags)
-    have = {s["kit"] for s in todo}
-    todo += [s for s in sts if s["status"] in ("grown", "source") and s["kit"] not in have]
-    have = {s["kit"] for s in todo}
-    also = [s["name"] for s in sts if s["status"] == "never" and s["kit"] not in have]
-    also_line = f"pot: also not granted: {', '.join(also)} (pot grant NAME)" if also else None
+    todo = [s for s in sts if s["status"] in ("never", "grown", "source", "unverified")]
     if not todo:
-        print("pot: nothing to grant")
-        if also_line:
-            print(also_line)
+        print("pot grant: " + ", ".join(s["name"] for s in sts) + (" is" if len(sts) == 1 else " are") + " granted")
         return 0
     grant_flow(host, root, grants, todo, commit=bool(flags.get("commit")))
-    if also_line:
-        print(also_line)
     return 0
 
 

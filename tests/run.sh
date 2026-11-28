@@ -963,28 +963,36 @@ while True:
   expect "with the changed paths" holds "flake.nix"
   expect "and the run goes on" holds "ran-after-source"
   # 0.4.0: the source is the tree the commit will have (tracked changes not staged included, as git commit -a
-  # commits them), so a grant before the commit holds after it; pot grant --pending grants every changed source
+  # commits them), so a grant before the commit holds after it. 0.5.0: the refusal names the command, with the
+  # workspace; plain pot grant grants the updated kits (a changed source, asking for no more) on one answer, then
+  # asks for the rest one by one; --pending is gone
   echo "# pins" >> flake.nix
   sb_ true >/dev/null 2>&1 && st=0 || st=$?
   expect "pot: a change to flake.nix, not staged, is a changed source" test "$st" = 125
-  refused "pot: pot grant --pending under an agent marker" env CLAUDECODE=1 "$work/sbr/bin/pot" grant --pending
-  expect "is refused" holds "pot grant is for people: CLAUDECODE is set"
-  refused "pot: pot grant --pending with no terminal" sb_ grant --pending
+  refused "pot: a changed source names the command" sb_ true
+  expect "plain pot grant, in its workspace" grep -qE '^  grant it: cd [^ ]*/sbc && pot grant$' <<<"$out"
+  refused "pot: pot grant --pending is gone" sb_ grant --pending
+  expect "an unknown option" holds "unknown option --pending"
+  refused "pot: pot grant with no terminal" sb_ grant
   expect "is refused" holds "it reads its answers from /dev/tty, and there is none"
-  ran "pot: pot grant --pending" tty_ $'y\n' "$work/sbr/bin/pot" grant --pending
+  ran "pot: pot grant, an updated kit" tty_ $'y\n' "$work/sbr/bin/pot" grant
   expect "shows the changed source" holds "sbc   repo kit (repo:"
   expect "with its diffstat" holds "flake.nix | 1 +"
   expect "and its powerful item" holds "powerful: capability nix"
-  expect "asks once" holds "grant 1 changed source? [y/N]"
+  expect "asks once for the updated kits" grep -qE 'grant [0-9]+ updated kits?\? \[y/N\]' <<<"$out"
+  refuse "not item by item" holds "powerful: + capability nix"
   expect "and says what it granted" holds "granted sbc (changed source)"
   ran "pot: the next run proceeds, before the commit" sb_ true
   git_ commit -qam "pins"
   ran "pot: and after git commit -a" sb_ true
-  ran "pot: pot grant --pending, nothing to grant" tty_ '' "$work/sbr/bin/pot" grant --pending
-  expect "says so" holds "pot grant --pending: no changed source to grant"
+  ran "pot: pot grant, nothing to grant" tty_ '' "$work/sbr/bin/pot" grant
+  expect "says so" holds "pot: nothing to grant"
   sed -i 's|requests.network = \[ "inline.example" \]|requests.network = [ "inline.example" "more.example" ]|' flake.nix
-  ran "pot: pot grant --pending, a kit that asks for more" tty_ '' "$work/sbr/bin/pot" grant --pending
-  expect "skips it, naming the command" holds "skipped sbc: asks for more (1 more): pot grant sbc"
+  refused "pot: a kit that asks for more names the command" sb_ true
+  expect "plain pot grant, in its workspace" grep -qE '^  grant it: cd [^ ]*/sbc && pot grant$' <<<"$out"
+  ran "pot: pot grant, a kit that asks for more" tty_ '' "$work/sbr/bin/pot" grant
+  expect "asks for it alone" holds "+ network more.example:443"
+  refuse "not with the updated kits" holds "updated kit"
   git_ checkout -q -- flake.nix
   sed -i 's|requests.capabilities = \[ { name = "nix"; } \]; requests.network = \[ "inline.example" \]; ||' flake.nix && commit "no nix"
 
@@ -1994,6 +2002,7 @@ EOF
   printf '#!/bin/sh\necho dn-tool 2\n' > dn-tool.sh && commit "the kit's command changed"
   refused "dispatch: the kit as built changed" d_ true
   expect "re-asks: changed source" holds "dn (repo:fake.example/dn) changed source since its grant:"
+  expect "naming plain pot grant in the original repository, not the clone" grep -qE '^  grant it: cd [^ ]*/dn && pot grant$' <<<"$out"
   expect "saying the kit changed" holds "the kit as built changed"
   git_ revert --no-edit HEAD >/dev/null
   ran "dispatch: reverted: the grant holds again" d_ true
@@ -2012,9 +2021,12 @@ EOF
 
   # pot grant with no argument: every stale kit here, and every kit a stopped run waits for, wherever it ran
   # L2: it prompts only for kits a stopped run waits for and stale grants, stopped ones first (by name: dn, then
-  # needs); a kit never granted that no run waits for is named after the prompts
+  # needs); a kit never granted that no run waits for is named after the prompts. 0.5.0: the updated ones (dn, a
+  # changed source) first, on one answer, then the rest (needs) one by one
   ran "dispatch: pot grant, no argument, from another repository" tty_ $'y\nn\n' "$work/dr/bin/pot" grant
   expect "offers the stopped run's kit" holds "dn   repo kit (repo:fake.example/dn), for every run in this repository   changed source"
+  expect "0.5.0: the updated kit on one answer" holds "grant 1 updated kit? [y/N]"
+  expect "and says what it granted" holds "granted dn (changed source)"
   expect "L2: and the stopped root kit" holds "needs   root kit (root:needs), for every run that uses it   not granted"
   refuse "L2: not the kit no run waits for" holds "unused   root kit"
   expect "L2: which it names after the prompts" holds "pot: also not granted: unused (pot grant NAME)"

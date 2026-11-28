@@ -5,6 +5,33 @@ and a patch never does. Until 0.1.0 pot shipped inside graft; its history up to 
 [graft's CHANGELOG](https://github.com/danielnaab/graft/blob/v2/CHANGELOG.md) (the entries that name pot, from
 v2.14.0's `sandbox` on).
 
+## v0.5.0 - 2026-11-28
+
+### Changed
+
+- **Breaking: `pot grant --pending` is removed; plain `pot grant` groups instead** ([pot
+  grant](docs/reference/pot.md#pot-grant)). With no `KIT`, `pot grant` keeps its scope (this workspace, each
+  `--repo` or each `--workspace PATH`, now repeatable, the root kits, and the kits a stopped run waits for; never
+  every repository), but shows the updated kits first and together: every kit whose source changed and whose
+  requests are the grant's or fewer (what `--pending` selected), each with its diffstat, powerful items and dropped
+  requests, granted on one answer (`grant N updated kits? [y/N]`). Then the kits that ask for more, and never-granted
+  kits a stopped run waits for, are prompted one by one as before. One write of the grants file for the whole run;
+  with `--commit`, one commit. `--pending` is now an unknown option (exit 2).
+- **A refusal names the command with the workspace** ([Messages](docs/reference/pot.md#messages)): a run, wrapped
+  tool or commit hook stopped (exit 125) by a kit whose source changed since its grant, or that asks for more, ends
+  `  grant it: cd ~/src/REPO && pot grant` (the kit's own repository for a repo kit, else the run's workspace; `~`
+  for the home folder, the path shell-quoted when it needs it), in place of `  grant it: pot grant NAME`. A
+  never-granted kit's still ends `  grant it: pot grant NAME`.
+
+### Upgrading
+
+1. **Replace `pot grant --pending` with `pot grant`** in scripts, notes and habits (with `--workspace PATH`,
+   repeated, and `--commit` as before). It grants the same kits on one answer, then asks about the kits that ask for
+   more, which `--pending` skipped: answer `n` to leave them.
+2. **A tool that matches the 125 text** (`grant it: pot grant NAME`) for a changed source or a kit that asks for
+   more now sees `grant it: cd PATH && pot grant`. The grants file, its contracts and the run records are unchanged;
+   nothing to migrate.
+
 ## v0.4.0 - 2026-11-27
 
 ### Added

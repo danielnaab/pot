@@ -162,8 +162,10 @@ agent, a script), the run stops with exit 125 and the difference:
 
 1. Read the difference that `pot` printed, or run `pot grant --diff`. A stopped run is listed by `pot runs` as
    `stopped`, and a workmux pane that started it shows `waiting`.
-2. If you accept it, run `pot grant` at a terminal: with no argument it offers every kit here that is stale, and
-   every kit a stopped run waits for, showing only what changed. Or name one, `pot grant KIT`, with the short name
+2. If you accept it, run the command that `pot` printed (`cd ~/src/REPO && pot grant`) at a terminal: with no
+   argument it offers every kit here that is stale, and every kit a stopped run waits for, showing only what
+   changed. The kits whose source changed and that ask for no more are granted together, on one answer; the others
+   are asked one by one. Or name one, `pot grant KIT`, with the short name
    that `pot` printed (`claude-code` names every instance). Add `--commit` to commit the grants file at once (only
    that file; it never pushes), or commit it with your root's next change. Otherwise, take back the upgrade.
 
@@ -232,9 +234,10 @@ A repository's own needs are its repo kit: the packages its work needs, paths to
    paths that the bundle protects (the producer's own files, such as each `tuteur.nix` and the submodules folder).
 3. Run `pot grant`, and accept the repo kit's requests. Commit the grants file in your root.
 
-A powerful grant of a repo kit is fixed to its flake directory as committed and staged. When a commit or a staged
-change under it moves that tree, the next run stops with exit 125, lists the changed paths, and `pot grant` asks
-again for each powerful item.
+A powerful grant of a repo kit is fixed to its flake directory as the next commit holds it. When a change under it
+moves that tree, the next run stops with exit 125, lists the changed paths and names the command
+(`grant it: cd ~/src/REPO && pot grant`), and `pot grant` shows each changed kit's diff and grants them together on
+one answer.
 
 For a repository with no `pot-kits` bundle, the root declares its repo kit, keyed by its normalised origin:
 
@@ -395,7 +398,7 @@ in [Home-manager options](../reference/pot.md#home-manager-options).
 - **`… not in this run's children table …`** (exit 126). A wrapper from another workspace's tools: run it in its
   own repository, or on the host.
 - **`… 16 commands already run in this run's tree …`.** pot's cap on siblings at once: wait for one to end.
-- **A commit stops at the hook.** Read its lines: a grant (`pot grant NAME`), or `git commit --no-verify` to skip
+- **A commit stops at the hook.** Read its lines: a grant (run the `grant it:` line, `cd ~/src/REPO && pot grant`), or `git commit --no-verify` to skip
   the hook once.
 
 ## How it works
