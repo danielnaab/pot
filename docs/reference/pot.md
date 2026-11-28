@@ -77,7 +77,7 @@ A root is where the person's authority lives. A run never writes a root in place
 | Root | Where | For |
 |---|---|---|
 | A home-manager root | `programs.pot` in your home-manager configuration, from `inputs.pot.homeManagerModules.pot` | Your own machine. Its source repository is a [root repository](#root-repositories). |
-| pot's default root | `nix run github:danielnaab/pot/v0.3.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
+| pot's default root | `nix run github:danielnaab/pot/v0.4.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
 | A minimal root of your own | `pot init DIR` writes `DIR/flake.nix`, built with `pot.lib.mkRoot` | A start for a root that you then edit and commit. |
 
 pot's default root and the root that `pot init` writes have pot's default contexts, hidden list and standard tools,
@@ -818,9 +818,15 @@ is `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines
   machine's section. A set smaller than its grant needs no write: asking for less needs no approval.
 - **`source`:** none for a root kit, whose code the root's own lock pins. The verified release commit and tag for
   a submodule kit's powerful grants (`{ commit; tag; }`). For a repo kit's powerful grants, the git tree of its flake
-  directory as committed and staged (`{ tree = "<git tree id>"; }`: `git write-tree --prefix=<flake dir>/` from a
-  copy of the index), never the working tree or the submodules' status. Ordinary items carry no source: the digest
-  fixes them.
+  directory as the next commit holds it (`{ tree = "<git tree id>"; }`: `git write-tree --prefix=<flake dir>/` from a
+  copy of the index). Since 0.4.0 that copy first takes the flake directory's changed and deleted tracked files, as
+  `git commit -a` would (`git add -u`, its objects in pot's state; not in a dispatch clone, which is at its base and
+  where the host's git runs no filter); in a commit's hook it is the index git gives the
+  hook (`GIT_INDEX_FILE`, when it is in this repository's git directory), untouched, so `git commit -a`,
+  `git commit PATH` and a plain commit are each checked by the tree they commit. So a grant made before the commit,
+  with the change staged or not, holds in the commit's hook and after it. Never untracked files or the submodules'
+  working trees. Before 0.4.0 the tree was the index's alone, so a change not yet staged was missing from the grant,
+  and `git commit -a` then failed its hook. Ordinary items carry no source: the digest fixes them.
 - **When a repo kit's source has changed.** The grant holds when its tree is the flake directory's tree now, or
   when the two trees differ only outside `flake.nix` and `flake.lock` and the repo kit as built (its requests,
   protect list, tools and commands, with their store paths) is the one this machine recorded, in pot's state, for
@@ -1343,8 +1349,22 @@ repository`.
 
 ```
 pot grant [KIT...] [--revoke KIT] [--diff [--verbose]] [--commit] [--workspace PATH]
+pot grant --pending [--workspace PATH]... [--commit]
 ```
 
+- `--pending` (0.4.0) grants, with one answer, every kit whose source changed since its grant (what `--diff` lists
+  as `changed source`) in this workspace (and each `--repo`), or in each `--workspace PATH` given (repeat it), and
+  the root kits. Only such kits: their requests are the grant's or fewer, so only the code they come from is new. It
+  shows each (`potting-shed   repo kit (repo:…)   changed source`, its `source: tree A -> tree B` line and
+  diffstat, `powerful: ITEM` for each powerful item it approves again, and `no longer asked: - ITEM` for any request
+  dropped), then asks `grant N changed sources? [y/N]`. On yes it writes the grants file once, with each kit's
+  requests as it asks them now and its new source, and prints `granted NAME (changed source), in SECTION` for
+  each, then the `wrote …` line, or with `--commit` the commit line (one commit for all). On anything else:
+  `pot grant --pending: nothing granted`. A kit that asks for more is not granted: it is listed first, with the
+  command that asks for its new items one by one, `skipped NAME: asks for more (N more): pot grant NAME` (and
+  `--workspace PATH` for a named workspace). A kit never granted is not touched. With no changed source:
+  `pot grant --pending: no changed source to grant`. It is refused, as `pot grant` is, under an agent marker,
+  without a terminal and inside a run; with a `KIT`, `--revoke` or `--diff` it is a usage error (exit 2).
 - With no `KIT`, it prompts for two kinds of kit, in this order:
   1. every kit that a `stopped` run waits for, in any workspace that still exists, root kits included, with its
      status computed again there (never from the record). It is headed with the run:

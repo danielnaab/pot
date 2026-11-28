@@ -35,7 +35,7 @@ its repository and shares it across machines through git, so machines on differe
 | `machines."<machine>"."<identity>"` | object | a grant for one machine (its short host name), which overrides the shared entry there. A repository with no remote is always here. |
 | `…digest` | string | `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines, each ended by `\n` |
 | `…requests` | list of strings | the canonical requests the grant covers |
-| `…source` | object, optional | for powerful items only: a submodule kit's `{ "commit": "…", "tag": "vX.Y.Z" }`; a repo kit's `{ "tree": "<git tree id>" }` (`git write-tree --prefix=<flake dir>/` from a copy of the index). None for a root kit. |
+| `…source` | object, optional | for powerful items only: a submodule kit's `{ "commit": "…", "tag": "vX.Y.Z" }`; a repo kit's `{ "tree": "<git tree id>" }` (`git write-tree --prefix=<flake dir>/` from a copy of the index; since 0.4.0 with the flake directory's tracked changes added to the copy, or in a commit's hook the hook's index: [Compatibility](#compatibility)). None for a root kit. |
 | `…granted` | string | `YYYY-MM-DD <machine>` |
 | `…delegate` | object, optional | reserved for delegation (later) |
 
@@ -78,6 +78,11 @@ machine-independent.
   is stricter, never in conflict, and the grant it writes is one that a newer pot reads. Taking a new producer (tuteur, or graft before it) into a
   consumer changes its `flake.lock`, so it asks for one `pot grant NAME` for that consumer's repo kit, and for no
   other kit.
+- **Which tree is "now"** is also the reader's, and the writer's, computation, not the file's shape. Since 0.4.0
+  pot takes the tree the next commit holds: the index with the flake directory's changed and deleted tracked files
+  added (as `git commit -a` adds them), or, in a commit's hook, the index git gives the hook. Before 0.4.0 it was
+  the index's tree alone. The two differ only while a change in the flake directory is not staged; then each pot
+  asks once for the tree it computes. Neither reads a grant the other wrote as wider than it is.
 
 ## Sources
 

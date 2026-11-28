@@ -962,6 +962,30 @@ while True:
   expect "asks again for the powerful item, alone" holds "powerful: + capability nix"
   expect "with the changed paths" holds "flake.nix"
   expect "and the run goes on" holds "ran-after-source"
+  # 0.4.0: the source is the tree the commit will have (tracked changes not staged included, as git commit -a
+  # commits them), so a grant before the commit holds after it; pot grant --pending grants every changed source
+  echo "# pins" >> flake.nix
+  sb_ true >/dev/null 2>&1 && st=0 || st=$?
+  expect "pot: a change to flake.nix, not staged, is a changed source" test "$st" = 125
+  refused "pot: pot grant --pending under an agent marker" env CLAUDECODE=1 "$work/sbr/bin/pot" grant --pending
+  expect "is refused" holds "pot grant is for people: CLAUDECODE is set"
+  refused "pot: pot grant --pending with no terminal" sb_ grant --pending
+  expect "is refused" holds "it reads its answers from /dev/tty, and there is none"
+  ran "pot: pot grant --pending" tty_ $'y\n' "$work/sbr/bin/pot" grant --pending
+  expect "shows the changed source" holds "sbc   repo kit (repo:"
+  expect "with its diffstat" holds "flake.nix | 1 +"
+  expect "and its powerful item" holds "powerful: capability nix"
+  expect "asks once" holds "grant 1 changed source? [y/N]"
+  expect "and says what it granted" holds "granted sbc (changed source)"
+  ran "pot: the next run proceeds, before the commit" sb_ true
+  git_ commit -qam "pins"
+  ran "pot: and after git commit -a" sb_ true
+  ran "pot: pot grant --pending, nothing to grant" tty_ '' "$work/sbr/bin/pot" grant --pending
+  expect "says so" holds "pot grant --pending: no changed source to grant"
+  sed -i 's|requests.network = \[ "inline.example" \]|requests.network = [ "inline.example" "more.example" ]|' flake.nix
+  ran "pot: pot grant --pending, a kit that asks for more" tty_ '' "$work/sbr/bin/pot" grant --pending
+  expect "skips it, naming the command" holds "skipped sbc: asks for more (1 more): pot grant sbc"
+  git_ checkout -q -- flake.nix
   sed -i 's|requests.capabilities = \[ { name = "nix"; } \]; requests.network = \[ "inline.example" \]; ||' flake.nix && commit "no nix"
 
   # a fixed directory's real entries (plugins' files, skills/synced) are bound into the view

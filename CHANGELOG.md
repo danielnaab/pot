@@ -5,6 +5,35 @@ and a patch never does. Until 0.1.0 pot shipped inside graft; its history up to 
 [graft's CHANGELOG](https://github.com/danielnaab/graft/blob/v2/CHANGELOG.md) (the entries that name pot, from
 v2.14.0's `sandbox` on).
 
+## v0.4.0 - 2026-11-27
+
+### Added
+
+- **`pot grant --pending [--workspace PATH]... [--commit]`** ([pot grant](docs/reference/pot.md#pot-grant)): every
+  kit whose source changed since its grant (`--diff`'s `changed source`), in this workspace or each `--workspace`,
+  shown with its diffstat and powerful items and granted with one answer (`grant N changed sources? [y/N]`), in one
+  write of the grants file (and, with `--commit`, one commit). Only kits whose requests are the grant's or fewer: one
+  that asks for more is skipped and named with the command to run (`skipped NAME: asks for more (N more): pot
+  grant NAME`). Refused, as `pot grant` is, under an agent marker, without a terminal and inside a run.
+
+### Changed
+
+- **A repo kit's source is the tree the next commit holds** ([The grants file](docs/reference/pot.md#the-grants-file),
+  [grants/1](contracts/grants-1.md#compatibility)): the index with the flake directory's changed and deleted tracked
+  files added, as `git commit -a` adds them (in a copy, its objects in pot's state), and in a commit's hook the index
+  git gives the hook, untouched. Before, it was the index alone, while the commit's hook (`git commit -a`, `git commit
+  PATH`) checked the index git gave it: a grant made before committing an unstaged change (a moved pin in
+  `flake.lock`) recorded HEAD's tree, and the commit's hook still refused (`changed source since its grant`). Now a
+  grant made before the commit holds in its hook and after it, staged or not. A run with a change to `flake.nix` or
+  `flake.lock` not yet staged now sees it as a changed source (the kit it builds, from the working tree, already had
+  it). The file's shape is unchanged.
+
+### Upgrading
+
+1. **Nothing to migrate.** A repository whose flake directory has unstaged changes to `flake.nix` or `flake.lock`
+   asks once for its repo kit's grant (`pot grant NAME`, or `pot grant --pending`); a clean or fully staged one asks
+   nothing. Machines sharing a grants file on 0.3.0 and 0.4.0 agree whenever those changes are committed or staged.
+
 ## v0.3.0 - 2026-11-27
 
 ### Added
