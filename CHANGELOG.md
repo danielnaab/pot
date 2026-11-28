@@ -32,6 +32,12 @@ v2.14.0's `sandbox` on).
   makes its console socket in `TMPDIR`, and a unix socket's path holds 107 bytes: a `TMPDIR` over 88 bytes failed
   the run (`crun: open console socket: ... No such file or directory`, exit 127). The engine now gets `/tmp` as its
   `TMPDIR` then.
+- **A container run or clone look killed with SIGKILL during podman's create is cleaned up** ([container
+  backend](docs/reference/container.md#run-and-cleanup)). podman killed before it recorded the container left conmon and `crun
+  create` waiting for it forever; no `rm` could name the container, so `cleanup` and the next look kept the engine's
+  state after waiting 30 s, and `pot review` kept the run (failing closed). A conmon still there 3 s after a
+  successful `rm` is now stopped with SIGKILL, its runtime first. crun's own state for that container stays in
+  `$XDG_RUNTIME_DIR/crun` (a tmpfs).
 
 ### Upgrading
 

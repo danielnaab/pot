@@ -5523,3 +5523,75 @@ fn podman_runs_at_a_terminal_with_a_long_tmpdir_and_run_folder() {
     assert_eq!(fs::read_to_string(run.join("status")).unwrap(), "0");
     ok(&verb(&top, &run, "cleanup").output().unwrap());
 }
+
+/// L2: a git container's look killed with SIGKILL (the verb and its engine, one process group) at any moment of the
+/// engine's create, then `cleanup`: the look's container, conmon and engine state go, and nothing is kept.
+fn killed_create_case(engine: &str) {
+    use std::os::unix::process::CommandExt as _;
+    let Some(program) = engine_program(engine) else {
+        return;
+    };
+    let Some((top, run, _, clone)) = clone_world(&format!("{engine}-killed-create"), engine, &program) else {
+        return;
+    };
+    prepare(&top, &run);
+    let (mut kept, mut orphans) = (vec![], 0);
+    for delay_ms in (0..=600).step_by(25) {
+        let mut child = verb(&top, &run, "git")
+            .arg(&clone)
+            .arg("/clone")
+            .arg("--")
+            .args(["upload-pack", "--strict", "/clone/.git"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let pgid = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-KILL", "--", &pgid]).status();
+        let _ = child.wait();
+        drop(child.stdin.take());
+        let started = Instant::now();
+        let out = verb(&top, &run, "cleanup").output().unwrap();
+        let took = started.elapsed();
+        let looks = run.join("gitlook").display().to_string();
+        let left: Vec<String> = fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter_map(|e| fs::read(e.path().join("cmdline")).ok())
+            .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+            .filter(|c| c.contains(&looks))
+            .collect();
+        if took > Duration::from_secs(3) {
+            orphans += 1;
+        }
+        if !out.status.success() || run.join("gitlook").exists() || !left.is_empty() {
+            kept.push(format!(
+                "{delay_ms} ms: exit {:?} in {took:?}: {}; left running: {left:?}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+            break;
+        }
+        prepare(&top, &run);
+    }
+    assert_eq!(
+        kept,
+        Vec::<String>::new(),
+        "a killed create left the look's container"
+    );
+    // how often the kill fell in the create's window (a conmon whose podman died before recording the container)
+    eprintln!("{engine}: {orphans} orphaned creates recovered");
+}
+
+#[test]
+fn podman_a_look_killed_during_create_is_cleaned_up() {
+    killed_create_case("podman");
+}
+
+#[test]
+fn docker_a_look_killed_during_create_is_cleaned_up() {
+    killed_create_case("docker");
+}
