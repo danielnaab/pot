@@ -15,6 +15,7 @@ import json
 import os
 import posixpath
 import re
+import shlex
 from urllib.parse import urlsplit
 
 POLICY_VERSION = 1
@@ -1680,7 +1681,26 @@ def describe_request(c):
     return c
 
 
-def stale_message(ctxname, st):
+def grant_command(st, where=None):
+    """The command that grants a stale kit: plain pot grant in the kit's workspace (WHERE, as shown) for a changed
+    source or one that asks for more (it grants the updated kits together and asks for the rest), else pot grant
+    NAME."""
+    if where and st["status"] in ("source", "grown"):
+        return f"cd {shell_path(where)} && pot grant"
+    return f"pot grant {st['name']}"
+
+
+def shell_path(p):
+    """A path as a shell word: ~/… keeps its tilde unquoted, the rest quoted when it needs it."""
+    if p == "~":
+        return p
+    if p.startswith("~/"):
+        return "~/" + shlex.quote(p[2:])
+    return shlex.quote(p)
+
+
+def stale_message(ctxname, st, where=None):
+    """A stale kit's refusal (exit 125). WHERE is the workspace its grant is made from, as shown (~/…), when known."""
     lines = []
     if st["status"] == "unverified":
         lines.append(f"pot ({ctxname}): {st['name']} ({st['kit']}) is not a verified release, so its grant does not apply")
@@ -1696,7 +1716,7 @@ def stale_message(ctxname, st):
             lines.append(f"    {d}")
     for a in st["added"]:
         lines.append(f"  + {a}")
-    lines.append(f"  grant it: pot grant {st['name']}")
+    lines.append(f"  grant it: {grant_command(st, where)}")
     return "\n".join(lines)
 
 

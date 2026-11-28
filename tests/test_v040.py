@@ -1,7 +1,10 @@
 """0.4.0: a repo kit's source is the tree the commit will have (the index with the flake directory's tracked changes,
 as `git commit -a` makes it; in a commit's hook, the index git gives the hook), so a grant made before committing
-holds in the commit's hook; and `pot grant --pending`, every changed source in one prompt and one write. Run with the
-other unit tests (pot-unit), on any system."""
+holds in the commit's hook. 0.5.0: plain `pot grant` grants the updated kits on one answer, then asks for the rest,
+in one write; a refusal names the command with its workspace. Run with the other unit tests (pot-unit), on any
+system."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -167,90 +170,166 @@ class FakeTty:
         return "".join(self.out)
 
 
-class Pending(unittest.TestCase):
+class Grouped(unittest.TestCase):
+    """0.5.0: plain pot grant grants the updated kits (a changed source, asking for no more) together on one answer,
+    then prompts the rest one by one, in one write of the grants file; --pending is gone."""
+
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
         self.host = types.SimpleNamespace(git=GIT or "git", state=os.path.join(self.d, "state"), machine="m",
                                           home=self.d, grants_path=os.path.join(self.d, "grants", "grants.json"))
         Env(self, CLAUDECODE=None, POT=None)
+        self.saved, self.commits = [], []
+        self.t = None
+        real = (pot.tty, pot.save_grants, pot.commit_grants)
 
-    def run_pending(self, sts, answers, grants=None):
-        t = FakeTty(answers)
-        saved = []
-        real_tty, real_save = pot.tty, pot.save_grants
-        pot.tty = lambda: t
-        pot.save_grants = lambda host, g: saved.append(json.loads(C.grants_dump(g)))
-        try:
-            pot.grant_pending(self.host, {}, grants or {"grants": {}, "machines": {}}, sts)
-        finally:
-            pot.tty, pot.save_grants = real_tty, real_save
-        return t.text(), saved
+        def undo():
+            pot.tty, pot.save_grants, pot.commit_grants = real
+        self.addCleanup(undo)
+        pot.tty = lambda: self.t
+        pot.save_grants = lambda host, g: self.saved.append(json.loads(C.grants_dump(g)))
+        pot.commit_grants = lambda host, names, verb="pot grant": self.commits.append(list(names)) or "committed"
+
+    def flow(self, sts, answers, grants=None, commit=False):
+        self.t = FakeTty(answers)
+        batch, rest = pot.batch_split(sts)
+        pot.grant_flow(self.host, {}, grants or {"grants": {}, "machines": {}}, rest, commit=commit, batch=batch)
+        return self.t.text()
+
+    def grown(self, name):
+        return st(name, "grown", requests=("capability nix", "network more.example:443"),
+                  entry={"requests": ["capability nix"], "source": {"tree": "a" * 40}})
 
     def test_split(self):
-        sts = [st("a", "source"), st("b", "grown"), st("c", "match"), st("d", "never"), st("e", "source")]
-        todo, skipped = pot.pending_split(sts)
-        self.assertEqual([s["name"] for s in todo], ["a", "e"])
-        self.assertEqual([s["name"] for s in skipped], ["b"])
+        sts = [st("a", "source"), st("b", "grown"), st("d", "never"), st("e", "source"), st("f", "unverified")]
+        batch, rest = pot.batch_split(sts)
+        self.assertEqual([s["name"] for s in batch], ["a", "e"])
+        self.assertEqual([s["name"] for s in rest], ["b", "d", "f"])
 
-    def test_grants_every_changed_source_in_one_write(self):
-        sts = [st("a", "source"), st("b", "source", requests=("capability nix", "network x.example:443")),
-               st("c", "grown")]
-        sts[2]["added"] = ["network more.example:443"]
-        text, saved = self.run_pending(sts, ["y"])
-        self.assertEqual(len(saved), 1, "one grants.json write")
-        self.assertEqual(sorted(saved[0]["grants"]), ["repo:example.com/o/a", "repo:example.com/o/b"])
-        self.assertEqual(saved[0]["grants"]["repo:example.com/o/a"]["source"], {"tree": "b" * 40})
-        self.assertEqual(saved[0]["grants"]["repo:example.com/o/b"]["requests"],
-                         ["capability nix", "network x.example:443"])
-        self.assertIn("grant 2 changed sources? [y/N]", text)
-        self.assertIn("skipped c: asks for more (1 more): pot grant c", text)
-        self.assertIn("granted a (changed source)", text)
-        self.assertIn("granted b (changed source)", text)
+    def test_one_answer_then_one_by_one_in_one_write(self):
+        sts = [st("a", "source"), self.grown("c"),
+               st("b", "source", requests=("capability nix", "network x.example:443"))]
+        text = self.flow(sts, ["y", "y"], commit=True)
+        self.assertEqual(len(self.saved), 1, "one grants.json write")
+        self.assertEqual(sorted(self.saved[0]["grants"]),
+                         ["repo:example.com/o/a", "repo:example.com/o/b", "repo:example.com/o/c"])
+        self.assertEqual(self.saved[0]["grants"]["repo:example.com/o/a"]["source"], {"tree": "b" * 40})
+        self.assertEqual(self.saved[0]["grants"]["repo:example.com/o/c"]["requests"],
+                         ["capability nix", "network more.example:443"])
+        self.assertEqual(self.commits, [["a", "b", "c"]], "one commit, naming every kit granted")
+        # the batch first, its one question, then the kit that asks for more, alone
+        q = text.index("grant 2 updated kits? [y/N]")
+        self.assertLess(text.index("a   repo kit (repo:example.com/o/a)"), q)
+        self.assertLess(text.index("b   repo kit (repo:example.com/o/b)"), q)
+        self.assertIn("  powerful: capability nix", text[:q])
+        self.assertLess(q, text.index("granted a (changed source)"))
+        self.assertLess(q, text.index("c   repo kit (repo:example.com/o/c), for every run in this repository   asks for more"))
+        self.assertIn("    + network more.example:443", text[q:])
+        self.assertIn("  grant these? [y/N]", text[q:])
+
+    def test_one_updated_kit(self):
+        text = self.flow([st("a", "source")], ["y"])
+        self.assertIn("grant 1 updated kit? [y/N]", text)
+        self.assertEqual(len(self.saved), 1)
 
     def test_narrower_requests_are_granted_as_asked(self):
         s = st("a", "source", requests=("capability nix",),
                entry={"requests": ["capability nix", "network x.example:443"], "source": {"tree": "a" * 40}})
         old = dict(s["entry"], digest=C.digest(s["entry"]["requests"]), granted="2026-11-01 m")
-        _, saved = self.run_pending([s], ["y"], {"grants": {s["kit"]: old}, "machines": {}})
+        text = self.flow([s], ["y"], {"grants": {s["kit"]: old}, "machines": {}})
+        self.assertIn("  no longer asked: - network x.example:443", text)
         # a narrower set with a new source: this machine's section, as pot grant KIT writes it
-        e = saved[0]["machines"]["m"]["repo:example.com/o/a"]
+        e = self.saved[0]["machines"]["m"]["repo:example.com/o/a"]
         self.assertEqual((e["requests"], e["source"]), (["capability nix"], {"tree": "b" * 40}))
 
-    def test_no_is_nothing(self):
-        text, saved = self.run_pending([st("a", "source")], ["n"])
-        self.assertEqual(saved, [])
-        self.assertIn("nothing granted", text)
+    def test_no_to_the_batch_still_asks_the_rest(self):
+        text = self.flow([st("a", "source"), self.grown("c")], ["n", "y"])
+        self.assertIn("not granted: a", text)
+        self.assertEqual(len(self.saved), 1)
+        self.assertEqual(sorted(self.saved[0]["grants"]), ["repo:example.com/o/c"])
 
-    def test_nothing_pending(self):
-        s = st("c", "grown")
-        s["added"] = ["network more.example:443"]
-        text, saved = self.run_pending([st("b", "match"), s], [])
-        self.assertEqual(saved, [])
-        self.assertIn("pot grant --pending: no changed source to grant", text)
-        self.assertIn("skipped c: asks for more (1 more): pot grant c", text)
+    def test_no_to_everything_writes_nothing(self):
+        self.flow([st("a", "source"), st("n", "never", entry={"requests": []})], ["n", "n"], commit=True)
+        self.assertEqual((self.saved, self.commits), ([], []))
 
-    def test_another_workspace_names_it(self):
-        s = st("c", "grown", top=os.path.join(self.d, "src", "c"))
-        s["added"] = ["network more.example:443"]
-        s["workspace"] = os.path.join(self.d, "src", "c")
-        text, _ = self.run_pending([s], [])
-        self.assertIn("pot grant c --workspace ~/src/c", text)
+    def test_the_stopped_run_and_the_named_workspace_are_shown(self):
+        a, b = st("a", "source"), st("b", "source")
+        a["stoppedRun"], a["stoppedIn"] = "8b3f", os.path.join(self.d, "src", "a")
+        b["workspace"] = os.path.join(self.d, "src", "b")
+        text = self.flow([a, b], ["n"])
+        self.assertIn("changed source   (stopped run 8b3f, in ~/src/a)", text)
+        self.assertIn("changed source   (in ~/src/b)", text)
+
+    def run_here(self, here, stopped, answers):
+        self.t = FakeTty(answers)
+        real = (pot.workspace_status, pot.stopped_kits)
+        pot.workspace_status = lambda host, root, context, flags: here
+        pot.stopped_kits = lambda host, root, context, flags: stopped
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                pot.grant_here(self.host, {}, {"grants": {}, "machines": {}}, "work", {})
+        finally:
+            pot.workspace_status, pot.stopped_kits = real
+        out = buf.getvalue().splitlines()
+        return self.t.text(), out
+
+    def test_plain_grant_groups_and_asks_a_stopped_runs_new_kit_alone(self):
+        never = st("n", "never", entry=None)
+        never["entry"], never["stoppedRun"] = None, "9427"
+        text, out = self.run_here([st("a", "source"), self.grown("c"), st("x", "never", entry=None),
+                                   st("m", "match")], [never], ["y", "y", "y"])
+        q = text.index("grant 1 updated kit? [y/N]")
+        self.assertLess(q, text.index("n   repo kit (repo:example.com/o/n)"))
+        self.assertLess(text.index("n   repo kit"), text.index("c   repo kit"), "a stopped run's kit first")
+        self.assertEqual(len(self.saved), 1)
+        self.assertEqual(sorted(self.saved[0]["grants"]),
+                         ["repo:example.com/o/a", "repo:example.com/o/c", "repo:example.com/o/n"])
+        self.assertEqual(out, ["pot: also not granted: x (pot grant NAME)"])
+
+    def test_nothing_to_grant(self):
+        text, out = self.run_here([st("m", "match")], [], [])
+        self.assertEqual(out, ["pot: nothing to grant"])
+        self.assertEqual(self.saved, [])
 
     def test_refused_under_an_agent(self):
         os.environ["CLAUDECODE"] = "1"
         with self.assertRaisesRegex(C.Refusal, "pot grant is for people: CLAUDECODE is set"):
-            pot.grant(self.host, {"agentMarkers": ["CLAUDECODE"]}, {"pending": True}, [])
+            pot.grant(self.host, {"agentMarkers": ["CLAUDECODE"]}, {}, [])
 
-    def test_usage(self):
-        for flags, kits in (({"pending": True, "diff": True}, []), ({"pending": True, "revoke": ["x"]}, []),
-                            ({"pending": True}, ["x"])):
-            with self.assertRaises(pot.Usage):
-                pot.grant(self.host, {}, flags, kits)
+    def test_pending_is_gone(self):
+        with self.assertRaisesRegex(pot.Usage, "unknown option --pending"):
+            pot.parse(["grant", "--pending"], {})
+        _, _, flags, _ = pot.parse(["grant", "--workspace", "a", "--workspace", "b", "--commit"], {})
+        self.assertEqual((flags["workspace"], flags["commit"]), (["a", "b"], True))
 
-    def test_parse(self):
-        _, _, flags, _ = pot.parse(["grant", "--pending", "--workspace", "a", "--workspace", "b", "--commit"], {})
-        self.assertEqual((flags["pending"], flags["workspace"], flags["commit"]), (True, ["a", "b"], True))
+
+class RefusalCommand(unittest.TestCase):
+    """0.5.0: a refusal for a changed source (or a kit that asks for more) names the command, with the workspace."""
+
+    def test_changed_source(self):
+        text = C.stale_message("work", st("a", "source"), "~/src/potting-shed")
+        self.assertIn("a (repo:example.com/o/a) changed source since its grant:", text)
+        self.assertTrue(text.endswith("\n  grant it: cd ~/src/potting-shed && pot grant"), text)
+
+    def test_asks_for_more(self):
+        s = st("a", "grown")
+        s["added"] = ["network more.example:443"]
+        self.assertTrue(C.stale_message("work", s, "/srv/a b").endswith("  grant it: cd '/srv/a b' && pot grant"))
+
+    def test_never_granted_and_no_workspace(self):
+        self.assertTrue(C.stale_message("work", st("a", "never"), "~/x").endswith("  grant it: pot grant a"))
+        self.assertTrue(C.stale_message("work", st("a", "source")).endswith("  grant it: pot grant a"))
+
+    def test_shell_path(self):
+        self.assertEqual([C.shell_path(p) for p in ("~", "~/src/pot", "~/my src/p", "/tmp/x")],
+                         ["~", "~/src/pot", "~/'my src/p'", "/tmp/x"])
+
+    def test_grant_workspace(self):
+        ws = [{"id": "repo:a", "top": "/w/a"}, {"id": "repo:b", "top": "/w/b"}]
+        self.assertEqual(pot.grant_workspace(ws, {"kit": "repo:b"}), "/w/b")
+        self.assertEqual(pot.grant_workspace(ws, {"kit": "root:daniel"}), "/w/a")
 
 
 if __name__ == "__main__":
