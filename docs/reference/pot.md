@@ -77,7 +77,7 @@ A root is where the person's authority lives. A run never writes a root in place
 | Root | Where | For |
 |---|---|---|
 | A home-manager root | `programs.pot` in your home-manager configuration, from `inputs.pot.homeManagerModules.pot` | Your own machine. Its source repository is a [root repository](#root-repositories). |
-| pot's default root | `nix run github:danielnaab/pot/v0.5.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
+| pot's default root | `nix run github:danielnaab/pot/v0.6.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
 | A minimal root of your own | `pot init DIR` writes `DIR/flake.nix`, built with `pot.lib.mkRoot` | A start for a root that you then edit and commit. |
 
 pot's default root and the root that `pot init` writes have pot's default contexts, hidden list and standard tools,

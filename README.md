@@ -16,7 +16,7 @@ With Nix (flakes enabled) and Claude Code on your `PATH`:
 ```
 claude setup-token          # once; save the token in ~/.config/pot/claude-token-personal (chmod 600)
 cd ~/src/some-repository
-nix run github:danielnaab/pot/v0.5.0 -- claude
+nix run github:danielnaab/pot/v0.6.0 -- claude
 ```
 
 That is pot's default root: Claude Code as `claude-code@personal`, its token file, and Nix through the host's
@@ -29,7 +29,7 @@ A root is a flake that builds your `pot` with `pot.lib.mkRoot`. `pot init DIR` w
 
 ```nix
 {
-  inputs.pot.url = "github:danielnaab/pot/v0.5.0";
+  inputs.pot.url = "github:danielnaab/pot/v0.6.0";
   inputs.nixpkgs.follows = "pot/nixpkgs";
   outputs = { pot, nixpkgs, ... }: {
     packages.x86_64-linux.default = pot.lib.mkRoot {
@@ -51,7 +51,7 @@ The agent kits are `pot.kits.claude-code` and `pot.kits.pi`, and `pot.apis` poin
 
 ```nix
 {
-  inputs.pot.url = "git+https://github.com/danielnaab/pot?ref=refs/tags/v0.5.0&exportIgnore=1";
+  inputs.pot.url = "git+https://github.com/danielnaab/pot?ref=refs/tags/v0.6.0&exportIgnore=1";
   # in your home configuration's modules:
   #   inputs.pot.homeManagerModules.default    (also named homeManagerModules.pot)
 }
@@ -77,7 +77,7 @@ repository's git submodules, builds the bundle at run start, and reads only it. 
 
 ```nix
 {
-  inputs.pot.url = "github:danielnaab/pot/v0.5.0";
+  inputs.pot.url = "github:danielnaab/pot/v0.6.0";
   outputs = { pot, ... }:
     let
       system = "x86_64-linux";
