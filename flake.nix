@@ -75,7 +75,7 @@
           touch $out
         '';
         # pot's unit tests: composition, identity, normalisation, digests, merge rules, grants
-        pot-unit = pkgs.runCommand "pot-unit" { nativeBuildInputs = [ pkgs.python3 pkgs.git ]; } ''
+        pot-unit = pkgs.runCommand "pot-unit" { nativeBuildInputs = [ pkgs.python3 pkgs.git pkgs.openssh ]; } ''
           cp -r ${potSrc} pot && chmod -R u+w pot && cp ${./tests}/test_*.py pot/ && cp -r ${./tests/output} pot/output
           cd pot && python3 -I -m unittest discover -s . -p 'test_*.py' -v
           touch $out
@@ -97,6 +97,15 @@
         # pot phase 2: a root offering the container backend, as its default, builds (its config: tests/run.sh sibling)
         pot-root-container = if pkgs.stdenv.isLinux then mkRoot { inherit pkgs; name = "check-container";
           container.engine = "podman"; defaultBackend = "container"; } else pkgs.runCommand "pot-root-container" { } "touch $out";
+        # 0.6.0: a root naming release signers carries the file and ssh-keygen; one that names none, neither
+        pot-root-release = let
+          r = (mkRoot { inherit pkgs; name = "check-release";
+            releaseSigners = pkgs.writeText "release_signers" "daniel@person namespaces=\"git\" ssh-ed25519 AAAA\n"; }).passthru.root;
+          d = (defaultRoot pkgs).passthru.root;
+        in assert lib.hasSuffix "-release_signers" r.releaseSigners;
+          assert lib.hasSuffix "/bin/ssh-keygen" r.sshKeygen;
+          assert d.releaseSigners == null && d.sshKeygen == null;
+          pkgs.runCommand "pot-root-release" { } "touch $out";
         # the default root builds (on Darwin: a pot that refuses, D21)
         pot-root = defaultRoot pkgs;
         # a root with the claude-code kit (three instances, MCP, Bedrock, a gateway) builds: its manifests validate

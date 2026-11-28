@@ -25,7 +25,7 @@ let
     defaultInstance = checked;
     name = "home-manager";
     inherit (cfg) grantsFile stateDir contexts defaultContext kits hidden tools bindings rootRepos agentMarkers
-      repoKits inspect caBundle limits clones sealedProtect container defaultBackend;
+      repoKits inspect caBundle limits clones sealedProtect container defaultBackend releaseSigners;
   };
 in
 {
@@ -54,6 +54,7 @@ in
     caBundle = opt (t.nullOr t.path) null "A CA bundle, at /etc/ssl/certs/ca-certificates.crt in every run.";
     container = opt (t.nullOr (t.attrsOf t.anything)) null "Linux: offer the container backend too: { engine = \"podman\"; } (or \"docker\"), with program (an absolute path, or a package with bin/ENGINE: podman's default is pkgs.podman, docker's must be given; pot never runs an engine it finds on PATH) and image (docker's empty image).";
     defaultBackend = opt (t.nullOr t.str) null "The backend of a context whose backend is auto: bubblewrap (Seatbelt on macOS) unless \"container\" (with programs.pot.container).";
+    releaseSigners = opt (t.nullOr t.path) null "An allowed_signers file (0.6.0): a kit whose source changed only by moving pins (flake.lock inputs, submodules) to release tags that one of these signers signed keeps its grant. Only the root names release signers, never a repository. null: every changed source asks, as before.";
     package = lib.mkOption { type = t.package; readOnly = true; description = "The root's pot."; };
   };
 

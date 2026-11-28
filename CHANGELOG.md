@@ -5,6 +5,33 @@ and a patch never does. Until 0.1.0 pot shipped inside graft; its history up to 
 [graft's CHANGELOG](https://github.com/danielnaab/graft/blob/v2/CHANGELOG.md) (the entries that name pot, from
 v2.14.0's `sandbox` on).
 
+## v0.6.0 - Unreleased
+
+### Added
+
+- **`programs.pot.releaseSigners`: a grant follows a pin move to a signed release** ([Release
+  moves](docs/reference/pot.md#release-moves), [decision](docs/decisions.md#a-grant-follows-a-pin-move-to-a-person-signed-release)).
+  The root may name an `allowed_signers` file (`pot.lib.mkRoot`'s `releaseSigners`, a path). A kit whose source
+  changed only by moving pins to release tags that one of its signers signed keeps its grant, with no `pot grant`:
+  a submodule kit whose gitlink moved to such a tag, or a repo kit whose flake directory changed only in
+  `flake.lock` inputs moved to such tags (and transitive inputs locked as those releases' own `flake.lock` locks
+  them), `flake.nix`'s release tag literals, and gitlinks moved to such tags. The tags are fetched from each URL
+  into `cache/releases/` in pot's state and verified with `ssh-keygen -Y verify -n git`; a fetch that fails, an
+  unsigned tag, another signer, a branch or commit pin (nixpkgs' `nixos-25.05`, `main`), an added input or any
+  other change asks as before. Requests are still compared. Nothing is written to the grants file
+  ([grants/1](contracts/grants-1.md#compatibility): the reader's comparison, unchanged shape).
+- **`pot explain` shows each accepted move,** `accepted   release move to tuteur v0.3.0, signed by daniel@person
+  (KIT)`, and the run record's `start` event gives it as the kit's `accepted` ([runs/1](contracts/runs-1.md)).
+  When `releaseSigners` is set and a repo kit's changed source still asks, its diffstat ends with why:
+  `not a signed release move: …`.
+
+### Upgrading
+
+Nothing to migrate: without `releaseSigners` every changed source asks, as in 0.5.0. To use it, set
+`programs.pot.releaseSigners` to an `allowed_signers` file naming the person key that signs release tags (such as
+`pkgs.writeText "release_signers" ''daniel@person namespaces="git" sk-ssh-ed25519@openssh.com AAAA…''`), and sign
+release tags with that key.
+
 ## v0.5.0 - 2026-11-28
 
 ### Changed

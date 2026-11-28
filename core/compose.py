@@ -887,7 +887,7 @@ def compose(inp):
         merged = merge_manifests([(normalise_kit(m), f) for m, f in manifests])
         w["kit"] = add_kit(w["id"], "repo", merged, " + ".join(f for _, f in manifests) or "(none)",
                            name=repo_short_name(w), source={"tree": w["source"]} if w.get("source") else None,
-                           sourceAccepts=w.get("sourceAccepts") or [],
+                           sourceAccepts=w.get("sourceAccepts") or [], releaseMoves=w.get("releaseMoves") or [],
                            workspace=w)
         ws_kits.append(w["kit"])
         for s in w.get("scions") or []:
@@ -895,7 +895,8 @@ def compose(inp):
                 continue
             k = add_kit(s["identity"], "scion", s["manifest"], s.get("file") or s["path"], s["name"],
                         verified=s.get("verified", False),
-                        source={"commit": s["commit"], "tag": s["tag"]} if s.get("tag") else None, scion=s)
+                        source={"commit": s["commit"], "tag": s["tag"]} if s.get("tag") else None, scion=s,
+                        sourceAccepts=s.get("sourceAccepts") or [], releaseMoves=s.get("releaseMoves") or [])
             ws_kits.append(k)
 
     # workspace kits may not ship names of root kits' commands, standard tools or pot (§4.2)
@@ -991,6 +992,9 @@ def compose(inp):
         st["source"] = k.get("source")
         st["file"] = k["file"]
         st["powerful"] = sorted({r.canonical for r in k["requests"] if r.cls == "powerful"})
+        if st["status"] == "match" and k.get("releaseMoves") and (st.get("entry") or {}).get("source") != k.get("source"):
+            # 0.6.0: held by pin moves to signed release tags, computed at this start, never written to the grants file
+            st["accepted"] = [dict(m) for m in k["releaseMoves"]]
         status[k["id"]] = st
         report["kits"].append(st)
         if st["status"] in ("grown", "source", "never") and not st["applies"]:
@@ -1983,6 +1987,12 @@ def label(x, report=None):
     return ""
 
 
+def release_move_text(m):
+    """One accepted pin move (0.6.0): "release move to tuteur v0.3.0, signed by daniel@person"."""
+    name = m["url"].rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1].removesuffix(".git") or m["url"]
+    return f"release move to {name} {m['tag']}, signed by {m['signer']}"
+
+
 def explain_text(policy, report, root, width=100):
     """pot explain: every item with the file or grant it came from (Appendix C's shape), in sections
     separated by a blank line: the run (a summary: what runs, where, and what to do next), see, limits,
@@ -2017,6 +2027,9 @@ def explain_text(policy, report, root, width=100):
         out[-1] = out[-1].rstrip(",")
     todo = [next_action(k) for k in report["kits"] if k.get("applies") and k["status"] in ("never", "grown", "source", "unverified")]
     out += wrap_words("next       ", [t + ";" for t in todo[:-1]] + todo[-1:], width, 11) if todo else ["next       ready"]
+    for k in report["kits"]:
+        for m in k.get("accepted") or []:
+            out.append(f"accepted   {release_move_text(m)} ({k['name']})")
     if report.get("argv") and report["argv"][:1] != [cmd.get("name")]:
         out += wrap_words("argv       ", report["argv"], width, 11)
     hooks = report.get("agentHooks") or []

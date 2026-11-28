@@ -447,7 +447,8 @@ def narrowed(host, w, grants):
     """Ruling 1, the narrowed comparison: a repo kit's stored source {tree: OLD} (grants/1, as v2.16 wrote it)
     still holds for the current tree when OLD's and the current flake.nix and flake.lock are the same, and the
     kit as built equals what this machine recorded under OLD. Sets w["sourceAccepts"] and w["sourceWhy"]."""
-    w["sourceAccepts"], w["sourceWhy"] = [], None
+    w["sourceAccepts"], w["sourceWhy"], w["releaseMoves"] = [], None, []
+    scion_accepts(host, w, grants)
     if not w.get("source") or w.get("repoKit") is None:
         return
     entry, _ = C.grant_entry(grants, w["id"], host.machine)
@@ -467,6 +468,123 @@ def narrowed(host, w, grants):
     w["sourceWhy"] = {"defining": defining, "kitChanged": kit_changed, "recorded": rec is not None}
     if not defining and rec is not None and not kit_changed:
         w["sourceAccepts"] = [{"tree": old}]
+        return
+    rel = releases_of(host)
+    if rel is not None:
+        moves, why = release_moves(host, w, old, g, env, rel)
+        if moves:
+            w["sourceAccepts"], w["releaseMoves"] = [{"tree": old}], moves
+        else:
+            w["sourceWhy"]["release"] = why
+
+
+def releases_of(host):
+    """The root's release signers (0.6.0), as a releases.Releases, or None when it names none: then no pin move
+    is accepted, as before 0.6.0."""
+    signers, keygen = host.root.get("releaseSigners"), host.root.get("sshKeygen")
+    if not signers or not keygen:
+        return None
+    if getattr(host, "_releases", None) is None:
+        import releases as RL
+        host._releases = RL.Releases(host.git, host.state, keygen, signers)
+    return host._releases
+
+
+def scion_of(w, path, commit):
+    return next((s for s in w.get("scions") or [] if s["path"].rstrip("/") == path and s["commit"] == commit), None)
+
+
+def release_moves(host, w, old, g, env, rel):
+    """Ruling 1, rule 3 (0.6.0): the repo kit's flake directory moved from the granted tree OLD only by moving
+    pins to signed release tags: flake.lock's added and changed nodes are each a release tag at its URL signed by a
+    release signer, or locked as that release's own flake.lock locks it; flake.nix differs in release tag literals
+    alone; a gitlink moved to a signed release tag at its submodule's URL. Nothing else changed. Returns (moves,
+    None), or (None, why)."""
+    import releases as RL
+    d = subprocess.run(g + ["diff-tree", "-r", "-z", "--no-renames", old, w["source"]], capture_output=True, env=env)
+    if d.returncode != 0:
+        return None, "the granted tree is unreadable"
+    f = d.stdout.split(b"\0")
+    changes = []
+    for i in range(0, len(f) - 1, 2):
+        meta, path = f[i].decode(errors="replace").lstrip(":").split(), os.fsdecode(f[i + 1])
+        if len(meta) == 5:
+            changes.append((meta[0], meta[1], meta[2], meta[3], meta[4], path))
+
+    def blob(oid):
+        r = subprocess.run(g + ["cat-file", "blob", oid], capture_output=True, env=env)
+        return r.stdout if r.returncode == 0 else None
+
+    rel_dir = w.get("flakeDir") or ""
+    moves = []
+    for om, nm, oo, no, st, path in changes:
+        if st != "M":
+            return None, f"{path} was {'added' if st == 'A' else 'deleted' if st == 'D' else 'changed'}"
+        if om == nm == "160000":
+            full = f"{rel_dir}/{path}" if rel_dir else path
+            s = scion_of(w, full, no)
+            if s is None:
+                return None, f"{path}: the gitlink is not the committed submodule"
+            got = rel.signed(s["url"], no, s.get("tag"))
+            if "why" in got:
+                return None, got["why"]
+            moves.append({"submodule": full, "url": s["url"], "commit": no, "tag": got["tag"], "signer": got["signer"]})
+        elif path == "flake.nix":
+            a, b = blob(oo), blob(no)
+            if a is None or b is None or not RL.flake_nix_same(a, b):
+                return None, "flake.nix changed beyond release tags"
+        elif path == "flake.lock":
+            a, b = blob(oo), blob(no)
+            nodes = RL.lock_changes(a, b) if a is not None and b is not None else None
+            if nodes is None:
+                return None, "flake.lock changed beyond its inputs"
+            # a pin to a release tag (original.ref vX.Y.Z) is checked at its URL; any other added or changed node
+            # (a transitive input) only as locked by a signed release's own flake.lock; a branch or commit pin asks
+            known, rest = set(), []
+            for name, node in nodes:
+                ref = (node.get("original") or {}).get("ref")
+                url = RL.lock_url(node)
+                if not (url and isinstance(ref, str) and RL.RELEASE.fullmatch(ref)):
+                    rest.append(name)
+                    continue
+                got = rel.signed(url, node["locked"]["rev"], ref,
+                                 "/".join(x for x in [str(node["locked"].get("dir") or "").strip("/"), "flake.lock"] if x))
+                if "why" in got:
+                    return None, f"flake.lock input {name}: {got['why']}"
+                moves.append({"input": name, "url": url, "commit": node["locked"]["rev"], "tag": got["tag"], "signer": got["signer"]})
+                known |= RL.locked_nodes(got["lock"]) if got.get("lock") else set()
+            for name in rest:
+                if json.dumps(dict(nodes)[name].get("locked"), sort_keys=True) not in known:
+                    return None, f"flake.lock input {name} moved, and is no signed release's"
+        else:
+            return None, f"{path} changed"
+    if not any("input" in m or "submodule" in m for m in moves):
+        return None, "no pin moved"
+    return moves, None
+
+
+def scion_accepts(host, w, grants):
+    """0.6.0: a submodule kit whose gitlink moved, since its grant, to a release tag signed by a release signer
+    keeps its grant (its requests are still compared). Sets s["sourceAccepts"] and s["releaseMoves"]."""
+    rel = None
+    for s in w.get("scions") or []:
+        s["sourceAccepts"], s["releaseMoves"] = [], []
+        if not s.get("tag") or not s.get("verified"):
+            continue
+        entry, _ = C.grant_entry(grants, s["identity"], host.machine)
+        src = (entry or {}).get("source")
+        if not isinstance(src, dict) or src == {"commit": s["commit"], "tag": s["tag"]}:
+            continue
+        rel = rel or releases_of(host)
+        if rel is None:
+            return
+        got = rel.signed(s["url"], s["commit"], s["tag"])
+        if "why" in got:
+            s["sourceWhy"] = {"release": got["why"]}
+            continue
+        s["sourceAccepts"] = [src]
+        s["releaseMoves"] = [{"submodule": s["path"], "url": s["url"], "commit": s["commit"], "tag": got["tag"],
+                              "signer": got["signer"]}]
 
 
 def record_sources(host, ws, report):
@@ -2096,7 +2214,8 @@ def run(host, root, context, flags, cmd):
         if not flags.get("wrapped"):
             say(startup_line(policy, report, ws, root))
         backend_notes(rundir)
-        kits = [{"id": k["kit"], "grant": k["status"]} for k in report["kits"]]
+        kits = [{"id": k["kit"], "grant": k["status"], **({"accepted": k["accepted"]} if k.get("accepted") else {})}
+                for k in report["kits"]]
         invoker = "person" if sys.stdin.isatty() else "script"     # before --detach redirects stdin (X2)
         if detach:
             rfd, wfd = os.pipe()
@@ -4506,6 +4625,8 @@ def source_diff(host, w, s):
     s["diffstat"] = tree_diffstat(host, top, s["was"]["tree"], s["now"]["tree"], flake_dir(host, top), paths)
     if why.get("kitChanged"):
         s["diffstat"] = s["diffstat"] + ["the kit as built changed"]
+    if why.get("release"):
+        s["diffstat"] = s["diffstat"] + [f"not a signed release move: {visible(why['release'])}"]
 
 
 def all_kit_status(host, root, context, flags):
@@ -4538,7 +4659,8 @@ def all_kit_status(host, root, context, flags):
         reqs = C.validate_kit(m, ident, host.home)
         canons = [r.canonical for r in reqs]
         powerful = [r.canonical for r in reqs if r.cls == "powerful"]
-        w_ = next((w for w in ws if w["id"] == ident), {}) if kind == "repo" else {}
+        w_ = next((w for w in ws if w["id"] == ident), {}) if kind == "repo" else \
+            next((s for w in ws for s in w["scions"] if s["identity"] == ident), {}) if kind == "scion" else {}
         st = C.grant_status(ident, kind, canons, bool(powerful), source, grants, host.machine, verified,
                             accepts=w_.get("sourceAccepts") or ())
         st.update(kit=ident, kind=kind, name=name, requests=sorted(set(canons)), powerful=powerful, source=source,
