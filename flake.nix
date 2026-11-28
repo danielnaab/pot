@@ -57,7 +57,7 @@
         pot-container = (rust pkgs).package;
       });
       apps = forAll (pkgs: rec {
-        default = { type = "app"; program = lib.getExe self.packages.${pkgs.system}.default; meta.description = "pot with its default root"; };
+        default = { type = "app"; program = lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.default; meta.description = "pot with its default root"; };
         pot = default;
       });
 
