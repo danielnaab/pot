@@ -25,6 +25,14 @@ v2.14.0's `sandbox` on).
   When `releaseSigners` is set and a repo kit's changed source still asks, its diffstat ends with why:
   `not a signed release move: …`.
 
+### Changed
+
+- **pot's own flake takes nixpkgs from `nixos-26.05`** (was `nixos-25.05`, which is past its support), so evaluating
+  pot's packages, checks and default root no longer prints crane's warning (`crane requires at least nixpkgs-26.05`,
+  QA I2). A root built by `pot.lib.mkRoot` or `programs.pot` still uses the caller's `pkgs`: a caller on a nixpkgs
+  older than 26.05 still sees the warning, and its container backend still builds. `dev/flake.nix`'s docs check pins
+  the same revision. The container backend's code takes the newer clippy's three suggestions; it behaves the same.
+
 ### Fixed
 
 - **The container backend runs at a terminal when the caller's `TMPDIR` is long** ([container

@@ -4,7 +4,7 @@
   # pot is other flakes' input (a root's, and a producer's of pot-kits), so this flake.nix declares no
   # inputs.self.submodules (github: and path: inputs reject it). Its development-only inputs (the docs check's
   # knowledge-base-kit) are in dev/flake.nix, so no root or producer locks them.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   # crane builds pot's Rust code (backends/container, the container backend); it has no inputs of its own
   inputs.crane.url = "github:ipetkov/crane";
 

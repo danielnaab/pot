@@ -1193,10 +1193,8 @@ fn engine_paths(
     // the status run records: a file, or nothing; an empty folder in its place is removed
     let status = abs.join("status");
     match status.symlink_metadata() {
-        Ok(m) if m.is_dir() => {
-            if fs::remove_dir(&status).is_err() {
-                bad.push(format!("{} (a folder, not empty)", status.display()));
-            }
+        Ok(m) if m.is_dir() && fs::remove_dir(&status).is_err() => {
+            bad.push(format!("{} (a folder, not empty)", status.display()));
         }
         _ => {}
     }
@@ -2444,10 +2442,11 @@ fn unshare_rm(program: &str, paths: &[PathBuf]) -> Result<(), String> {
 fn podman_cleanup_set(abs: &Path, home: &Path) -> Vec<(String, String)> {
     let own_file = |n: &str| {
         let p = abs.join(n);
-        p.symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_file())
-            .then(|| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/dev/null".into())
+        if p.symlink_metadata().is_ok_and(|m| m.file_type().is_file()) {
+            p.to_string_lossy().into_owned()
+        } else {
+            "/dev/null".into()
+        }
     };
     vec![
         ("CONTAINERS_CONF".to_string(), own_file("containers.conf")),
