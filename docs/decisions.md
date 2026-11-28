@@ -168,11 +168,52 @@ Also:
 
 Reopen when a second runner of kits appears, or when a producer needs to read a pot format.
 
+## A grant follows a pin move to a person-signed release
+
+Since 0.6.0, a root may name **release signers** (`programs.pot.releaseSigners`, an `allowed_signers` file). A
+kit's powerful grant then holds, without asking, when its source changed only by moving pins to release tags
+that one of those signers signed: a submodule kit's gitlink, or a repo kit's `flake.lock` inputs, `flake.nix`'s tag
+literals and gitlinks ([Release moves](reference/pot.md#release-moves)). Its requests are still compared, so a kit
+that asks for more asks.
+
+Why:
+
+- **The grant asked again what the tag had answered.** A grant asks "do I trust this code with these powers". When
+  the code is a release of the person's own provider and the person signed that tag, the re-grant adds no
+  information: its diffstat showed a `flake.lock`, nothing a release review had not seen. Each routine upgrade
+  needed a `pot grant` at a terminal, which kept agents from landing upgrades alone.
+- **Principle 3 holds.** Who signs is a host fact: the root names the signers, never a repository, and the tag
+  objects are fetched from each input's URL into pot's state and verified there with `ssh-keygen -Y verify -n git`.
+- **The grants file stays a person's.** The acceptance is computed at each start, recorded in the run's `start`
+  event and shown by `pot explain`; nothing is written to the grants file, which still holds only what a person
+  granted (and signed, with the root's commit).
+
+Costs accepted:
+
+- **Every moved node must be a signed release, or what one locks.** A transitive input is accepted only when it is
+  locked exactly as a moved release's own `flake.lock` locks it. A `nix flake update` that also moves nixpkgs, a
+  branch or commit pin, or an added input asks, as before.
+- **`flake.nix` may change in its release tag literals.** A literal is also a value its code can read; the code
+  around it is the granted code, so a literal swap cannot add code, but it can choose among what the granted code
+  already does.
+- **Only the moves since the grant are judged.** A tree whose other changes were accepted by the narrowed
+  comparison (the kit as built unchanged) and then moves a pin asks once, since the two rules do not combine.
+- **A signer's key is the whole trust.** A leaked or retired key is handled by editing `releaseSigners`; the signers
+  file is read at each check, so cached tags stop verifying too. An agent-signed tag is not a release signer's, and
+  falls back to `pot grant`, as it should.
+- **The first start after an upgrade fetches,** once per tag; offline it asks. The fetch is the host's git, with the
+  host's credentials, as `ls-remote` already was for submodule kits.
+
+Reopen when a release flow signs tags with a key that is not a person's (a lander's `release@` key under a signed
+plan), or when grants gain delegation.
+
 ## Sources
 
 - [pot](reference/pot.md), [siblings, not nesting](reference/pot-siblings.md)
 - [pot's contracts](../contracts/README.md)
-- [core/pot.py](../core/pot.py): finding the flake, the bundle and the missing-bundle warning, grants, runs
+- [core/pot.py](../core/pot.py): finding the flake, the bundle and the missing-bundle warning, grants, runs;
+  `release_moves`, `scion_accepts`
+- [core/releases.py](../core/releases.py): fetching and verifying release tags
 - [lib/kits-for.nix](../lib/kits-for.nix): `kitsFor`, which any producer calls
 - graft's [decisions](https://github.com/danielnaab/graft/blob/v2/docs/decisions.md): "Enforce the boundary in a
   sandbox, not in rules", "Roots grant reach; kits only ask" and "One repository, one-way arrows between graft and

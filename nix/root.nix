@@ -28,6 +28,8 @@
 #                                   # image ? docker's empty image (localhost/pot-empty:1) }
 #     defaultBackend ? null;        # the backend of a context whose backend is "auto": bubblewrap (Seatbelt on
 #                                   # Darwin) unless "container"
+#     releaseSigners ? null;        # 0.6.0: an allowed_signers file (a path): a changed source that only moves pins
+#                                   # to release tags these signers signed keeps its grant (never the repository's)
 #   }
 #
 # The result is the root's `pot` (passthru.root: the manifest; passthru.backend: the bubblewrap
@@ -58,6 +60,7 @@ let potSrc0 = potSrc; in
 , clones ? { }
 , container ? null
 , defaultBackend ? null
+, releaseSigners ? null
 }:
 
 let
@@ -259,6 +262,8 @@ let
     tools = map toString tools;
     inspectTools = map toString inspectTools;
     caBundle = if caBundle == null then null else "${caBundle}";
+    releaseSigners = if releaseSigners == null then null else "${releaseSigners}";
+    sshKeygen = if releaseSigners == null then null else "${pkgs.openssh}/bin/ssh-keygen";
     system = pkgs.stdenv.hostPlatform.system;
     git = "${pkgs.gitMinimal}/bin/git";
     nixpkgs = builtins.unsafeDiscardStringContext (toString pkgs.path);

@@ -77,7 +77,7 @@ A root is where the person's authority lives. A run never writes a root in place
 | Root | Where | For |
 |---|---|---|
 | A home-manager root | `programs.pot` in your home-manager configuration, from `inputs.pot.homeManagerModules.pot` | Your own machine. Its source repository is a [root repository](#root-repositories). |
-| pot's default root | `nix run github:danielnaab/pot/v0.5.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
+| pot's default root | `nix run github:danielnaab/pot/v0.6.0 -- CMD` (`packages.<system>.default` and `apps.<system>.default`, also named `pot`) | Someone without a root. Its grants file is `~/.config/pot/grants.json`. |
 | A minimal root of your own | `pot init DIR` writes `DIR/flake.nix`, built with `pot.lib.mkRoot` | A start for a root that you then edit and commit. |
 
 pot's default root and the root that `pot init` writes have pot's default contexts, hidden list and standard tools,
@@ -105,6 +105,7 @@ pot.lib.mkRoot {
   limits ? { memoryMax = "50%"; tasksMax = 2048; };
   clones ? { keepDays = 14; maxSize = "20G"; };
   container ? null; defaultBackend ? null;
+  releaseSigners ? null;
 }
 ```
 
@@ -137,6 +138,7 @@ and no default root baked into a wrapper.
 | `inspect.homeManagerFiles` | Default `true`: `inspect` also reads home-manager's generated files. |
 | `tools` | Packages on every run's `PATH`, after the standard set. |
 | `caBundle` | A CA bundle for every run, such as a corporate proxy's. |
+| `releaseSigners` | 0.6.0: an `allowed_signers` file (a path, copied into the store), such as `pkgs.writeText "release_signers" ''daniel@person namespaces="git" sk-ssh-ed25519@openssh.com AAAA…''`. A kit whose source changed only by moving pins to release tags that one of these signers signed keeps its grant ([Release moves](#release-moves)). Only the root names release signers; a repository never does. Default `null`: every changed source asks, as before. |
 | `kits.<name>` | Root kits: agent kits and standing reach ([Kits](#kits)). A name is `NAME`, or `NAME@INSTANCE` for an instance of an agent kit (`claude-code@personal`). |
 | `repoKits."<pattern>"` | A repo kit for a repository with no `pot-kits` bundle of its own. The pattern is a [normalised origin](#identity), with `*` and `?` (`"platform-vm:2222/daniel/graft"`), or a URL, which is normalised. |
 | `contexts.<name>` | Changes to the contexts, and new ones ([Contexts](#contexts)). |
@@ -835,9 +837,45 @@ is `sha256-` and the base64 of the SHA-256 of the sorted, unique canonical lines
   holds. pot records the kit as built at each run whose tree equals its grant's, so a machine whose repository
   moved past the granted tree before its first v2.17.0 run asks once more, then not again for such changes. A pot from before v2.17.0 asks on any change to the tree; the file's shape is the same for both
   ([grants/1](../../contracts/grants-1.md#compatibility)).
+- **Release moves** (0.6.0, with the root's `releaseSigners`): see below. Never written to the file.
 - **Hidden, not secret.** No run can see or write the grants file: it is unmounted and unwritable. It is not
   confidential: its committed contents are readable through the root's git history wherever the root's `.git` is
   readable, `inspect` included. Grants hold no secrets.
+
+### Release moves
+
+With the root's `releaseSigners` (0.6.0), a powerful grant also holds when its kit's source changed only by
+moving pins to release tags that a release signer signed. The decision was made at the tag, so the grant asks
+nothing new. pot computes it at each start and writes nothing to the grants file, which stays the record of what a
+person granted. The requests are still compared: a kit that asks for more asks, whatever its source.
+
+- **A submodule kit** whose gitlink moved, since its grant's `{ commit; tag; }`, to a release tag (`vX.Y.Z`) at its
+  URL whose tag object is signed by a release signer.
+- **A repo kit** whose flake directory's tree, since its grant's tree, changed in these ways and no other:
+  - `flake.lock`: each added or changed node is an input pinned to a release tag (its `original.ref` is `vX.Y.Z`;
+    `github` and `git` inputs) whose locked `rev` is that tag's commit at the input's URL, and the tag is signed by a
+    release signer; or a transitive input locked exactly as one of those releases' own `flake.lock` (at the tag)
+    locks it. Its version, its root node and every other node are unchanged; removed nodes are fine. So a branch
+    pin (`nixos-25.05`, `main`), a commit pin, an unsigned or person-less tag, or a new input still asks.
+  - `flake.nix`: differs in release tag literals (`v0.3.0` to `v0.4.0`, as in `github:o/r/v0.3.0`) alone.
+  - a gitlink in the flake directory moved to the committed submodule's commit, a release tag signed by a release
+    signer at the submodule's URL.
+
+  Any other change in the flake directory (another file, an added or deleted path) asks, as before.
+- **The tags** are fetched from each URL (`git fetch --depth=1` of the one tag) into `cache/releases/` in pot's
+  state, never into a workspace, and read from there at later starts, so a start after the first needs no
+  network. The tag object must name the commit as a `commit`, under its own name, and carry an SSH signature that
+  `ssh-keygen -Y verify -n git` accepts against `releaseSigners` for one of its principals. A fetch that fails
+  (offline, the URL gone, a timeout of 60 seconds), a lightweight tag, a GPG signature or another signer asks, as
+  before: it fails closed. The signers file is read at each check, so a key taken out of it stops a cached tag
+  from verifying.
+- **Shown:** `pot explain` prints `accepted   release move to tuteur v0.3.0, signed by daniel@person (KIT)` for
+  each move, and the run record's `start` event gives the kit's moves as `accepted` ([runs/1](../../contracts/runs-1.md)).
+  When a repo kit's changed source asks while `releaseSigners` is set, the diffstat in the prompt and the 125 message
+  ends with why it is not a release move: `not a signed release move: flake.lock input nixpkgs moved, and is no
+  signed release's`.
+- **`pot grant`** shows a kit held by release moves as granted; granting it again records the new source as
+  before.
 
 ### What pot checks at start
 
@@ -2138,6 +2176,7 @@ The message says why. `pot` never runs the command with a weaker policy, a weake
 | `trees/<id>/slot-N` | The siblings' slots of the tree whose top run is `<id>` (16 files, each held with `flock` by a sibling's broker while it runs); removed when that run ends. |
 | `state/<hash>/<name>` | A `state` request's directory, one per kit, workspace (or `none`) and context; or per kit for `shared`. |
 | `cache/kits/` | The built `pot-kits`, or that the flake has none, by the flake directory's tree hash. |
+| `cache/releases/` | 0.6.0: the release tags fetched to check [release moves](#release-moves), one bare repository per URL. Safe to delete: the next check fetches again. |
 | `cache/sources/` | For each repo kit, the hash of the kit as built for each granted tree: what lets a grant hold across a change outside the kit's defining files ([The grants file](#the-grants-file)). |
 | `cache/scions.json` | Verified submodule releases, by URL and commit. |
 | `cache/probe-<hash>` | The backend's probed guarantees, per backend build. |

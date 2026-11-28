@@ -78,6 +78,14 @@ machine-independent.
   is stricter, never in conflict, and the grant it writes is one that a newer pot reads. Taking a new producer (tuteur, or graft before it) into a
   consumer changes its `flake.lock`, so it asks for one `pot grant NAME` for that consumer's repo kit, and for no
   other kit.
+- **Release moves (0.6.0)** are also the reader's comparison. With the root's `releaseSigners` (an
+  `allowed_signers` file), a powerful grant also holds when the source changed only by moving pins to release tags
+  signed by one of those signers: a submodule kit's gitlink, or a repo kit's flake directory whose `flake.lock`
+  nodes each moved to such a tag at its URL (or are locked as one of those releases' own `flake.lock` locks them),
+  whose `flake.nix` differs in release tag literals alone, and whose gitlinks moved to such tags
+  ([Release moves](../docs/reference/pot.md#release-moves)). Nothing of it is written: the file's shape and what pot
+  writes are unchanged, and a pot without the rule (or a root without `releaseSigners`) asks, which is stricter and
+  never in conflict.
 - **Which tree is "now"** is also the reader's, and the writer's, computation, not the file's shape. Since 0.4.0
   pot takes the tree the next commit holds: the index with the flake directory's changed and deleted tracked files
   added (as `git commit -a` adds them), or, in a commit's hook, the index git gives the hook. Before 0.4.0 it was
@@ -86,6 +94,7 @@ machine-independent.
 
 ## Sources
 
-- [core/compose.py](../core/compose.py): `parse_grants`, `digest`, `write_grant`
+- [core/compose.py](../core/compose.py): `parse_grants`, `digest`, `write_grant`, `grant_status`
+- [core/pot.py](../core/pot.py): `narrowed`, `release_moves`, `scion_accepts`
 - [tests/golden.json](../tests/golden.json): the golden canonical items and digests
 - [pot's reference: The grants file](../docs/reference/pot.md#the-grants-file)

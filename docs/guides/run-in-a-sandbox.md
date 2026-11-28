@@ -202,7 +202,7 @@ A repository's own needs are its repo kit: the packages its work needs, paths to
 
    ```nix
    {
-     inputs.pot.url = "github:danielnaab/pot/v0.5.0";
+     inputs.pot.url = "github:danielnaab/pot/v0.6.0";
      outputs = { pot, ... }: let pkgs = pot.inputs.nixpkgs.legacyPackages.x86_64-linux; in {
        packages.x86_64-linux.pot-kits = pot.lib.pot.kitsFor {
          inherit pkgs;
@@ -253,7 +253,7 @@ If the repository's `ensure.sh` or `justfile` builds tools with `nix`, make it u
 | Root | Use it when | Start it with |
 |---|---|---|
 | A home-manager root | You manage your home with home-manager. | `programs.pot` (below) |
-| pot's default root | You have no root and want to try `pot`. | `nix run github:danielnaab/pot/v0.5.0 -- claude` |
+| pot's default root | You have no root and want to try `pot`. | `nix run github:danielnaab/pot/v0.6.0 -- claude` |
 | A minimal root of your own | You want a root without home-manager. | `pot init ~/src/pot-root`, then the steps that it prints |
 
 pot's default root and the root that `pot init` writes work without home-manager. Each has a
